@@ -15,7 +15,7 @@ const goodSummary = {
   follow_ups: ["add cache warmup"], services: ["checkout"], tags: ["cache"], confidence: "high",
 };
 
-function fakes(opts: { messages?: SlackMessage[]; isPublic?: boolean; llmReplies?: string[] } = {}) {
+function fakes(opts: { messages?: SlackMessage[]; kind?: "public" | "private" | "dm" | "unknown"; allowPrivate?: boolean; llmReplies?: string[] } = {}) {
   const sent: { text: string; blocks?: unknown[] }[] = [];
   const notifier: Notifier = {
     reply: vi.fn(async (_t, text, blocks) => void sent.push({ text, blocks })),
@@ -34,14 +34,14 @@ function fakes(opts: { messages?: SlackMessage[]; isPublic?: boolean; llmReplies
   const slack: SlackReader = {
     thread: vi.fn(async () => messages),
     permalink: vi.fn(async (_c: string, ts: string) => `https://slack.test/p/${ts}`),
-    channel: vi.fn(async () => ({ id: "C1", name: "ops", isPublic: opts.isPublic ?? true })),
+    channel: vi.fn(async () => ({ id: "C1", name: "ops", kind: opts.kind ?? "public" })),
     userName: vi.fn(async (id) => (id === "U1" ? "Ann" : id)),
   };
   const replies = [...(opts.llmReplies ?? [JSON.stringify(goodSummary)])];
   const llm: LlmClient = {
     chat: vi.fn(async () => ({ text: replies.shift() ?? replies[0] ?? "", usage: { promptTokens: 1, completionTokens: 1 } })),
   };
-  const ctx: SkillContext = { notifier, slack, llm, onyx, log, botName: "moose", maxInputTokens: 60000 };
+  const ctx: SkillContext = { notifier, slack, llm, onyx, log, botName: "moose", maxInputTokens: 60000, allowPrivateChannels: opts.allowPrivate ?? false };
   return { sent, notifier, onyx, docs, slack, llm, ctx };
 }
 const task = (over: Partial<Task> = {}): Task => ({
@@ -85,7 +85,7 @@ describe("kb-collect", () => {
   });
 
   it("refuses private channels and top-level mentions without touching Onyx", async () => {
-    const priv = fakes({ isPublic: false });
+    const priv = fakes({ kind: "private" });
     await createKbCollect().run(task(), priv.ctx);
     expect(priv.sent[0]!.text).toMatch(/public/);
     expect(priv.onyx.upsert).not.toHaveBeenCalled();
@@ -95,6 +95,37 @@ describe("kb-collect", () => {
     await createKbCollect().run(task({ thread: undefined }), top.ctx);
     expect(top.sent[0]!.text).toMatch(/inside the thread/);
     expect(top.onyx.upsert).not.toHaveBeenCalled();
+  });
+
+  it("records a private-channel thread only when enabled, and labels the entry and the reply", async () => {
+    const on = fakes({ kind: "private", allowPrivate: true });
+    await createKbCollect().run(task(), on.ctx);
+    expect(on.docs).toHaveLength(1);
+    expect(on.docs[0]!.metadata).toMatchObject({ source_visibility: "private-channel" });
+    expect(on.docs[0]!.sections[0]!.text).toContain("Source: a private Slack channel");
+    expect(JSON.stringify(on.sent[0]!.blocks)).toMatch(/private channel.*visible to everyone/);
+
+    const pub = fakes();
+    await createKbCollect().run(task(), pub.ctx);
+    expect(pub.docs[0]!.metadata).toMatchObject({ source_visibility: "public-channel" });
+    expect(JSON.stringify(pub.sent[0]!.blocks)).not.toMatch(/private channel/);
+  });
+
+  it("never records DMs, and explains a channel it cannot see", async () => {
+    const dm = fakes({ kind: "dm", allowPrivate: true });
+    await createKbCollect().run(task(), dm.ctx);
+    expect(dm.sent[0]!.text).toMatch(/direct messages/);
+    expect(dm.onyx.upsert).not.toHaveBeenCalled();
+
+    const off = fakes({ kind: "unknown" });
+    await createKbCollect().run(task(), off.ctx);
+    expect(off.sent[0]!.text).toMatch(/public/);
+    expect(off.slack.thread).not.toHaveBeenCalled();
+
+    const on = fakes({ kind: "unknown", allowPrivate: true });
+    await createKbCollect().run(task(), on.ctx);
+    expect(on.sent[0]!.text).toMatch(/groups:read.*groups:history/);
+    expect(on.onyx.upsert).not.toHaveBeenCalled();
   });
 
   it("says so when Onyx is unconfigured or the thread is empty", async () => {

@@ -157,6 +157,8 @@ export interface RenderMeta {
   participants: string[];
   permalink: string;
   redactions: number;
+  /** The thread came from a private channel (stored visibly to all KB readers). */
+  privateSource?: boolean;
   filtered: number;
   budgetDropped: number;
   parts: number;
@@ -175,6 +177,7 @@ export function renderMarkdown(s: Summary, meta: RenderMeta): string {
     `Source: ${meta.permalink}`,
     meta.participants.length ? `Participants: ${meta.participants.join(", ")}` : "",
     `Outcome: ${s.outcome} · Confidence: ${s.confidence}`,
+    meta.privateSource ? "Source: a private Slack channel" : "",
     meta.redactions ? `${meta.redactions} secret(s) redacted before storage` : "",
     meta.filtered ? `${meta.filtered} low-signal message(s) filtered (acknowledgements, repeated bot noise)` : "",
     meta.parts > 1 ? `Long thread: summarized in ${meta.parts} parts` : "",

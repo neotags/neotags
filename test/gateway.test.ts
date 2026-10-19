@@ -44,6 +44,11 @@ describe("loadConfig", () => {
     expect(c.bot.name).toBe("neotags");
     expect(c.onyx.ingestionPath).toBe("/api/ingestion");
   });
+  it("keeps private-channel recording off unless enabled", () => {
+    expect(loadConfig(env).slack.allowPrivateChannels).toBe(false);
+    const on = loadConfig({ ...env, NEOTAGS_CONFIG: "f" }, () => "slack:\n  allowPrivateChannels: true\n");
+    expect(on.slack.allowPrivateChannels).toBe(true);
+  });
   it("reads yaml and requires secrets", () => {
     const c = loadConfig({ ...env, NEOTAGS_CONFIG: "f" }, () => "bot:\n  name: moose\n");
     expect(c.bot.name).toBe("moose");

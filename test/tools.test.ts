@@ -99,12 +99,27 @@ describe("createSlackReader", () => {
     expect(await createSlackReader(a).userName("U9")).toBe("U9");
   });
 
-  it("classifies public vs private/DM channels", async () => {
+  it("classifies channels as public, private or dm", async () => {
     const r = (c: object) => createSlackReader(api({ info: vi.fn().mockResolvedValue({ channel: c }) })).channel("C1");
-    expect((await r({ id: "C1", name: "ops" })).isPublic).toBe(true);
-    expect((await r({ id: "G1", name: "x", is_private: true })).isPublic).toBe(false);
-    expect((await r({ id: "D1", is_im: true })).isPublic).toBe(false);
-    expect((await createSlackReader(api({ info: vi.fn().mockResolvedValue({}) })).channel("C1")).isPublic).toBe(false);
+    expect((await r({ id: "C1", name: "ops" })).kind).toBe("public");
+    expect((await r({ id: "C2", name: "secret", is_private: true })).kind).toBe("private");
+    expect((await r({ id: "D1", is_im: true })).kind).toBe("dm");
+    expect((await r({ id: "G1", is_mpim: true, is_private: true })).kind).toBe("dm"); // group DM is not a private channel
+    expect((await createSlackReader(api({ info: vi.fn().mockResolvedValue({}) })).channel("C1")).kind).toBe("unknown");
+  });
+
+  it("reports a channel it cannot describe as unknown rather than failing", async () => {
+    const boom = (data: object) => Object.assign(new Error("An API error occurred"), { data });
+    const r = (data: object) =>
+      createSlackReader(api({ info: vi.fn().mockRejectedValue(boom(data)) })).channel("C9");
+    // private channel without groups:read (the real production case), DM scopes, bot not a member
+    expect(await r({ error: "missing_scope", needed: "groups:read" })).toMatchObject({ id: "C9", kind: "unknown" });
+    expect((await r({ error: "missing_scope", needed: "im:read" })).kind).toBe("unknown");
+    expect((await r({ error: "missing_scope", needed: "mpim:read" })).kind).toBe("unknown");
+    expect((await r({ error: "channel_not_found" })).kind).toBe("unknown");
+    // a missing channels:read is a real misconfiguration: surface it
+    await expect(r({ error: "missing_scope", needed: "channels:read" })).rejects.toThrow();
+    await expect(r({ error: "ratelimited" })).rejects.toThrow();
   });
 
   it("returns the permalink", async () => {

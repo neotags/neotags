@@ -8,11 +8,16 @@ export interface SlackMessage {
   bot: boolean;
 }
 
+export type ChannelKind =
+  | "public"
+  | "private" // private channel
+  | "dm" // 1:1 or group DM
+  | "unknown"; // Slack will not describe it: bot not a member, or scope missing for private channels
+
 export interface ChannelInfo {
   id: string;
   name: string;
-  /** Public channel: not private, not a DM/group DM. */
-  isPublic: boolean;
+  kind: ChannelKind;
 }
 
 export interface SlackReader {
@@ -117,12 +122,27 @@ export function createSlackReader(api: SlackWebApi): SlackReader {
     },
 
     async channel(channel) {
-      const c = (await api.conversations.info({ channel })).channel;
-      return {
-        id: c?.id ?? channel,
-        name: c?.name ?? channel,
-        isPublic: Boolean(c) && !c!.is_private && !c!.is_im && !c!.is_mpim,
-      };
+      try {
+        const c = (await api.conversations.info({ channel })).channel;
+        const kind: ChannelKind = !c
+          ? "unknown"
+          : c.is_im || c.is_mpim
+            ? "dm"
+            : c.is_private
+              ? "private"
+              : "public";
+        return { id: c?.id ?? channel, name: c?.name ?? channel, kind };
+      } catch (err) {
+        // Describing a private channel, DM or group DM needs groups:read / im:read / mpim:read, and a
+        // channel the bot is not in is "not found". Report "unknown" so the skill can answer helpfully. A
+        // missing channels:read on a public channel is a real configuration error and still throws.
+        const d = (err as { data?: { error?: string; needed?: string } }).data;
+        const privateScope = /^(groups|im|mpim):/.test(d?.needed ?? "");
+        if ((d?.error === "missing_scope" && privateScope) || d?.error === "channel_not_found") {
+          return { id: channel, name: channel, kind: "unknown" };
+        }
+        throw err;
+      }
     },
   };
 }

@@ -48,6 +48,7 @@ const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
         onyx,
         log,
         botName: cfg.bot.name,
+        allowPrivateChannels: cfg.slack.allowPrivateChannels,
         maxInputTokens: cfg.llm.summarizeMaxInputTokens,
       },
   }),

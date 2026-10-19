@@ -15,12 +15,13 @@ const MAX_PARTS = 8;
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-function resultBlocks(s: Summary, id: string, redactions: number, permalink: string) {
+function resultBlocks(s: Summary, id: string, redactions: number, permalink: string, isPrivate: boolean) {
   const lines = [
     `*Saved to the knowledge base: ${esc(s.title)}*`,
     esc(clip(s.summary, 600)),
     s.root_cause && s.root_cause !== "unknown" ? `*Root cause:* ${esc(clip(s.root_cause, 300))}` : "",
     s.confidence === "low" ? "_Low confidence: the thread did not reach a clear conclusion._" : "",
+    isPrivate ? ":lock: _This thread is from a private channel. The entry is visible to everyone who can search the knowledge base. Use Undo if that is not what you want._" : "",
   ].filter(Boolean);
   return [
     { type: "section", text: { type: "mrkdwn", text: lines.join("\n") } },
@@ -58,9 +59,18 @@ export function createKbCollect(): Skill {
 
       const channel = task.reply.channel;
       const info = await ctx.slack.channel(channel);
-      if (!info.isPublic) {
-        return reply("For now I only record threads from *public* channels.");
+      if (info.kind === "dm") return reply("I don't record direct messages.");
+      if (info.kind === "unknown") {
+        return reply(
+          ctx.allowPrivateChannels
+            ? "I can't see this channel. If it's private, invite me to it and make sure the Slack app has the `groups:read` and `groups:history` scopes."
+            : "I can't see this channel, so I only record threads from *public* channels I'm in. (Private channels need to be enabled for me.)",
+        );
       }
+      if (info.kind === "private" && !ctx.allowPrivateChannels) {
+        return reply("For now I only record threads from *public* channels. Private channels aren't enabled for me.");
+      }
+      const isPrivate = info.kind === "private";
 
       const all = await ctx.slack.thread(channel, task.thread.ts);
       const raw = all.filter((m) => m.ts !== task.triggerTs);
@@ -98,6 +108,7 @@ export function createKbCollect(): Skill {
         participants,
         permalink,
         redactions: prepared.redactions,
+        privateSource: isPrivate,
         filtered: prepared.filtered,
         budgetDropped: prepared.budgetDropped,
         parts,
@@ -124,6 +135,7 @@ export function createKbCollect(): Skill {
           slack_user: task.actor.id,
           confidence: summary.confidence,
           origin: "neotags",
+          source_visibility: isPrivate ? "private-channel" : "public-channel",
           schema_version: SCHEMA_VERSION,
           message_count: String(prepared.msgs.length),
         },
@@ -136,7 +148,7 @@ export function createKbCollect(): Skill {
 
       await reply(
         `Saved to the knowledge base: ${summary.title}`,
-        resultBlocks(summary, id, prepared.redactions, permalink),
+        resultBlocks(summary, id, prepared.redactions, permalink, isPrivate),
       );
     },
 

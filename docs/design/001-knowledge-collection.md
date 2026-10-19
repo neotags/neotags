@@ -21,7 +21,7 @@ It also lays down the platform skeleton (Slack gateway, agent runtime, tool/skil
 Goals
 - Mention-triggered, in-thread knowledge capture; result visible in Onyx search within minutes.
 - Idempotent: recording the same thread twice updates the same KB document rather than duplicating it.
-- Safe by default: no private content leaks into a broadly searchable KB; secrets are redacted.
+- Safe by default: private-channel content is not recorded into a broadly searchable KB unless explicitly enabled (`slack.allowPrivateChannels`); secrets are redacted.
 - Bot name, allowed channels and Onyx target are configuration, not code.
 - Skeleton is reusable: a new capability = a new skill + tools, no gateway changes.
 
@@ -117,7 +117,7 @@ Document shape (**verified against Onyx `v5.0.0-beta.1` source**, `backend/onyx/
 - Verified API facts: `POST /onyx-api/ingestion` upserts by `document.id` and returns `{document_id, already_existed}`; `DELETE /onyx-api/ingestion/{id}` only deletes docs created via the ingestion API. `metadata` values must be strings or lists of strings (we stringify everything). `source` may be omitted. `doc_updated_at` defaults to now.
 - Auth: the endpoints require the **`MANAGE_CONNECTORS`** permission, so neotags needs an Onyx API key/service account holding it (least privilege: scoped to the target cc-pair if group scoping is available in 5.0).
 - Target: `cc_pair_id` defaults to **1, the public default pair**, which matches "visible to everyone" for now. For OIDC-based ACLs later, create a dedicated cc-pair and set `cc_pair_id` in config. Delete/re-ingest must use a principal with EDIT access to the doc's cc-pair(s).
-- Visibility: ingestion-API docs land in a dedicated connector/cc-pair; document-set and who can see it is decided in Q3. Until then v1 only accepts **public channels**.
+- Visibility: ingestion-API docs land in a dedicated connector/cc-pair; document-set and who can see it is decided in Q3. Until ACLs exist, entries are visible to everyone who can search the KB, so v1 records **public channels** by default; private channels are an explicit opt-in (`slack.allowPrivateChannels`, see §8). DMs and group DMs are never recorded.
 
 ## 6. Configuration
 
@@ -126,7 +126,7 @@ bot:
   name: moose                 # display name only; matching uses bot user ID from auth.test
 slack:
   mode: events-http           # or socket
-  allowed_channels: ["C0123…"]   # empty = all public channels the bot is in
+  allowed_channels: ["C0123…"]   # empty = all channels the bot is in
   allowed_users: []           # empty = everyone in workspace
 onyx:
   base_url: https://onyx.example.com
@@ -155,7 +155,8 @@ Mention detection uses the bot's **user ID**, so renaming the bot (Slack app dis
 
 ## 8. Security & audit
 
-- Least-privilege Slack scopes. `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `reactions:write`, `users:read`; interactivity is enabled for the Undo button. No private-channel/DM scopes in v1.
+- Least-privilege Slack scopes. `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `reactions:write`, `users:read`, plus `groups:read` and `groups:history` only when private channels are enabled; interactivity is enabled for the Undo button. No private-channel/DM scopes in v1.
+- Private channels: off by default. When enabled the bot must be invited, the app needs `groups:read` + `groups:history`, entries are labelled (`source_visibility` metadata, a "Source: a private Slack channel" footer) and the reply warns that the entry is visible KB-wide, with Undo one click away.
 - Denied requests (channel/user not allowlisted) get a quiet 🚫 reaction rather than a public reply.
 - Channel allowlist + user allowlist enforced in the gateway.
 - Redaction before LLM and before storage; Slack content is treated as untrusted input (prompt injection): the summarizer has no tools, the thread is delimited as data, and the write action is performed by code, not chosen by the model.
@@ -210,7 +211,7 @@ Not bugs: deliberate v1 scope. Grouped by area; none are scheduled.
 - No check for a near-duplicate entry already in the KB.
 
 **Knowledge base and visibility**
-- Public channels only; private channels and DMs are refused until Slack-to-Onyx ACL mapping exists (OIDC).
+- Private channels are opt-in (`slack.allowPrivateChannels`, default off): once enabled, their content is visible to everyone who can search the KB, flagged by `source_visibility: private-channel` metadata and a notice in the reply. Real per-channel access control needs Slack-to-Onyx ACL mapping (OIDC). DMs and group DMs are never recorded.
 - Entries are visible to everyone in Onyx (cc-pair 1, decision Q3).
 - Any user allowed to use the bot can click Undo, not only the person who recorded the thread.
 - Slack-side edits or deletions are not propagated to an existing entry; re-recording the thread is the update path.

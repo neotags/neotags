@@ -12,6 +12,8 @@ export interface SkillContext {
   onyx?: OnyxClient;
   log: Logger;
   botName: string;
+  /** Record threads from private channels (config slack.allowPrivateChannels). DMs are never recorded. */
+  allowPrivateChannels: boolean;
   /** Prompt budget for summarization, in tokens (estimated). */
   maxInputTokens: number;
 }

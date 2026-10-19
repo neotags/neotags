@@ -15,6 +15,7 @@ config:
     port: 3000
     allowedChannels: []
     allowedUsers: []
+    allowPrivateChannels: false   # true also records private-channel threads (see config example)
   onyx:
     baseUrl: https://onyx.example.com
     ingestionPath: /api/ingestion

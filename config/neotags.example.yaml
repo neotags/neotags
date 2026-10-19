@@ -4,6 +4,8 @@ slack:
   port: 3000
   allowedChannels: []    # empty = all channels the bot is in
   allowedUsers: []       # empty = everyone
+  allowPrivateChannels: false  # true: also record private-channel threads (bot invited; groups:read + groups:history).
+  #                            # KB entries are visible to everyone who can search the KB. DMs are never recorded.
 onyx:
   baseUrl: https://onyx.example.com
   ingestionPath: /api/ingestion

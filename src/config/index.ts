@@ -11,6 +11,9 @@ const fileSchema = z.object({
       allowedChannels: z.array(z.string()).default([]),
       // empty = everyone in the workspace
       allowedUsers: z.array(z.string()).default([]),
+      // Record threads from private channels too (bot must be invited; needs groups:read + groups:history).
+      // Off by default: KB entries are visible to everyone who can search the KB. DMs are never recorded.
+      allowPrivateChannels: z.boolean().default(false),
     })
     .prefault({}),
   onyx: z
