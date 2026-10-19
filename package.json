@@ -2,6 +2,7 @@
   "name": "neotags",
   "version": "0.1.0",
   "description": "Self-hosted agent teammate for Slack (and later GitHub/GitLab)",
+  "license": "Apache-2.0",
   "private": true,
   "type": "module",
   "engines": {
