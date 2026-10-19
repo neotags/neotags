@@ -65,9 +65,9 @@ Language: **TypeScript / Node** (pi is TypeScript; one runtime with the future S
 2. Gateway acks; bot adds 👀 reaction to the trigger message.
 3. Guardrails check: channel is public and allowlisted (or explicitly opted in), user is allowed, bot is a member of the channel.
 4. `slack.read_thread` fetches all replies (paginated), resolves user IDs → display names, `<@U123>` mentions, permalinks, and file/attachment names (v1: text only; file contents skipped, filenames listed).
-5. `redact` removes secrets before anything goes to the LLM or Onyx: token/key regexes (AWS keys, `xox*`, `ghp_*`, JWTs, private key blocks, `password=`), plus an entropy check. Redactions are counted and noted in the summary footer.
-6. LLM summarizes into the fixed schema below. Output is validated against a JSON schema; one retry on invalid output.
-7. `onyx.ingest` upserts the document (see §5).
+5. **Prepare** (`src/skills/kb-collect/prepare.ts`): drop low-signal messages (pure acknowledgements such as "👍"/"thanks"; empties) but keep confirmations like "done"/"fixed"; collapse repeated bot alerts into one message with a count; redact secrets per message (token/key regexes, `password=` assignments, URL credentials, an entropy check; the count is reported in the doc); clip absurdly long messages; number what is left as `#1…#n` so the summary can cite messages.
+6. **Summarize** (`summary.ts`): if the transcript fits the prompt budget, one tool-less LLM call fills the schema below. Longer threads use **map-reduce**: each consecutive part yields working notes (symptoms, what was tried and ruled out, findings, actions, key messages), then one final call turns the ordered notes plus the opening and closing messages into the summary. Parts run with bounded concurrency (3). Beyond 8 parts the thread is thinned first: least informative messages go first, from the middle outward, technical content last, always keeping the opening and the last few messages. Output is validated; one retry on invalid output.
+7. **Store**: `onyx.ingest` upserts the document (see §5) with two sections: the Markdown summary, and a verbatim "key excerpts" section (errors, commands, links, conclusions) so exact-match search works even when the summary paraphrases. The `evidence` message numbers the model cites are validated and rendered as "Key messages" with Slack permalinks.
 8. Bot replies in-thread with the summary, a link to the KB entry, and an **Undo** button; ✅ replaces 👀. On failure: ❌ plus a short reason (full detail only in logs).
 
 ### Summary schema
@@ -77,13 +77,17 @@ Language: **TypeScript / Node** (pi is TypeScript; one runtime with the future S
 | `title` | Short, searchable, states the problem (not "Thread about X") |
 | `type` | `incident` · `troubleshooting` · `howto` · `decision` · `other` |
 | `summary` | 2–4 sentences |
-| `symptoms` / `problem` | What was observed, with error strings verbatim |
+| `problem` | What was observed, with error strings verbatim |
 | `root_cause` | Or "unknown" — never invented |
 | `resolution` | Steps taken, commands verbatim in code blocks |
-| `follow_ups` | Open actions / unresolved questions |
+| `ruled_out` | Hypotheses tried and disproved, and why (what a future reader would otherwise retry) |
+| `outcome` | `resolved` · `mitigated` · `unresolved` · `unknown` (also stored as Onyx metadata for filtering) |
+| `follow_ups` | Open actions / unresolved questions, with owners when stated |
 | `services`, `tags` | For metadata filtering |
-| `participants` | Display names |
+| `evidence` | Up to 6 message numbers that support the cause and resolution; hallucinated numbers are dropped |
 | `confidence` | `high/medium/low`; low when the thread has no clear conclusion |
+
+Participants are computed from the thread, not generated. Titles are capped at 80 characters in the prompt. Documents carry `schema_version` metadata (currently `2`) so entries can be found and re-summarized when the layout or prompt changes.
 
 The prompt must instruct: only state what the thread supports; mark unknowns explicitly. Rendered as Markdown into Onyx sections.
 
@@ -183,13 +187,44 @@ test/
 
 ## 11. Milestones
 
-Status (2026-10): milestones 1–3 are implemented and unit-tested with fakes (Slack, Onyx, LLM), including the LLM router, thread reader, redaction, summarizer, Onyx upsert/delete and the Undo button. Verified against a real OpenAI-compatible gateway (2026-10-19, flash-class model for both router and summarizer): plain completion, JSON-mode routing of five phrasings including a prompt-injection attempt, schema-valid summary of a sample thread with a planted secret, and a tool call through the pi `Agent` where the guard blocked a restart and the model reported the denial. No `compat` flags were needed. Not yet verified against live Slack or the live Onyx instance. Known v1 limits: over-long threads are truncated in the middle rather than map-reduced; attachments are listed by name only; denied requests get a 🚫 reaction.
+Status (2026-10): milestones 1–3 are implemented and unit-tested with fakes (Slack, Onyx, LLM), including the LLM router, thread reader, redaction, summarizer, Onyx upsert/delete and the Undo button. Verified against a real OpenAI-compatible gateway (2026-10-19, flash-class model for both router and summarizer): plain completion, JSON-mode routing of five phrasings including a prompt-injection attempt, schema-valid summary of a sample thread with a planted secret, and a tool call through the pi `Agent` where the guard blocked a restart and the model reported the denial. No `compat` flags were needed. Not yet verified against live Slack or the live Onyx instance. Known limitations are listed in the next section. Checked live on a noisy 28-message incident thread (single pass and forced map-reduce): exact error strings, cause chain, ruled-out hypotheses, fix command, follow-up owners and cited messages were captured; chatter was excluded.
 
 
 1. Skeleton: config, Slack gateway, health endpoint, mention → "pong"; deployed to EKS.
 2. `slack.read_thread` + redaction + summarizer producing the schema (print in thread, no Onyx write).
 3. Onyx ingest/delete, Undo button, idempotent re-record.
 4. Guardrails, audit, metrics, Helm chart, runbook.
+
+### Known limitations (backlog)
+
+Not bugs: deliberate v1 scope. Grouped by area; none are scheduled.
+
+**Summarization quality** (`src/skills/kb-collect`)
+- Attachments, images and linked pages (Grafana, PRs, Jira, runbooks) are not read; only file names appear. Screenshots and log files can hold the key evidence.
+- Bot alerts are collapsed and quoted but not interpreted (e.g. which alert fired first, how long it lasted).
+- A low-confidence or unresolved thread is saved with a warning instead of asking the requester to confirm first.
+- A thread longer than 8 prompt-sized parts is thinned (least informative messages first), so a very long incident can lose detail.
+- Context outside the thread (earlier channel messages, sibling threads, edited or deleted messages) is not considered.
+- Prompt-budget sizing uses a rough 4 characters per token estimate.
+- Tested live on one synthetic 28-message thread; no evaluation set of real, messy threads yet, so quality changes cannot be measured.
+- No check for a near-duplicate entry already in the KB.
+
+**Knowledge base and visibility**
+- Public channels only; private channels and DMs are refused until Slack-to-Onyx ACL mapping exists (OIDC).
+- Entries are visible to everyone in Onyx (cc-pair 1, decision Q3).
+- Any user allowed to use the bot can click Undo, not only the person who recorded the thread.
+- Slack-side edits or deletions are not propagated to an existing entry; re-recording the thread is the update path.
+- No cross-system source identity (e.g. a `slack://<team>/<channel>/thread/<ts>` URI) to de-duplicate against other Slack ingestors.
+
+**Redaction**
+- Pattern and entropy based: it will miss secrets in unusual formats and may redact harmless high-entropy strings. File names are not scanned.
+
+**Runtime**
+- No conversation or session state: the router and skills are stateless per mention, so follow-ups in the same thread ("and the other region?") get no context. Needed before multi-turn triage.
+- Slack event dedupe is in memory per pod, so more than one replica can process a retried event twice (harmless for kb-collect thanks to deterministic doc ids; not for non-idempotent skills).
+- Work runs inline per mention; there is no durable queue, so a pod restart mid-task loses that task (Slack retries may recover it).
+- The router has no thread context and uses one model call per mention.
+- One Slack workspace only; the Slack and Onyx integrations are covered by fakes in tests but not yet run live end to end.
 
 ## 12. Decisions
 

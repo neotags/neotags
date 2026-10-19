@@ -1,8 +1,7 @@
-import type { Summary } from "./summary.js";
-import { renderMarkdown, summarize } from "./summary.js";
+import { excerpts, fitToBudget, prepare } from "./prepare.js";
+import { renderMarkdown, SCHEMA_VERSION, summarizeThread, type Summary } from "./summary.js";
 import type { Task } from "../../task.js";
 import { redact } from "../../tools/redact.js";
-import type { SlackMessage } from "../../tools/slack.js";
 import type { Skill, SkillAction, SkillContext } from "../types.js";
 
 /** Deterministic, so recording the same thread again updates the same KB entry. */
@@ -10,27 +9,8 @@ export const docId = (channel: string, threadTs: string) => `neotags-slack-${cha
 
 const NAME = "kb-collect";
 const CHARS_PER_TOKEN = 4;
-
-function transcriptOf(msgs: SlackMessage[]): string {
-  return msgs
-    .map((m) => {
-      const when = new Date(Number(m.ts) * 1000).toISOString().slice(0, 16).replace("T", " ");
-      const files = m.files.length ? ` [attachments: ${m.files.join(", ")}]` : "";
-      return `[${when}] ${m.userName}${m.bot ? " (bot)" : ""}: ${m.text}${files}`;
-    })
-    .join("\n");
-}
-
-/** Keep the start and end of an over-long thread; the middle is the least informative part. */
-function fit(text: string, maxTokens: number): { text: string; truncated: boolean } {
-  const max = maxTokens * CHARS_PER_TOKEN;
-  if (text.length <= max) return { text, truncated: false };
-  const half = Math.floor(max / 2);
-  return {
-    text: `${text.slice(0, half)}\n[... middle of the thread omitted ...]\n${text.slice(-half)}`,
-    truncated: true,
-  };
-}
+/** Up to this many prompt-sized parts are summarized by map-reduce; a thread beyond that is thinned first. */
+const MAX_PARTS = 8;
 
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
@@ -49,7 +29,7 @@ function resultBlocks(s: Summary, id: string, redactions: number, permalink: str
       elements: [
         {
           type: "mrkdwn",
-          text: `${s.type} · confidence ${s.confidence}${redactions ? ` · ${redactions} secret(s) redacted` : ""} · <${permalink}|source thread>`,
+          text: `${s.type} · ${s.outcome} · confidence ${s.confidence}${redactions ? ` · ${redactions} secret(s) redacted` : ""} · <${permalink}|source thread>`,
         },
       ],
     },
@@ -83,32 +63,60 @@ export function createKbCollect(): Skill {
       }
 
       const all = await ctx.slack.thread(channel, task.thread.ts);
-      const msgs = all.filter((m) => m.ts !== task.triggerTs && m.text.trim());
-      if (msgs.length === 0) return reply("There is nothing in this thread to record yet.");
+      const raw = all.filter((m) => m.ts !== task.triggerTs);
 
-      const redacted = redact(transcriptOf(msgs));
-      const fitted = fit(redacted.text, ctx.maxInputTokens);
-      const summary = await summarize(ctx.llm, fitted.text, redact(task.text).text);
+      // 1. drop noise, redact, number the messages
+      const budgetChars = ctx.maxInputTokens * CHARS_PER_TOKEN;
+      const prepared = fitToBudget(prepare(raw), budgetChars * MAX_PARTS);
+      if (prepared.msgs.length === 0) return reply("There is nothing in this thread to record yet.");
+
+      // 2. summarize (single pass, or map-reduce for long threads)
+      const { summary, parts } = await summarizeThread(ctx.llm, prepared, redact(task.text).text, budgetChars);
+
+      // 3. link the messages the summary cites
+      const byN = new Map(prepared.msgs.map((m) => [m.n, m]));
+      const cited = summary.evidence.map((n) => byN.get(n)!).filter(Boolean);
+      const links = await Promise.allSettled(cited.map((m) => ctx.slack.permalink(channel, m.ts)));
+      const evidence = cited.map((m, i) => {
+        const l = links[i]!;
+        return {
+          n: m.n,
+          who: m.who,
+          when: new Date(Number(m.ts) * 1000).toISOString().slice(0, 16).replace("T", " "),
+          snippet: m.text.replace(/\s+/g, " ").slice(0, 160),
+          url: l.status === "fulfilled" ? l.value : undefined,
+        };
+      });
 
       const [permalink, recordedBy] = await Promise.all([
         ctx.slack.permalink(channel, task.thread.ts),
         ctx.slack.userName(task.actor.id),
       ]);
-      const participants = [...new Set(msgs.filter((m) => !m.bot).map((m) => m.userName))];
+      const participants = [...new Set(prepared.msgs.filter((m) => !m.bot).map((m) => m.who))];
       const id = docId(channel, task.thread.ts);
       const markdown = renderMarkdown(summary, {
         participants,
         permalink,
-        redactions: redacted.count,
-        truncated: fitted.truncated,
+        redactions: prepared.redactions,
+        filtered: prepared.filtered,
+        budgetDropped: prepared.budgetDropped,
+        parts,
+        evidence,
       });
+      // Second section: verbatim errors/commands/links, so exact-match search works even when the
+      // summary paraphrases them.
+      const verbatim = excerpts(prepared.msgs);
 
       await ctx.onyx.upsert({
         id,
         semantic_identifier: summary.title,
-        sections: [{ text: markdown, link: permalink }],
+        sections: [
+          { text: markdown, link: permalink },
+          ...(verbatim ? [{ text: `Key excerpts from the thread (verbatim, redacted)\n\n${verbatim}`, link: permalink }] : []),
+        ],
         metadata: {
           type: summary.type,
+          outcome: summary.outcome,
           services: summary.services,
           tags: summary.tags,
           channel: `#${info.name}`,
@@ -116,14 +124,19 @@ export function createKbCollect(): Skill {
           slack_user: task.actor.id,
           confidence: summary.confidence,
           origin: "neotags",
+          schema_version: SCHEMA_VERSION,
+          message_count: String(prepared.msgs.length),
         },
         doc_updated_at: new Date().toISOString(),
       });
-      ctx.log.info({ taskId: task.id, docId: id, redactions: redacted.count }, "knowledge recorded");
+      ctx.log.info(
+        { taskId: task.id, docId: id, messages: prepared.msgs.length, filtered: prepared.filtered, parts, redactions: prepared.redactions },
+        "knowledge recorded",
+      );
 
       await reply(
         `Saved to the knowledge base: ${summary.title}`,
-        resultBlocks(summary, id, redacted.count, permalink),
+        resultBlocks(summary, id, prepared.redactions, permalink),
       );
     },
 

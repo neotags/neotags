@@ -5494,9 +5494,9 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <ul>
           <li>1–2  @moose record the knowledge in a thread; Slack sends the event</li>
           <li>3–5  allowlist check, then the router (one tool-less LLM call) picks kb-collect</li>
-          <li>6  the skill reads the thread through the Slack Web API and redacts secrets</li>
-          <li>7  summarize with a tool-less LLM call (thread is untrusted data, no tools)</li>
-          <li>8  code upserts the Onyx doc neotags-slack-&lt;channel&gt;-&lt;thread_ts&gt;</li>
+          <li>6  the skill reads the thread via the Slack Web API, drops noise (acks, repeated bot alerts) and redacts secrets</li>
+          <li>7  summarize with a tool-less LLM call (map-reduce for long threads); output: cause, ruled out, fix, outcome, cited messages</li>
+          <li>8  code upserts the Onyx doc neotags-slack-&lt;channel&gt;-&lt;thread_ts&gt;: summary + verbatim key excerpts</li>
           <li>9–10  reply in thread with link and an Undo button (deletes the doc)</li>
         </ul>
       </div>

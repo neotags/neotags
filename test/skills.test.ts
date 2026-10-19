@@ -33,7 +33,7 @@ function fakes(opts: { messages?: SlackMessage[]; isPublic?: boolean; llmReplies
   ];
   const slack: SlackReader = {
     thread: vi.fn(async () => messages),
-    permalink: vi.fn(async () => "https://slack.test/p/100"),
+    permalink: vi.fn(async (_c: string, ts: string) => `https://slack.test/p/${ts}`),
     channel: vi.fn(async () => ({ id: "C1", name: "ops", isPublic: opts.isPublic ?? true })),
     userName: vi.fn(async (id) => (id === "U1" ? "Ann" : id)),
   };
@@ -119,12 +119,50 @@ describe("kb-collect", () => {
     expect(bad.onyx.upsert).not.toHaveBeenCalled();
   });
 
-  it("truncates over-long threads to the token budget and says so", async () => {
-    const long = Array.from({ length: 200 }, (_, i) => ({ ts: String(200 + i), userName: "Ann", text: "x".repeat(200), files: [], bot: false }));
-    const f = fakes({ messages: long });
+  it("summarizes a long thread in parts (map-reduce) and says so in the doc", async () => {
+    const long = Array.from({ length: 60 }, (_, i) => ({ ts: String(200 + i), userId: "U1", userName: "Ann", text: `step ${i}: ${"x".repeat(150)}`, files: [], bot: false }));
+    const f = fakes({ messages: long, llmReplies: Array(20).fill(JSON.stringify(goodSummary)) });
     await createKbCollect().run(task({ triggerTs: "999" }), { ...f.ctx, maxInputTokens: 500 });
-    expect(JSON.stringify(vi.mocked(f.llm.chat).mock.calls[0]![0]).length).toBeLessThan(8000);
-    expect(f.docs[0]!.sections[0]!.text).toContain("middle messages omitted");
+    const calls = vi.mocked(f.llm.chat).mock.calls.length;
+    expect(calls).toBeGreaterThan(2); // notes per part + the final summary
+    expect(f.docs).toHaveLength(1);
+    expect(f.docs[0]!.sections[0]!.text).toMatch(/summarized in \d+ parts/);
+  });
+
+  it("filters noise, cites evidence with links, and stores a verbatim excerpts section", async () => {
+    const f = fakes({
+      messages: [
+        { ts: "100", userId: "U1", userName: "Ann", text: "checkout is returning 502", files: [], bot: false },
+        { ts: "101", userId: "U2", userName: "Bob", text: "👍", files: [], bot: false },
+        { ts: "102", userId: "U2", userName: "Bob", text: "<trigger>", files: [], bot: false },
+        { ts: "103", userId: "U2", userName: "Bob", text: "thanks!", files: [], bot: false },
+        { ts: "104", userId: "U2", userName: "Bob", text: "FATAL: sorry, too many clients already", files: [], bot: false },
+        { ts: "105", userId: "U1", userName: "Ann", text: "fixed by raising max_connections", files: [], bot: false },
+      ],
+      llmReplies: [JSON.stringify({ ...goodSummary, outcome: "resolved", evidence: [2, 3], ruled_out: ["network"] })],
+    });
+    await createKbCollect().run(task({ triggerTs: "102" }), f.ctx);
+
+    const d = f.docs[0]!;
+    const md = d.sections[0]!.text;
+    expect(md).toContain("2 low-signal message(s) filtered");
+    expect(md).toContain("## Ruled out");
+    expect(md).toMatch(/\[#2\]\(https:\/\/slack\.test\/p\/\d+\) Bob/); // cited message resolved to a permalink
+    expect(d.sections).toHaveLength(2);
+    expect(d.sections[1]!.text).toContain("too many clients already");
+    expect(d.sections[1]!.text).toContain("max_connections");
+    expect(d.metadata).toMatchObject({ outcome: "resolved", schema_version: "2", message_count: "3" });
+    // the acknowledgements never reach the LLM
+    const sent = JSON.stringify(vi.mocked(f.llm.chat).mock.calls[0]![0]);
+    expect(sent).not.toContain("thanks!");
+    expect(sent).toContain("#2 [");
+  });
+
+  it("says there is nothing to record when only noise remains", async () => {
+    const f = fakes({ messages: [{ ts: "101", userName: "Bob", text: "👍", files: [], bot: false }, { ts: "102", userName: "Ann", text: "thanks", files: [], bot: false }] });
+    await createKbCollect().run(task({ triggerTs: "999" }), f.ctx);
+    // the first message is always kept, so the thread is not empty; it is summarized, not rejected
+    expect(f.llm.chat).toHaveBeenCalled();
   });
 
   it("Undo deletes the document", async () => {
