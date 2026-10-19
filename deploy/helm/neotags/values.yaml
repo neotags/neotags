@@ -19,11 +19,12 @@ config:
     baseUrl: https://onyx.example.com
     ingestionPath: /api/ingestion
     ccPairId: 1
-  llm:
-    model: claude-sonnet-5-5
+  llm:               # any OpenAI-compatible gateway
+    baseUrl: https://api.openai.com/v1
+    model: gpt-4o-mini
   logLevel: info
 
-# Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, ANTHROPIC_API_KEY.
+# Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional).
 # Create it out of band (External Secrets, sealed secrets, ...) and reference it here.
 existingSecret: neotags-secrets
 

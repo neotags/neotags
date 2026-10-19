@@ -8,7 +8,8 @@ onyx:
   baseUrl: https://onyx.example.com
   ingestionPath: /api/ingestion
   ccPairId: 1
-llm:
-  model: claude-sonnet-5-5
+llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM, ...)
+  baseUrl: https://api.openai.com/v1   # or env LLM_BASE_URL
+  model: gpt-4o-mini                   # or env LLM_MODEL (required once an LLM skill runs)
 logLevel: info
-# Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, ANTHROPIC_API_KEY
+# Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none)

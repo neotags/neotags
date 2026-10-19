@@ -48,7 +48,7 @@ Non-goals (v1)
                                       │ Slack Web API             │ HTTPS
                                       ▼                           ▼
                                     Slack                  Onyx ingestion API ──▶ index ──▶ search / MCP
-                                                           (+ Claude API for summarization)
+                                                           (+ OpenAI-compatible LLM gateway)
 ```
 
 Components
@@ -129,8 +129,10 @@ onyx:
   ingestion_path: /api/ingestion
   cc_pair_id: 1
   api_key_secret: onyx-api-key
-llm:
-  model: claude-sonnet-5-5
+llm:                          # any OpenAI-compatible gateway
+  baseUrl: https://api.openai.com/v1   # env LLM_BASE_URL
+  model: gpt-4o-mini                   # env LLM_MODEL
+  # api key: env LLM_API_KEY only (never in the config file)
   summarize_max_input_tokens: 60000
 redaction:
   extra_patterns: []
@@ -142,7 +144,7 @@ Mention detection uses the bot's **user ID**, so renaming the bot (Slack app dis
 
 - One `Deployment`, 1 replica by default: the Slack event dedupe is in-memory per pod. More replicas are safe for kb-collect (deterministic Onyx IDs make duplicate delivery harmless) but not for non-idempotent skills until dedupe moves to a shared store. Graceful shutdown drains in-flight tasks (20s) on SIGTERM.
 - Ingress → Slack Events API endpoint (needs a public HTTPS URL; if that is not acceptable, use Socket Mode, which needs only egress).
-- Secrets (Slack bot token, signing secret, Onyx key, Anthropic key) via our existing secret mechanism; IRSA for any AWS access.
+- Secrets (Slack bot token, signing secret, Onyx key, LLM gateway key) via our existing secret mechanism; IRSA for any AWS access.
 - Stateless in v1: no database. Add Postgres/Redis when we need sessions, schedules or durable queues.
 - Observability: structured JSON logs, Prometheus metrics (`neotags_tasks_total{skill,status}`, latency, LLM tokens, Onyx errors), shipped through the existing L1 stack.
 - Helm chart in `deploy/`; GitLab CI via the repo's standard pipeline.
@@ -197,6 +199,7 @@ test/
 | Q5 | **Auto-save + Undo.** |
 | Q6 | **LLM-based intent routing** (the router is an LLM call choosing among registered skills, or "none/ask clarification"). |
 | Q7 | **Summaries always in English**, whatever the thread language; verbatim error strings/commands stay untranslated. |
+| Q8 | **OpenAI-compatible LLM gateway.** The user supplies `llm.baseUrl`, `llm.model` (config or `LLM_BASE_URL`/`LLM_MODEL`) and `LLM_API_KEY` (env/Secret only). `src/llm` is a thin `chat/completions` client with timeout and retry on 429/5xx; no vendor SDK. Any provider (OpenAI, LiteLLM, vLLM, an internal gateway fronting Claude) works. |
 
 ## 13. Bidirectional model (impact of Q2)
 

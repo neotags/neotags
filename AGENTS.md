@@ -29,6 +29,7 @@ Before finishing a change: typecheck, test, build (and `helm lint` if `deploy/` 
 src/index.ts            entrypoint
 src/config/             YAML (NEOTAGS_CONFIG) + env secrets, validated with zod
 src/gateway/            Slack Events gateway (Bolt, HTTP), mention stripping, event dedupe
+src/llm/                OpenAI-compatible chat client (baseUrl/model/key are config; no vendor SDK)
 src/router/             intent -> skill (stub; LLM router comes with kb-collect)
 src/guardrails/         channel/user allowlist policy (enforced in code, not prompts)
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport

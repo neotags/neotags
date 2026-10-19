@@ -20,9 +20,14 @@ const fileSchema = z.object({
       ccPairId: z.number().int().default(1),
     })
     .prefault({}),
+  // Any OpenAI-compatible endpoint (OpenAI, LiteLLM, vLLM, an internal AI gateway, ...).
+  // baseUrl / model can also be set with LLM_BASE_URL / LLM_MODEL; the key only via LLM_API_KEY.
   llm: z
     .object({
-      model: z.string().default("claude-sonnet-5-5"),
+      baseUrl: z.string().url().default("https://api.openai.com/v1"),
+      model: z.string().min(1).optional(),
+      timeoutMs: z.number().int().positive().default(60_000),
+      maxRetries: z.number().int().min(0).default(2),
       summarizeMaxInputTokens: z.number().int().default(60000),
     })
     .prefault({}),
@@ -33,7 +38,8 @@ export interface Secrets {
   slackBotToken: string;
   slackSigningSecret: string;
   onyxApiKey?: string;
-  anthropicApiKey?: string;
+  /** Bearer key for the LLM gateway; optional for gateways that need none. */
+  llmApiKey?: string;
 }
 
 export type Config = z.infer<typeof fileSchema> & { secrets: Secrets };
@@ -50,14 +56,18 @@ export function loadConfig(
 ): Config {
   const path = env.NEOTAGS_CONFIG;
   const raw = path ? (parse(read(path)) ?? {}) : {};
-  const file = fileSchema.parse(raw);
+  const llmEnv = {
+    ...(env.LLM_BASE_URL && { baseUrl: env.LLM_BASE_URL }),
+    ...(env.LLM_MODEL && { model: env.LLM_MODEL }),
+  };
+  const file = fileSchema.parse({ ...raw, llm: { ...raw.llm, ...llmEnv } });
   return {
     ...file,
     secrets: {
       slackBotToken: required(env, "SLACK_BOT_TOKEN"),
       slackSigningSecret: required(env, "SLACK_SIGNING_SECRET"),
       onyxApiKey: env.ONYX_API_KEY,
-      anthropicApiKey: env.ANTHROPIC_API_KEY,
+      llmApiKey: env.LLM_API_KEY || undefined,
     },
   };
 }
