@@ -6,7 +6,7 @@ Guidance for AI coding agents (and humans) working in this repo.
 
 neotags is a self-hosted agent teammate for Slack (GitHub/GitLab later). Mention it (`@moose ...`, name is configurable) to delegate work. The first feature in progress is **knowledge collection**: summarize a Slack thread and store it in an Onyx knowledge base.
 
-Read first: docs/design/*.md (architecture, decisions, open questions). Treat recorded "Decisions" as settled; don't re-litigate them.
+Read first: docs/design/*.md (architecture, decisions, open questions). `docs/architecture.html` is the current architecture diagram; update it (source: `docs/architecture.json`) when components or flows change. Treat recorded "Decisions" as settled; don't re-litigate them.
 
 ## Commands
 
@@ -29,8 +29,10 @@ Before finishing a change: typecheck, test, build (and `helm lint` if `deploy/` 
 src/index.ts            entrypoint
 src/config/             YAML (NEOTAGS_CONFIG) + env secrets, validated with zod
 src/gateway/            Slack Events gateway (Bolt, HTTP), mention stripping, event dedupe
-src/llm/                OpenAI-compatible chat client (baseUrl/model/key are config; no vendor SDK)
-src/router/             intent -> skill (stub; LLM router comes with kb-collect)
+src/agent/              pi-ai gateway model from config (baseUrl/model/key), tool-less LlmClient, pi Agent factory + tool guard
+src/router/             LLM intent routing: one tool-less call picks a registered skill; also dispatches button actions
+src/skills/             Skill interface; kb-collect/ (thread -> redact -> summarize -> Onyx upsert, Undo)
+src/tools/              slack (thread reader), onyx (ingestion client), redact (secret scrubbing)
 src/guardrails/         channel/user allowlist policy (enforced in code, not prompts)
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport
 test/                   vitest
@@ -38,7 +40,7 @@ deploy/helm/neotags/    Helm chart; deploy/slack-app-manifest.yaml
 .github/workflows/      ci.yml, build-image.yml (GHCR, multi-arch)
 ```
 
-Planned (don't pre-build): `skills/kb-collect/`, `tools/{slack,onyx,redact}.ts`, pi-agent-core wiring, notifier for scheduled/alert-driven posts.
+Planned (don't pre-build): triage/review skills (pi `Agent` + tools through the tool guard), scheduled/alert-driven posts.
 
 ## Conventions
 

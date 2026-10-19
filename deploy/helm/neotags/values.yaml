@@ -22,6 +22,7 @@ config:
   llm:               # any OpenAI-compatible gateway
     baseUrl: https://api.openai.com/v1
     model: gpt-4o-mini
+    # routerModel: <fast model>   # optional smaller/faster model for intent routing (default: model)
   logLevel: info
 
 # Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional).

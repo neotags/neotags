@@ -1,7 +1,7 @@
 # neotags
 
 Self-hosted agent teammate for Slack (GitHub/GitLab later). Mention it (`@moose ...`) to delegate work.
-Design: [docs/design/001-knowledge-collection.md](docs/design/001-knowledge-collection.md).
+Design: [docs/design/001-knowledge-collection.md](docs/design/001-knowledge-collection.md). Architecture diagram: [docs/architecture.html](docs/architecture.html) (open in a browser; source in `docs/architecture.json`).
 
 ## Dev
 
@@ -18,7 +18,9 @@ Create the Slack app from `deploy/slack-app-manifest.yaml`; the Events request U
 
 ## Status
 
-Milestone 1 (skeleton): config, Slack Events gateway, dedupe, allowlist guardrail, mention → reply.
+Implemented (unit-tested with fakes; not yet run against live Slack/Onyx/LLM): Slack Events gateway, LLM intent router, `kb-collect` (record a thread to Onyx with Undo), configurable OpenAI-compatible LLM gateway.
+
+Try it: invite the bot to a public channel and, inside a thread, mention it: `@moose record the knowledge`. Needs `LLM_API_KEY`, `llm.model`, `onyx.baseUrl` and `ONYX_API_KEY`.
 
 ## Secret scanning
 

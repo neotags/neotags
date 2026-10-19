@@ -151,7 +151,7 @@ Mention detection uses the bot's **user ID**, so renaming the bot (Slack app dis
 
 ## 8. Security & audit
 
-- Least-privilege Slack scopes. Milestone 1: `app_mentions:read`, `chat:write`, `reactions:write`. Added with thread reading (milestone 2): `channels:history`, `channels:read`, `users:read`. No private-channel/DM scopes in v1.
+- Least-privilege Slack scopes. `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `reactions:write`, `users:read`; interactivity is enabled for the Undo button. No private-channel/DM scopes in v1.
 - Denied requests (channel/user not allowlisted) get a quiet 🚫 reaction rather than a public reply.
 - Channel allowlist + user allowlist enforced in the gateway.
 - Redaction before LLM and before storage; Slack content is treated as untrusted input (prompt injection): the summarizer has no tools, the thread is delimited as data, and the write action is performed by code, not chosen by the model.
@@ -183,6 +183,9 @@ test/
 
 ## 11. Milestones
 
+Status (2026-10): milestones 1–3 are implemented and unit-tested with fakes (Slack, Onyx, LLM), including the LLM router, thread reader, redaction, summarizer, Onyx upsert/delete and the Undo button. Verified against a real OpenAI-compatible gateway (2026-10-19, flash-class model for both router and summarizer): plain completion, JSON-mode routing of five phrasings including a prompt-injection attempt, schema-valid summary of a sample thread with a planted secret, and a tool call through the pi `Agent` where the guard blocked a restart and the model reported the denial. No `compat` flags were needed. Not yet verified against live Slack or the live Onyx instance. Known v1 limits: over-long threads are truncated in the middle rather than map-reduced; attachments are listed by name only; denied requests get a 🚫 reaction.
+
+
 1. Skeleton: config, Slack gateway, health endpoint, mention → "pong"; deployed to EKS.
 2. `slack.read_thread` + redaction + summarizer producing the schema (print in thread, no Onyx write).
 3. Onyx ingest/delete, Undo button, idempotent re-record.
@@ -199,7 +202,8 @@ test/
 | Q5 | **Auto-save + Undo.** |
 | Q6 | **LLM-based intent routing** (the router is an LLM call choosing among registered skills, or "none/ask clarification"). |
 | Q7 | **Summaries always in English**, whatever the thread language; verbatim error strings/commands stay untranslated. |
-| Q8 | **OpenAI-compatible LLM gateway.** The user supplies `llm.baseUrl`, `llm.model` (config or `LLM_BASE_URL`/`LLM_MODEL`) and `LLM_API_KEY` (env/Secret only). `src/llm` is a thin `chat/completions` client with timeout and retry on 429/5xx; no vendor SDK. Any provider (OpenAI, LiteLLM, vLLM, an internal gateway fronting Claude) works. |
+| Q8 | **OpenAI-compatible LLM gateway.** The user supplies `llm.baseUrl`, `llm.model` (config or `LLM_BASE_URL`/`LLM_MODEL`) and `LLM_API_KEY` (env/Secret only). Implemented on pi-ai (`src/agent/models.ts` builds a custom `openai-completions` model from config); `LlmClient` is a tool-less one-shot completion with timeout and retry on transient errors. Any provider (OpenAI, LiteLLM, vLLM, an internal gateway fronting Claude) works. Optional `llm.routerModel` (env `LLM_ROUTER_MODEL`) selects a smaller, faster model on the same gateway for intent routing; it defaults to `llm.model`, and summaries/agents always use `llm.model`. |
+| Q9 | **Build on pi (`@earendil-works/pi-agent-core` + `pi-ai` 1.3.0, exact-pinned, MIT).** Diagnosis is coming right after knowledge collection and needs a tool-using agent loop, so the runtime is chosen now. kb-collect's summarize step stays a tool-less completion; tool use goes through `Agent` with every call passing a code-side guard (`beforeToolCall` → guardrails). The older `@mariozechner/*` packages are deprecated. |
 
 ## 13. Bidirectional model (impact of Q2)
 

@@ -11,5 +11,7 @@ onyx:
 llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM, ...)
   baseUrl: https://api.openai.com/v1   # or env LLM_BASE_URL
   model: gpt-4o-mini                   # or env LLM_MODEL (required once an LLM skill runs)
+  # routerModel: <fast model>          # or env LLM_ROUTER_MODEL; smaller/faster model for intent routing
+  #                                    # (same gateway and key). Defaults to `model`.
 logLevel: info
 # Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none)

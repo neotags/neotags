@@ -16,9 +16,12 @@ export interface Task {
   reply: ReplyTarget;
   /** The message that triggered the task, if any (for reactions). */
   triggerTs?: string;
+  /** Present when the mention was posted inside an existing thread (the thread root's ts). */
+  thread?: { ts: string };
 }
 
 export interface Notifier {
-  reply(target: ReplyTarget, text: string): Promise<void>;
+  /** `text` is the plain fallback; `blocks` (Slack Block Kit) carry the rich layout and buttons. */
+  reply(target: ReplyTarget, text: string, blocks?: unknown[]): Promise<void>;
   react(target: ReplyTarget, ts: string, emoji: string): Promise<void>;
 }

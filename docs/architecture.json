@@ -1,0 +1,376 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "neotags architecture",
+    "output": "docs/architecture.html",
+    "quality_profile": "showcase",
+    "legend": {
+      "mode": "auto",
+      "entries": {
+        "backend": {
+          "label": "neotags component"
+        },
+        "security": {
+          "label": "Guardrail"
+        },
+        "external": {
+          "label": "External system"
+        },
+        "database": {
+          "label": "Knowledge base"
+        },
+        "messagebus": {
+          "label": "Trigger (planned)"
+        }
+      }
+    }
+  },
+  "components": [
+    {
+      "id": "users",
+      "type": "external",
+      "label": "Team",
+      "sublabel": "@moose mention",
+      "pos": [
+        20,
+        220
+      ],
+      "size": [
+        110,
+        64
+      ]
+    },
+    {
+      "id": "slack",
+      "type": "external",
+      "label": "Slack",
+      "sublabel": "Events + Web API",
+      "pos": [
+        220,
+        220
+      ],
+      "size": [
+        130,
+        64
+      ]
+    },
+    {
+      "id": "ptrig",
+      "type": "messagebus",
+      "label": "Planned triggers",
+      "sublabel": "alerts · cron · GitHub/GitLab",
+      "tag": "planned",
+      "pos": [
+        405,
+        40
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "gateway",
+      "type": "backend",
+      "label": "Slack gateway",
+      "sublabel": "Bolt · signature · dedupe",
+      "pos": [
+        430,
+        220
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "guard",
+      "type": "security",
+      "label": "Guardrails",
+      "sublabel": "allowlists · tool guard",
+      "pos": [
+        650,
+        220
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "router",
+      "type": "backend",
+      "label": "Router",
+      "sublabel": "LLM intent → skill",
+      "pos": [
+        870,
+        220
+      ],
+      "size": [
+        140,
+        64
+      ]
+    },
+    {
+      "id": "skills",
+      "type": "backend",
+      "label": "Skills",
+      "sublabel": "kb-collect · triage · review",
+      "pos": [
+        1080,
+        220
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "agentrt",
+      "type": "backend",
+      "label": "Agent runtime",
+      "sublabel": "pi Agent loop + tools · planned",
+      "tag": "planned",
+      "pos": [
+        1055,
+        40
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "pobs",
+      "type": "external",
+      "label": "Observability APIs",
+      "sublabel": "VictoriaMetrics · OpenObserve",
+      "tag": "planned",
+      "pos": [
+        1340,
+        40
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "notifier",
+      "type": "backend",
+      "label": "Notifier",
+      "sublabel": "only poster to Slack/GitHub",
+      "pos": [
+        650,
+        400
+      ],
+      "size": [
+        150,
+        64
+      ]
+    },
+    {
+      "id": "llmclient",
+      "type": "backend",
+      "label": "LLM client",
+      "sublabel": "pi-ai · tool-less · router + skills",
+      "pos": [
+        1055,
+        400
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "llm",
+      "type": "external",
+      "label": "LLM gateway",
+      "sublabel": "OpenAI-compatible",
+      "tag": "main + router model",
+      "pos": [
+        1340,
+        400
+      ],
+      "size": [
+        170,
+        64
+      ]
+    },
+    {
+      "id": "onyx",
+      "type": "database",
+      "label": "Onyx KB",
+      "sublabel": "/api/ingestion · cc_pair 1",
+      "pos": [
+        1340,
+        220
+      ],
+      "size": [
+        170,
+        64
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "EKS · neotags Deployment (1 replica)",
+      "wraps": [
+        "gateway",
+        "guard",
+        "router",
+        "skills",
+        "llmclient",
+        "notifier"
+      ]
+    }
+  ],
+  "connections": [
+    {
+      "id": "c1",
+      "from": "users",
+      "to": "slack",
+      "label": "1 @mention",
+      "variant": "emphasis"
+    },
+    {
+      "id": "c2",
+      "from": "slack",
+      "to": "gateway",
+      "label": "2 event",
+      "variant": "emphasis"
+    },
+    {
+      "id": "c3",
+      "from": "gateway",
+      "to": "guard",
+      "label": "3 authz",
+      "variant": "security"
+    },
+    {
+      "id": "c4",
+      "from": "guard",
+      "to": "router",
+      "label": "4 route"
+    },
+    {
+      "id": "c5",
+      "from": "router",
+      "to": "skills",
+      "label": "5 skill"
+    },
+    {
+      "id": "c7",
+      "from": "skills",
+      "to": "llmclient",
+      "label": "7 summarize",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c7b",
+      "from": "llmclient",
+      "to": "llm",
+      "label": "chat",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c8",
+      "from": "skills",
+      "to": "onyx",
+      "label": "8 upsert",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "c9",
+      "from": "skills",
+      "to": "notifier",
+      "label": "9 result",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "c10",
+      "from": "notifier",
+      "to": "slack",
+      "label": "10 reply + Undo",
+      "fromSide": "left",
+      "toSide": "bottom"
+    },
+    {
+      "id": "p1",
+      "from": "ptrig",
+      "to": "gateway",
+      "label": "webhooks",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
+    },
+    {
+      "id": "p2",
+      "from": "skills",
+      "to": "agentrt",
+      "label": "triage (planned)",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom"
+    },
+    {
+      "id": "p3",
+      "from": "agentrt",
+      "to": "pobs",
+      "label": "query tools",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "kb-collect flow (steps 1–10)",
+      "items": [
+        "1–2  @moose record the knowledge in a thread; Slack sends the event",
+        "3–5  allowlist check, then the router (one tool-less LLM call) picks kb-collect",
+        "6  the skill reads the thread through the Slack Web API and redacts secrets",
+        "7  summarize with a tool-less LLM call (thread is untrusted data, no tools)",
+        "8  code upserts the Onyx doc neotags-slack-<channel>-<thread_ts>",
+        "9–10  reply in thread with link and an Undo button (deletes the doc)"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "Skills vs the agent runtime",
+      "items": [
+        "A skill is a fixed procedure with its own permissions; the router only picks which one",
+        "kb-collect calls the LLM client, Onyx and Notifier directly: no agent loop needed",
+        "Only skills that need the model to choose its next step (triage) will start a pi Agent, with just their own tools",
+        "Every agent tool call passes a code-side guard first"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Implemented",
+      "items": [
+        "Slack gateway, dedupe, graceful drain, allowlists",
+        "LLM router with optional faster router model",
+        "kb-collect: thread reader, redaction, summarizer, Onyx upsert + Undo",
+        "OpenAI-compatible gateway via pi-ai, verified live; Agent factory + tool guard ready"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "Planned",
+      "items": [
+        "Live verification: Slack and Onyx",
+        "Triage, review and daily-summary skills on the Agent runtime",
+        "Alert webhook, scheduler, GitHub/GitLab bot"
+      ]
+    }
+  ]
+}

@@ -3,12 +3,18 @@ import type { Logger } from "pino";
 import type { Config } from "../config/index.js";
 import { authorize } from "../guardrails/policy.js";
 import type { Router } from "../router/index.js";
+import { createSlackReader, type SlackReader, type SlackWebApi } from "../tools/slack.js";
 import type { Notifier, ReplyTarget, Task } from "../task.js";
 import { Dedupe } from "./dedupe.js";
 import { Inflight } from "./inflight.js";
 import { stripMention } from "./mention.js";
 
-export function createSlack(cfg: Config, log: Logger, makeRouter: (n: Notifier) => Router) {
+export interface SlackDeps {
+  notifier: Notifier;
+  slack: SlackReader;
+}
+
+export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps) => Router) {
   const receiver = new ExpressReceiver({
     signingSecret: cfg.secrets.slackSigningSecret,
     endpoints: "/slack/events",
@@ -18,14 +24,20 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (n: Notifier) 
   const app = new App({ token: cfg.secrets.slackBotToken, receiver });
 
   const notifier: Notifier = {
-    async reply(t: ReplyTarget, text: string) {
-      await app.client.chat.postMessage({ channel: t.channel, thread_ts: t.threadTs, text });
+    async reply(t: ReplyTarget, text: string, blocks?: unknown[]) {
+      await app.client.chat.postMessage({
+        channel: t.channel,
+        thread_ts: t.threadTs,
+        text,
+        ...(blocks && { blocks: blocks as never }),
+      });
     },
     async react(t: ReplyTarget, ts: string, emoji: string) {
       await app.client.reactions.add({ channel: t.channel, timestamp: ts, name: emoji });
     },
   };
-  const router = makeRouter(notifier);
+  const slack = createSlackReader(app.client as unknown as SlackWebApi);
+  const router = makeRouter({ notifier, slack });
   const dedupe = new Dedupe();
   const inflight = new Inflight();
 
@@ -72,6 +84,7 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (n: Notifier) 
           text: stripMention(event.text, botUserId),
           reply,
           triggerTs: event.ts,
+          ...(event.thread_ts && { thread: { ts: event.thread_ts } }),
         };
         log.info({ taskId: task.id, user, channel: event.channel }, "task received");
         try {
@@ -85,6 +98,36 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (n: Notifier) 
             () => notifier.reply(reply, "Something went wrong handling that. It has been logged."),
             { eventId },
           );
+        }
+      })(),
+    );
+  });
+
+  // Button clicks (e.g. Undo). Action ids are `<skill>:<action>`; the same allowlists apply.
+  app.action(/^[a-z][a-z0-9-]*:[a-z0-9_-]+$/i, async ({ ack, action, body, respond }) => {
+    await ack();
+    const value = (action as { value?: string }).value ?? "";
+    const actionId = (action as { action_id: string }).action_id;
+    const channel = (body as { channel?: { id?: string } }).channel?.id;
+    const user = body.user.id;
+    if (!channel) return;
+    const decision = authorize(
+      { allowedChannels: cfg.slack.allowedChannels, allowedUsers: cfg.slack.allowedUsers },
+      channel,
+      user,
+    );
+    if (!decision.ok) {
+      await safely("respond", () => respond({ response_type: "ephemeral", replace_original: false, text: `Sorry, ${decision.reason}.` }).then(() => {}), { actionId });
+      return;
+    }
+    await inflight.track(
+      (async () => {
+        try {
+          const text = await router.handleAction(actionId, value, { id: user }, channel);
+          if (text) await safely("respond", () => respond({ replace_original: true, text }).then(() => {}), { actionId });
+        } catch (err) {
+          log.error({ err, actionId }, "action failed");
+          await safely("respond", () => respond({ response_type: "ephemeral", replace_original: false, text: "That didn't work. It has been logged." }).then(() => {}), { actionId });
         }
       })(),
     );
