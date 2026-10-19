@@ -1,0 +1,54 @@
+replicaCount: 2
+
+image:
+  repository: ghcr.io/OWNER/neotags   # set to your GHCR image (see build-image workflow)
+  tag: ""            # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# Rendered into /etc/neotags/neotags.yaml (see config/neotags.example.yaml).
+config:
+  bot:
+    name: moose
+  slack:
+    port: 3000
+    allowedChannels: []
+    allowedUsers: []
+  onyx:
+    baseUrl: https://onyx.example.com
+    ingestionPath: /api/ingestion
+    ccPairId: 1
+  llm:
+    model: claude-sonnet-5-5
+  logLevel: info
+
+# Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, ANTHROPIC_API_KEY.
+# Create it out of band (External Secrets, sealed secrets, ...) and reference it here.
+existingSecret: neotags-secrets
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}    # e.g. eks.amazonaws.com/role-arn for IRSA
+
+service:
+  type: ClusterIP
+  port: 80
+
+# Slack Events API needs a public HTTPS URL routed to /slack/events.
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  host: neotags.example.com
+  tls: []            # [{secretName: ..., hosts: [...]}]
+
+resources:
+  requests: { cpu: 100m, memory: 256Mi }
+  limits: { memory: 512Mi }
+
+podAnnotations: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+extraEnv: []

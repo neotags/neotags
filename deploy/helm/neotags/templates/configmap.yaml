@@ -1,0 +1,8 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "neotags.fullname" . }}
+  labels: {{- include "neotags.labels" . | nindent 4 }}
+data:
+  neotags.yaml: |
+    {{- toYaml .Values.config | nindent 4 }}

@@ -1,0 +1,14 @@
+bot:
+  name: moose            # display name only; mentions are matched by bot user ID
+slack:
+  port: 3000
+  allowedChannels: []    # empty = all channels the bot is in
+  allowedUsers: []       # empty = everyone
+onyx:
+  baseUrl: https://onyx.example.com
+  ingestionPath: /api/ingestion
+  ccPairId: 1
+llm:
+  model: claude-sonnet-5-5
+logLevel: info
+# Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, ANTHROPIC_API_KEY

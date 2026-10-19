@@ -1,0 +1,26 @@
+# Create the Slack app from this manifest. Replace the request URL with your public ingress.
+display_information:
+  name: moose
+features:
+  bot_user:
+    display_name: moose
+    always_online: true
+oauth_config:
+  scopes:
+    bot:
+      - app_mentions:read
+      - channels:history
+      - channels:read
+      - chat:write
+      - reactions:write
+      - users:read
+settings:
+  event_subscriptions:
+    request_url: https://neotags.example.com/slack/events
+    bot_events:
+      - app_mention
+  interactivity:
+    is_enabled: true
+    request_url: https://neotags.example.com/slack/events
+  org_deploy_enabled: false
+  socket_mode_enabled: false

@@ -1,0 +1,5 @@
+node_modules
+dist
+.env
+*.log
+config/neotags.yaml

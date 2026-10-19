@@ -1,0 +1,14 @@
+title = "neotags gitleaks configuration"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "synthetic fixtures used by tests, docs, and example config"
+stopwords = [
+  "xoxb-fake",
+]
+paths = [
+  '''\.env\.example''',
+  '''package-lock\.json''',
+]

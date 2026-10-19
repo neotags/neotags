@@ -1,0 +1,6 @@
+apiVersion: v2
+name: neotags
+description: Self-hosted Slack/GitHub agent teammate
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
