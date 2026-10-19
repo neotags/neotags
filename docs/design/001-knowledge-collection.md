@@ -140,7 +140,7 @@ Mention detection uses the bot's **user ID**, so renaming the bot (Slack app dis
 
 ## 7. Deployment (EKS)
 
-- One `Deployment` (2 replicas OK because dedupe and idempotent IDs make duplicate delivery harmless; the Slack gateway deduplicates per pod in v1 — a shared store is a later addition).
+- One `Deployment`, 1 replica by default: the Slack event dedupe is in-memory per pod. More replicas are safe for kb-collect (deterministic Onyx IDs make duplicate delivery harmless) but not for non-idempotent skills until dedupe moves to a shared store. Graceful shutdown drains in-flight tasks (20s) on SIGTERM.
 - Ingress → Slack Events API endpoint (needs a public HTTPS URL; if that is not acceptable, use Socket Mode, which needs only egress).
 - Secrets (Slack bot token, signing secret, Onyx key, Anthropic key) via our existing secret mechanism; IRSA for any AWS access.
 - Stateless in v1: no database. Add Postgres/Redis when we need sessions, schedules or durable queues.
@@ -149,7 +149,8 @@ Mention detection uses the bot's **user ID**, so renaming the bot (Slack app dis
 
 ## 8. Security & audit
 
-- Least-privilege Slack scopes: `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `reactions:write`, `users:read`. No private-channel/DM scopes in v1.
+- Least-privilege Slack scopes. Milestone 1: `app_mentions:read`, `chat:write`, `reactions:write`. Added with thread reading (milestone 2): `channels:history`, `channels:read`, `users:read`. No private-channel/DM scopes in v1.
+- Denied requests (channel/user not allowlisted) get a quiet 🚫 reaction rather than a public reply.
 - Channel allowlist + user allowlist enforced in the gateway.
 - Redaction before LLM and before storage; Slack content is treated as untrusted input (prompt injection): the summarizer has no tools, the thread is delimited as data, and the write action is performed by code, not chosen by the model.
 - Audit record per task: who, channel, thread, skill, Onyx doc ID, redaction count, outcome. Logs contain no thread bodies.

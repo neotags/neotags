@@ -35,8 +35,8 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
-      - run: helm lint deploy/helm/neotags
-      - run: helm template neotags deploy/helm/neotags --set ingress.enabled=true > /dev/null
+      - run: helm lint deploy/helm/neotags --set image.repository=ghcr.io/neotags/neotags --set image.tag=ci
+      - run: helm template neotags deploy/helm/neotags --set image.repository=ghcr.io/neotags/neotags --set image.tag=ci --set ingress.enabled=true > /dev/null
 
   docker:
     name: docker build

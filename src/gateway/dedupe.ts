@@ -1,4 +1,7 @@
-/** Bounded TTL set used to drop Slack event retries (per pod). */
+/**
+ * Bounded TTL set used to drop Slack event retries. Per pod only: with more than one replica a retry can
+ * land on another pod, so handlers must be idempotent (e.g. deterministic Onyx document IDs).
+ */
 export class Dedupe {
   private seen = new Map<string, number>();
   constructor(
@@ -6,6 +9,11 @@ export class Dedupe {
     private max = 10_000,
     private now: () => number = Date.now,
   ) {}
+
+  /** Release a key so a retry of a failed event is processed again. */
+  forget(key: string): void {
+    this.seen.delete(key);
+  }
 
   /** Returns true if `key` was already seen (and records it otherwise). */
   isDuplicate(key: string): boolean {

@@ -1,8 +1,9 @@
-replicaCount: 2
+# 1 until Slack event dedupe is shared across pods (it is in-memory per pod today).
+replicaCount: 1
 
 image:
-  repository: ghcr.io/OWNER/neotags   # set to your GHCR image (see build-image workflow)
-  tag: ""            # defaults to .Chart.AppVersion
+  repository: ghcr.io/neotags/neotags   # image pushed by build-image.yml (lowercase)
+  tag: ""            # required: a tag pushed by build-image.yml, e.g. v0.0.0-abc1234
   pullPolicy: IfNotPresent
 imagePullSecrets: []
 

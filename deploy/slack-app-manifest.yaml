@@ -8,19 +8,16 @@ features:
 oauth_config:
   scopes:
     bot:
+      # Milestone 1 needs only these. Add channels:history, channels:read and users:read
+      # when thread reading (kb-collect) lands.
       - app_mentions:read
-      - channels:history
-      - channels:read
       - chat:write
       - reactions:write
-      - users:read
 settings:
   event_subscriptions:
     request_url: https://neotags.example.com/slack/events
     bot_events:
       - app_mention
-  interactivity:
-    is_enabled: true
-    request_url: https://neotags.example.com/slack/events
+  # Enable interactivity (request_url .../slack/events) when buttons such as Undo land.
   org_deploy_enabled: false
   socket_mode_enabled: false

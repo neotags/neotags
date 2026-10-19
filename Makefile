@@ -13,7 +13,7 @@ typecheck:
 	npm run typecheck
 
 helm:
-	helm lint deploy/helm/neotags
+	helm lint deploy/helm/neotags --set image.repository=ghcr.io/neotags/neotags --set image.tag=lint
 
 secrets:
 	@if command -v gitleaks >/dev/null 2>&1; then gitleaks git --config .gitleaks.toml --verbose .; else echo "gitleaks not installed; skipping (brew install gitleaks)"; fi

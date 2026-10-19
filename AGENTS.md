@@ -16,7 +16,7 @@ npm run typecheck      # tsc --noEmit
 npm test               # vitest
 npm run build          # tsc -> dist/
 npm run dev            # tsx watch; needs SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET (see README)
-helm lint deploy/helm/neotags
+helm lint deploy/helm/neotags --set image.repository=ghcr.io/neotags/neotags --set image.tag=lint
 make hooks             # once per clone: enable gitleaks pre-commit
 make secrets           # gitleaks scan of history
 ```

@@ -50,3 +50,18 @@ describe("loadConfig", () => {
     expect(() => loadConfig({})).toThrow(/SLACK_BOT_TOKEN/);
   });
 });
+
+describe("stripMention escaping", () => {
+  it("treats the bot id literally", () => {
+    expect(stripMention("<@U.BOT> hi <@UXBOT>", "U.BOT")).toBe("hi <@UXBOT>");
+  });
+});
+
+describe("Dedupe.forget", () => {
+  it("lets a failed event be reprocessed", () => {
+    const d = new Dedupe();
+    expect(d.isDuplicate("e1")).toBe(false);
+    d.forget("e1");
+    expect(d.isDuplicate("e1")).toBe(false);
+  });
+});
