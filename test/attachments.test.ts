@@ -4,7 +4,7 @@ import { pino } from "pino";
 import { describe, expect, it, vi } from "vitest";
 import type { LlmClient } from "../src/agent/llm.js";
 import { Router } from "../src/router/index.js";
-import { createKbAsk, pickSources, toMrkdwn } from "../src/skills/kb-ask/index.js";
+import { createKbAsk, pickSources, searchFailure, toMrkdwn } from "../src/skills/kb-ask/index.js";
 import { createKbCollect } from "../src/skills/kb-collect/index.js";
 import { sampleSections } from "../src/skills/kb-files/describe.js";
 import { fileDocId } from "../src/skills/kb-files/collect.js";
@@ -12,7 +12,7 @@ import { createKbFiles } from "../src/skills/kb-files/index.js";
 import type { SkillContext } from "../src/skills/types.js";
 import type { Notifier, Task } from "../src/task.js";
 import { assertSafeZip, cleanPages, detectKind, extract, htmlToText, UnsupportedFileError } from "../src/tools/extract.js";
-import { HttpOnyxClient, type OnyxClient, type OnyxDocument, type OnyxSearchResult } from "../src/tools/onyx.js";
+import { HttpOnyxClient, OnyxError, type OnyxClient, type OnyxDocument, type OnyxSearchResult } from "../src/tools/onyx.js";
 import { createSlackReader, SlackFileError, type SlackFile, type SlackMessage, type SlackReader, type SlackWebApi } from "../src/tools/slack.js";
 
 const log = pino({ level: "silent" });
@@ -283,6 +283,15 @@ describe("HttpOnyxClient.search", () => {
     const [url, init] = f.mock.calls[0] as [string, RequestInit];
     expect(url).toBe("https://onyx.test/api/search");
     expect(JSON.parse(init.body as string)).toEqual({ query: "what was spend?" });
+  });
+
+  it("gives search its own, longer timeout", async () => {
+    const spy = vi.spyOn(AbortSignal, "timeout");
+    const f = vi.fn().mockResolvedValue(new Response(JSON.stringify({ results: [] })));
+    await new HttpOnyxClient({ ...settings, timeoutMs: 5000 }, f as unknown as typeof fetch).search("q", 3);
+    await new HttpOnyxClient({ ...settings, timeoutMs: 5000 }, f as unknown as typeof fetch).delete("d");
+    expect(spy.mock.calls.map((c) => c[0])).toEqual([90_000, 5000]);
+    spy.mockRestore();
   });
 
   it("honours searchPath and the result limit, and clips long queries", async () => {
@@ -570,6 +579,30 @@ describe("kb-ask", () => {
     f.ctx.onyx = undefined;
     await createKbAsk().run(task({ text: "q" }), f.ctx);
     expect(f.sent[2]!.text).toMatch(/not configured/);
+  });
+
+  it("tells the user why a search failed instead of a generic error", async () => {
+    const cases: [number | undefined, RegExp][] = [
+      [403, /READ_SEARCH/],
+      [401, /READ_SEARCH/],
+      [404, /searchPath/],
+      [422, /rejected the search/],
+      [500, /LLM provider/],
+      [undefined, /in time/],
+    ];
+    for (const [status, re] of cases) {
+      const f = fakes();
+      vi.mocked(f.onyx.search).mockRejectedValue(new OnyxError(`Onyx returned ${status}: secret-detail`, status));
+      await createKbAsk().run(task({ text: "q" }), f.ctx);
+      expect(f.sent[0]!.text).toMatch(re);
+      expect(f.sent[0]!.text).not.toContain("secret-detail");
+      expect(f.llm.chat).not.toHaveBeenCalled();
+    }
+    // anything that is not an Onyx error is a bug and still reaches the generic handler
+    const g = fakes();
+    vi.mocked(g.onyx.search).mockRejectedValue(new Error("boom"));
+    await expect(createKbAsk().run(task({ text: "q" }), g.ctx)).rejects.toThrow("boom");
+    expect(searchFailure(new Error("x"))).toMatch(/in time/);
   });
 
   it("fits sources into the budget, best first", () => {
