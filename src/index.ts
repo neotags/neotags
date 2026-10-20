@@ -4,6 +4,7 @@ import { createGateway } from "./agent/models.js";
 import { loadConfig } from "./config/index.js";
 import { createSlack } from "./gateway/slack.js";
 import { Router } from "./router/index.js";
+import { createKbAsk } from "./skills/kb-ask/index.js";
 import { createKbCollect } from "./skills/kb-collect/index.js";
 import { createKbFiles } from "./skills/kb-files/index.js";
 import { HttpOnyxClient, type OnyxClient } from "./tools/onyx.js";
@@ -41,7 +42,7 @@ const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
     notifier,
     llm: routerLlm,
     log,
-    skills: [createKbCollect(), createKbFiles()],
+    skills: [createKbCollect(), createKbFiles(), createKbAsk()],
     context: () =>
       llm && {
         notifier,
