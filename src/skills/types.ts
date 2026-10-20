@@ -37,6 +37,8 @@ export interface Skill {
   name: string;
   /** One line the router LLM uses to decide when this skill applies. */
   description: string;
+  /** Receives questions no other skill claims, instead of the router answering "none" (at most one skill). */
+  defaultForQuestions?: boolean;
   run(task: Task, ctx: SkillContext): Promise<void>;
   /** Handle a button click; the returned text replaces the original message. */
   onAction?(action: SkillAction, ctx: SkillContext): Promise<string>;

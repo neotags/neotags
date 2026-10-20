@@ -630,4 +630,34 @@ describe("router", () => {
     await router.handleAction("kb-files:undo", "a", { id: "U1" }, "C1");
     expect(f.onyx!.delete).toHaveBeenCalledWith("a");
   });
+
+  // The model's choice itself is not testable here; these pin what it is told.
+  const promptFor = async (skills: ReturnType<typeof createKbAsk>[]) => {
+    const chat = vi.fn(async () => ({ text: JSON.stringify({ skill: "none" }), usage: { promptTokens: 1, completionTokens: 1 } }));
+    const f = fakes();
+    await new Router({ botName: "moose", notifier: f.ctx.notifier, llm: { chat }, log, context: () => f.ctx, skills }).handle(
+      task({ text: "what's the max bandwidth supported by NVIDIA SN5600 Ethernet switch", thread: undefined }),
+    );
+    return (chat.mock.calls[0] as unknown as [{ content: string }[]])[0][0]!.content;
+  };
+
+  it("sends questions no other skill claims to the default-for-questions skill, not to 'none'", async () => {
+    const system = await promptFor([createKbCollect(), createKbFiles(), createKbAsk()]);
+    expect(system).toMatch(/question or request for information that no other skill handles goes to kb-ask, even when it does not mention the knowledge base/);
+    expect(system).toMatch(/Use "none" only for greetings, small talk/);
+    expect(system).toMatch(/even when the KB is not mentioned/); // the skill description says so too
+  });
+
+  it("adds no such rule when no skill is the default (the router keeps its old behavior)", async () => {
+    const system = await promptFor([createKbCollect(), createKbFiles()]);
+    expect(system).not.toMatch(/no other skill handles/);
+    expect(system).toMatch(/or "none" if no skill clearly applies/);
+  });
+
+  it("still answers a 'none' decision with the help text", async () => {
+    const chat = vi.fn(async () => ({ text: JSON.stringify({ skill: "none" }), usage: { promptTokens: 1, completionTokens: 1 } }));
+    const f = fakes();
+    await new Router({ botName: "moose", notifier: f.ctx.notifier, llm: { chat }, log, context: () => f.ctx, skills: [createKbAsk()] }).handle(task({ text: "thanks!", thread: undefined }));
+    expect(f.sent[0]!.text).toMatch(/not sure what you need/);
+  });
 });
