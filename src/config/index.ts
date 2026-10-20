@@ -16,6 +16,13 @@ const fileSchema = z.object({
       allowPrivateChannels: z.boolean().default(false),
     })
     .prefault({}),
+  skills: z
+    .object({
+      // Skills to leave out (kb-collect, kb-files, kb-ask), e.g. while one is not good enough yet. They are
+      // not registered: the router does not offer them and their buttons stop working. Unknown names fail at startup.
+      disabled: z.array(z.string()).default([]),
+    })
+    .prefault({}),
   onyx: z
     .object({
       baseUrl: z.string().url().optional(),
@@ -131,7 +138,12 @@ export function loadConfig(
     ...(env.LLM_MAX_TOKENS && { maxTokens: Number(env.LLM_MAX_TOKENS) }),
     ...(env.LLM_EXTRA_BODY && { extraBody: parseJsonEnv("LLM_EXTRA_BODY", env.LLM_EXTRA_BODY) }),
   };
-  const file = fileSchema.parse({ ...raw, llm: { ...raw.llm, ...llmEnv } });
+  // Comma-separated; set but empty means "none disabled" and overrides the file.
+  const skillsEnv =
+    env.NEOTAGS_DISABLED_SKILLS !== undefined
+      ? { disabled: env.NEOTAGS_DISABLED_SKILLS.split(",").map((s) => s.trim()).filter(Boolean) }
+      : {};
+  const file = fileSchema.parse({ ...raw, llm: { ...raw.llm, ...llmEnv }, skills: { ...raw.skills, ...skillsEnv } });
   return {
     ...file,
     secrets: {

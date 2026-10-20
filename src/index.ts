@@ -4,9 +4,7 @@ import { createGateway } from "./agent/models.js";
 import { inputBudgetTokens, loadConfig } from "./config/index.js";
 import { createSlack } from "./gateway/slack.js";
 import { Router } from "./router/index.js";
-import { createKbAsk } from "./skills/kb-ask/index.js";
-import { createKbCollect } from "./skills/kb-collect/index.js";
-import { createKbFiles } from "./skills/kb-files/index.js";
+import { allSkills, selectSkills } from "./skills/registry.js";
 import { HttpOnyxClient, type OnyxClient } from "./tools/onyx.js";
 
 // Kubernetes sends SIGTERM then waits terminationGracePeriodSeconds (default 30s) before SIGKILL.
@@ -36,13 +34,16 @@ if (cfg.onyx.baseUrl) {
   });
 } else log.warn("onyx.baseUrl is not set; knowledge collection is disabled");
 
+const skills = selectSkills(allSkills(), cfg.skills.disabled);
+log.info({ skills: skills.map((s) => s.name), disabled: cfg.skills.disabled }, "skills registered");
+
 const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
   new Router({
     botName: cfg.bot.name,
     notifier,
     llm: routerLlm,
     log,
-    skills: [createKbCollect(), createKbFiles(), createKbAsk()],
+    skills,
     context: () =>
       llm && {
         notifier,
