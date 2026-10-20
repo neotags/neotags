@@ -1,10 +1,9 @@
 import type { Task } from "../../task.js";
-import type { OnyxSearchResult } from "../../tools/onyx.js";
+import { OnyxError, type OnyxSearchResult } from "../../tools/onyx.js";
 import { redact } from "../../tools/redact.js";
 import type { Skill, SkillContext } from "../types.js";
 
 const NAME = "kb-ask";
-const CHARS_PER_TOKEN = 4;
 const MAX_SOURCE_CHARS = 6000;
 // Slack caps a section block's text at 3000 characters.
 const MAX_ANSWER_CHARS = 2800;
@@ -44,6 +43,20 @@ export function pickSources(results: OnyxSearchResult[], budgetChars: number): (
   return out;
 }
 
+/** What a failed search means for whoever runs the bot; the user sees this instead of a bare "something went wrong". */
+export function searchFailure(err: unknown): string {
+  const status = err instanceof OnyxError ? err.status : undefined;
+  if (status === 401 || status === 403) {
+    return `Onyx refused the search (${status}). Its API key probably needs the READ_SEARCH permission, in addition to the one used to save files. Ask whoever runs me to check.`;
+  }
+  if (status === 404) return "Onyx has no search endpoint at the configured path (`onyx.searchPath`). Ask whoever runs me to check it.";
+  if (status === 422) return "Onyx rejected the search request (422). Its version may not match what I expect. Ask whoever runs me to check the logs.";
+  if (status !== undefined && status >= 500) {
+    return `Onyx failed while searching (${status}). Search needs an LLM provider configured in Onyx. Ask whoever runs me to check its logs.`;
+  }
+  return "I couldn't get a search answer from Onyx in time (it did not respond, or timed out). Try again in a moment.";
+}
+
 export function createKbAsk(): Skill {
   return {
     name: NAME,
@@ -57,8 +70,16 @@ export function createKbAsk(): Skill {
       const question = redact(task.text).text.trim();
       if (!question) return reply("What would you like to know? Ask me a question about the knowledge base.");
 
-      const hits = await ctx.onyx.search(question, ctx.maxSearchResults);
-      const sources = pickSources(hits, ctx.maxInputTokens * CHARS_PER_TOKEN);
+      let hits: OnyxSearchResult[];
+      try {
+        hits = await ctx.onyx.search(question, ctx.maxSearchResults);
+      } catch (err) {
+        if (!(err instanceof OnyxError)) throw err;
+        // The cause is operational (key, path, Onyx itself): log it in full, tell the user what to ask for.
+        ctx.log.warn({ taskId: task.id, status: err.status, err: err.message }, "knowledge search failed");
+        return reply(searchFailure(err));
+      }
+      const sources = pickSources(hits, ctx.maxInputTokens * ctx.charsPerToken);
       ctx.log.info({ taskId: task.id, hits: hits.length, used: sources.length }, "knowledge searched");
       if (!sources.length) {
         return reply("I couldn't find anything about that in the knowledge base. If it's in a file or thread, ask me to save it first.");
@@ -72,7 +93,7 @@ export function createKbAsk(): Skill {
           { role: "system", content: SYSTEM },
           { role: "user", content: `${context}\n\n<question>\n${question}\n</question>` },
         ],
-        { temperature: 0, maxTokens: 1200 },
+        { purpose: "answer" },
       );
       const answer = r.text.trim();
       if (!answer) return reply("I couldn't put an answer together from what I found. Try rephrasing the question.");

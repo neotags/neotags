@@ -61,7 +61,27 @@ const fileSchema = z.object({
           supportsUsageInStreaming: z.boolean().optional(),
         })
         .prefault({}),
-      summarizeMaxInputTokens: z.number().int().default(60000),
+      // Extra JSON fields added to every chat request, for gateway-specific switches, e.g. turning off
+      // thinking on a reasoning model: { chat_template_kwargs: { enable_thinking: false } }.
+      extraBody: z.record(z.string(), z.unknown()).prefault({}),
+      // Sampling temperature for every call. Some reasoning models only accept their own default; set the
+      // gateway's required value here, or drop it with `null`.
+      temperature: z.number().min(0).max(2).nullable().default(0),
+      // Output budget (tokens) per kind of call. Reasoning models spend it thinking too, so give them room.
+      outputTokens: z
+        .object({
+          router: z.number().int().positive().default(200), // pick a skill: one small JSON object
+          notes: z.number().int().positive().default(1500), // working notes for one part of a long thread
+          summary: z.number().int().positive().default(3000), // thread summary (the whole KB entry)
+          fileSummary: z.number().int().positive().default(1200), // description, contents, key facts of a file
+          answer: z.number().int().positive().default(1200), // kb-ask answer
+        })
+        .prefault({}),
+      // Prompt budget for summaries and answers, in tokens. Default: half the context window minus the
+      // summary output budget, so it follows the model (see `inputBudgetTokens`).
+      summarizeMaxInputTokens: z.number().int().positive().optional(),
+      // Rough size of a token in characters, to turn token budgets into character budgets.
+      charsPerToken: z.number().positive().default(4),
     })
     .prefault({}),
   logLevel: z.string().default("info"),
@@ -83,6 +103,19 @@ function required(env: NodeJS.ProcessEnv, key: string): string {
   return v;
 }
 
+function parseJsonEnv(key: string, value: string): unknown {
+  try {
+    return JSON.parse(value);
+  } catch {
+    throw new Error(`env var ${key} is not valid JSON`);
+  }
+}
+
+/** Prompt budget in tokens: the explicit setting, else half the context window minus the summary output. */
+export function inputBudgetTokens(llm: Config["llm"]): number {
+  return llm.summarizeMaxInputTokens ?? Math.max(1000, Math.floor(llm.contextWindow / 2) - llm.outputTokens.summary);
+}
+
 export function loadConfig(
   env: NodeJS.ProcessEnv = process.env,
   read: (path: string) => string = (p) => readFileSync(p, "utf8"),
@@ -93,6 +126,10 @@ export function loadConfig(
     ...(env.LLM_BASE_URL && { baseUrl: env.LLM_BASE_URL }),
     ...(env.LLM_MODEL && { model: env.LLM_MODEL }),
     ...(env.LLM_ROUTER_MODEL && { routerModel: env.LLM_ROUTER_MODEL }),
+    // Numbers arrive as strings; a bad value becomes NaN and fails validation with the field name.
+    ...(env.LLM_CONTEXT_WINDOW && { contextWindow: Number(env.LLM_CONTEXT_WINDOW) }),
+    ...(env.LLM_MAX_TOKENS && { maxTokens: Number(env.LLM_MAX_TOKENS) }),
+    ...(env.LLM_EXTRA_BODY && { extraBody: parseJsonEnv("LLM_EXTRA_BODY", env.LLM_EXTRA_BODY) }),
   };
   const file = fileSchema.parse({ ...raw, llm: { ...raw.llm, ...llmEnv } });
   return {

@@ -1,6 +1,6 @@
 import { z } from "zod";
 import { parseWith } from "../../agent/json.js";
-import type { LlmClient } from "../../agent/llm.js";
+import type { LlmClient, Purpose } from "../../agent/llm.js";
 import { chunk, line, transcriptOf, type Msg, type Prepared } from "./prepare.js";
 
 /** Bump when the stored document layout/fields change, so old entries can be found and re-summarized. */
@@ -74,7 +74,7 @@ export async function ask<T>(
   system: string,
   user: string,
   schema: z.ZodType<T>,
-  maxTokens: number,
+  purpose: Purpose,
 ): Promise<T> {
   const base = [
     { role: "system" as const, content: system },
@@ -84,7 +84,7 @@ export async function ask<T>(
   for (let attempt = 0; attempt < 2; attempt++) {
     const r = await llm.chat(
       attempt === 0 ? base : [...base, { role: "user" as const, content: `Your previous reply was invalid (${lastError}). Reply with the JSON object only.` }],
-      { json: true, temperature: 0, maxTokens },
+      { json: true, purpose },
     );
     try {
       return parseWith(schema, r.text);
@@ -136,20 +136,20 @@ export async function summarizeThread(
 ): Promise<ThreadSummary> {
   const transcript = transcriptOf(p.msgs);
   if (transcript.length <= budgetChars) {
-    const s = await ask(llm, SYSTEM, `${hintOf(hint)}<thread>\n${transcript}\n</thread>`, summarySchema, 3000);
+    const s = await ask(llm, SYSTEM, `${hintOf(hint)}<thread>\n${transcript}\n</thread>`, summarySchema, "summary");
     return { summary: checkEvidence(s, p.msgs), parts: 1 };
   }
 
   const parts = chunk(p.msgs, Math.floor(budgetChars * 0.6));
   // Bounded parallelism: faster than one by one, without hammering the gateway. Order is preserved.
   const notes = await mapLimit(parts, 3, (part) =>
-    ask(llm, NOTES_SYSTEM, `<thread_part>\n${transcriptOf(part)}\n</thread_part>`, notesSchema, 1500),
+    ask(llm, NOTES_SYSTEM, `<thread_part>\n${transcriptOf(part)}\n</thread_part>`, notesSchema, "notes"),
   );
   const edge = (ms: Msg[]) => ms.map(line).join("\n");
   const user =
     `${hintOf(hint)}<notes>\n${notes.map((n, i) => `Part ${i + 1} of ${notes.length}: ${JSON.stringify(n)}`).join("\n")}\n</notes>\n\n` +
     `<opening>\n${edge(p.msgs.slice(0, 3))}\n</opening>\n<closing>\n${edge(p.msgs.slice(-4))}\n</closing>`;
-  const s = await ask(llm, REDUCE_SYSTEM, user, summarySchema, 3000);
+  const s = await ask(llm, REDUCE_SYSTEM, user, summarySchema, "summary");
   return { summary: checkEvidence(s, p.msgs), parts: parts.length };
 }
 

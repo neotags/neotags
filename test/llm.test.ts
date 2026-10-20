@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { toBeforeToolCall } from "../src/agent/index.js";
 import { LlmError, PiLlmClient, createLlm } from "../src/agent/llm.js";
 import { createGateway } from "../src/agent/models.js";
-import { loadConfig } from "../src/config/index.js";
+import { inputBudgetTokens, loadConfig } from "../src/config/index.js";
 
 const base = { SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y" };
 const cfgFor = (env: Record<string, string> = {}, yaml = "") =>
@@ -27,6 +27,36 @@ describe("llm config", () => {
   });
   it("rejects an invalid base url", () => {
     expect(() => cfgFor({ LLM_BASE_URL: "not a url" })).toThrow();
+  });
+});
+
+describe("llm limits config", () => {
+  it("defaults to the previously hard-coded values", () => {
+    const { llm } = cfgFor();
+    expect(llm.outputTokens).toEqual({ router: 200, notes: 1500, summary: 3000, fileSummary: 1200, answer: 1200 });
+    expect(llm).toMatchObject({ temperature: 0, charsPerToken: 4, contextWindow: 128_000, maxTokens: 8192 });
+    expect(llm.extraBody).toEqual({});
+  });
+
+  it("derives the prompt budget from the context window unless set explicitly", () => {
+    expect(inputBudgetTokens(cfgFor().llm)).toBe(61_000); // 128000 / 2 - 3000
+    expect(inputBudgetTokens(cfgFor({}, "llm:\n  contextWindow: 32000\n  outputTokens:\n    summary: 2000\n").llm)).toBe(14_000);
+    expect(inputBudgetTokens(cfgFor({}, "llm:\n  summarizeMaxInputTokens: 60000\n").llm)).toBe(60_000);
+    expect(inputBudgetTokens(cfgFor({}, "llm:\n  contextWindow: 2000\n").llm)).toBe(1000); // never below a usable floor
+  });
+
+  it("takes context window, max tokens and extra body from env", () => {
+    const c = cfgFor({ LLM_CONTEXT_WINDOW: "65536", LLM_MAX_TOKENS: "4096", LLM_EXTRA_BODY: '{"chat_template_kwargs":{"enable_thinking":false}}' });
+    expect(c.llm).toMatchObject({ contextWindow: 65536, maxTokens: 4096, extraBody: { chat_template_kwargs: { enable_thinking: false } } });
+    expect(() => cfgFor({ LLM_EXTRA_BODY: "{nope" })).toThrow(/LLM_EXTRA_BODY is not valid JSON/);
+    expect(() => cfgFor({ LLM_CONTEXT_WINDOW: "lots" })).toThrow();
+  });
+
+  it("accepts per-purpose overrides and a null temperature", () => {
+    const c = cfgFor({}, "llm:\n  temperature: null\n  charsPerToken: 3\n  outputTokens:\n    router: 800\n");
+    expect(c.llm.temperature).toBeNull();
+    expect(c.llm.charsPerToken).toBe(3);
+    expect(c.llm.outputTokens).toMatchObject({ router: 800, answer: 1200 });
   });
 });
 
@@ -106,6 +136,59 @@ describe("PiLlmClient", () => {
   it("rejects an empty response", async () => {
     const complete = vi.fn().mockResolvedValue(msg({ content: [] }));
     await expect(new PiLlmClient({ complete, timeoutMs: 1, maxRetries: 0 }).chat([])).rejects.toThrow(/no text/);
+  });
+
+  // The model "thinks" until max_tokens, so the reply has no text block (seen with a reasoning model on the router's 200 tokens).
+  it("retries once with a bigger budget when the answer was eaten by thinking", async () => {
+    const thinkingOnly = msg({ content: [{ type: "thinking", thinking: "hmm..." }], stopReason: "length", usage: { input: 3, output: 200 } });
+    const complete = vi.fn().mockResolvedValueOnce(thinkingOnly).mockResolvedValueOnce(msg({ content: [{ type: "text", text: '{"skill":"kb-ask"}' }] }));
+    const c = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0, maxTokensCap: 8192 });
+    expect((await c.chat([{ role: "user", content: "x" }], { maxTokens: 200 })).text).toBe('{"skill":"kb-ask"}');
+    expect(complete.mock.calls.map((c) => c[1].maxTokens)).toEqual([200, 1024]);
+  });
+
+  it("also widens when the reply was cut off mid-JSON, but only once and never past the cap", async () => {
+    const cut = msg({ content: [{ type: "text", text: '{"description": "cut' }], stopReason: "length" });
+    const complete = vi.fn().mockResolvedValue(cut);
+    const c = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0, maxTokensCap: 3000 });
+    await c.chat([{ role: "user", content: "x" }], { maxTokens: 1200 });
+    expect(complete.mock.calls.map((c) => c[1].maxTokens)).toEqual([1200, 3000]);
+    // no budget given, or already at the cap: nothing to widen
+    const again = vi.fn().mockResolvedValue(cut);
+    await new PiLlmClient({ complete: again, timeoutMs: 1000, maxRetries: 0, maxTokensCap: 3000 }).chat([{ role: "user", content: "x" }], { maxTokens: 3000 });
+    expect(again).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains an empty reply in the error: stop reason, tokens, thinking", async () => {
+    const complete = vi.fn().mockResolvedValue(msg({ content: [{ type: "thinking", thinking: "abc" }], stopReason: "length", usage: { input: 1, output: 4096 } }));
+    await expect(new PiLlmClient({ complete, timeoutMs: 1, maxRetries: 0, maxTokensCap: 4096 }).chat([{ role: "user", content: "x" }], { maxTokens: 4096 })).rejects.toThrow(
+      /stopReason=length, output tokens=4096, thinking chars=3, maxTokens=4096/,
+    );
+  });
+
+  it("takes the output budget from the call's purpose and the temperature from config; explicit values win", async () => {
+    const complete = vi.fn().mockResolvedValue(msg());
+    const c = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0, outputTokens: { router: 700, answer: 900 }, temperature: 0.3 });
+    await c.chat([{ role: "user", content: "x" }], { purpose: "router" });
+    await c.chat([{ role: "user", content: "x" }], { purpose: "answer", maxTokens: 50, temperature: 0 });
+    await c.chat([{ role: "user", content: "x" }]);
+    expect(complete.mock.calls.map((c) => [c[1].maxTokens, c[1].temperature])).toEqual([[700, 0.3], [50, 0], [undefined, 0.3]]);
+    // no configured temperature (null in config): none is sent, so the gateway default applies
+    const free = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0 });
+    await free.chat([{ role: "user", content: "x" }], { purpose: "router" });
+    expect(complete.mock.calls[3]![1]).not.toHaveProperty("temperature");
+    expect(complete.mock.calls[3]![1]).not.toHaveProperty("maxTokens");
+  });
+
+  it("adds llm.extraBody to the request, next to json mode", async () => {
+    const complete = vi.fn().mockResolvedValue(msg());
+    const c = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0, extraBody: { chat_template_kwargs: { enable_thinking: false } } });
+    await c.chat([{ role: "user", content: "x" }], { json: true });
+    expect(complete.mock.calls[0]![1].onPayload({ model: "m" })).toEqual({
+      model: "m", response_format: { type: "json_object" }, chat_template_kwargs: { enable_thinking: false },
+    });
+    await c.chat([{ role: "user", content: "x" }]);
+    expect(complete.mock.calls[1]![1].onPayload({ model: "m" })).toEqual({ model: "m", chat_template_kwargs: { enable_thinking: false } });
   });
 });
 

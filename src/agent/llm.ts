@@ -7,7 +7,13 @@ export interface ChatMessage {
   content: string;
 }
 
+/** What a call is for; config (llm.outputTokens) sets the output budget of each. */
+export type Purpose = "router" | "notes" | "summary" | "fileSummary" | "answer";
+
 export interface ChatOptions {
+  /** Picks the output budget from config. An explicit `maxTokens` wins. */
+  purpose?: Purpose;
+  /** Overrides llm.temperature for this call. */
   temperature?: number;
   maxTokens?: number;
   /** Ask the gateway for a JSON object. Not every gateway supports it; callers must still validate. */
@@ -38,6 +44,14 @@ export interface LlmDeps {
   timeoutMs: number;
   maxRetries: number;
   sleep?: (ms: number) => Promise<void>;
+  /** Upper bound when a call is retried with a larger output budget (llm.maxTokens). */
+  maxTokensCap?: number;
+  /** Extra fields merged into every request body (llm.extraBody), e.g. to switch off thinking on a gateway. */
+  extraBody?: Record<string, unknown>;
+  /** Output budget per purpose (llm.outputTokens). */
+  outputTokens?: Partial<Record<Purpose, number>>;
+  /** Default sampling temperature (llm.temperature); undefined sends none, leaving the gateway's default. */
+  temperature?: number;
 }
 
 // pi-ai reports failures as stopReason "error" rather than throwing; retry the transient ones.
@@ -56,6 +70,10 @@ export class PiLlmClient implements LlmClient {
     };
     const sleep = this.d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
+    const extra = this.d.extraBody && Object.keys(this.d.extraBody).length > 0 ? this.d.extraBody : undefined;
+    let budget = opts.maxTokens ?? (opts.purpose ? this.d.outputTokens?.[opts.purpose] : undefined);
+    const temperature = opts.temperature ?? this.d.temperature;
+    let widened = false;
     let last = "LLM request failed";
     for (let attempt = 0; attempt <= this.d.maxRetries; attempt++) {
       if (attempt > 0) await sleep(Math.min(500 * 2 ** (attempt - 1), 8000));
@@ -63,10 +81,14 @@ export class PiLlmClient implements LlmClient {
       try {
         msg = await this.d.complete(context, {
           signal: AbortSignal.timeout(this.d.timeoutMs),
-          ...(opts.temperature !== undefined && { temperature: opts.temperature }),
-          ...(opts.maxTokens !== undefined && { maxTokens: opts.maxTokens }),
-          ...(opts.json && {
-            onPayload: (p: unknown) => ({ ...(p as object), response_format: { type: "json_object" } }),
+          ...(temperature !== undefined && { temperature }),
+          ...(budget !== undefined && { maxTokens: budget }),
+          ...((opts.json || extra) && {
+            onPayload: (p: unknown) => ({
+              ...(p as object),
+              ...(opts.json && { response_format: { type: "json_object" } }),
+              ...extra,
+            }),
           }),
         });
       } catch (err) {
@@ -83,7 +105,22 @@ export class PiLlmClient implements LlmClient {
         .filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text")
         .map((c) => c.text)
         .join("");
-      if (!text) throw new LlmError("LLM returned no text content");
+      // A reasoning model spends the output budget thinking: the reply has no answer, or one cut off by the
+      // limit. Retry once with more room (not counted against the transient-error retries).
+      const cap = this.d.maxTokensCap;
+      if ((!text || msg.stopReason === "length") && !widened && budget !== undefined && cap !== undefined && budget < cap) {
+        widened = true;
+        budget = Math.min(Math.max(budget * 4, 1024), cap);
+        attempt--;
+        last = "output budget too small";
+        continue;
+      }
+      if (!text) {
+        const thinking = msg.content.reduce((n, c) => n + (c.type === "thinking" ? c.thinking.length : 0), 0);
+        throw new LlmError(
+          `LLM returned no text content (stopReason=${msg.stopReason}, output tokens=${msg.usage.output}, thinking chars=${thinking}, maxTokens=${budget ?? "default"})`,
+        );
+      }
       return { text, usage: { promptTokens: msg.usage.input, completionTokens: msg.usage.output } };
     }
     throw new LlmError(`LLM request failed after ${this.d.maxRetries + 1} attempts: ${last}`);
@@ -104,5 +141,9 @@ export function createLlm(
     complete: (context, o) => gateway.models.complete(model, context, o),
     timeoutMs: cfg.llm.timeoutMs,
     maxRetries: cfg.llm.maxRetries,
+    maxTokensCap: cfg.llm.maxTokens,
+    extraBody: cfg.llm.extraBody,
+    outputTokens: cfg.llm.outputTokens,
+    ...(cfg.llm.temperature !== null && { temperature: cfg.llm.temperature }),
   });
 }

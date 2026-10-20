@@ -23,5 +23,20 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
   model: gpt-4o-mini                   # or env LLM_MODEL (required once an LLM skill runs)
   # routerModel: <fast model>          # or env LLM_ROUTER_MODEL; smaller/faster model for intent routing
   #                                    # (same gateway and key). Defaults to `model`.
+  # Reasoning models (DeepSeek, Qwen3, ...) can spend a whole small max_tokens thinking and return no answer.
+  # The client retries once with a bigger budget (up to maxTokens). If your gateway can turn thinking off,
+  # add its switch to every request, e.g.:
+  # extraBody: { chat_template_kwargs: { enable_thinking: false } }   # or env LLM_EXTRA_BODY (JSON)
+  # contextWindow: 128000                # or env LLM_CONTEXT_WINDOW; the model's context size (tokens)
+  # maxTokens: 8192                      # or env LLM_MAX_TOKENS; ceiling for a single reply
+  # temperature: 0                       # null = send none (for models that only accept their own default)
+  # outputTokens:                        # output budget per kind of call (reasoning models need headroom)
+  #   router: 200                        #   pick a skill
+  #   notes: 1500                        #   notes for one part of a long thread
+  #   summary: 3000                      #   thread summary
+  #   fileSummary: 1200                  #   description / contents / key facts of a file
+  #   answer: 1200                       #   kb-ask answer
+  # summarizeMaxInputTokens: 60000       # prompt budget; default = contextWindow / 2 - outputTokens.summary
+  # charsPerToken: 4                     # lower (e.g. 2-3) for CJK-heavy text so budgets are not overrun
 logLevel: info
 # Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none)

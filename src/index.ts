@@ -1,7 +1,7 @@
 import { pino } from "pino";
 import { createLlm, type LlmClient } from "./agent/llm.js";
 import { createGateway } from "./agent/models.js";
-import { loadConfig } from "./config/index.js";
+import { inputBudgetTokens, loadConfig } from "./config/index.js";
 import { createSlack } from "./gateway/slack.js";
 import { Router } from "./router/index.js";
 import { createKbAsk } from "./skills/kb-ask/index.js";
@@ -60,7 +60,8 @@ const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
           summarize: cfg.attachments.summarize,
         },
         maxSearchResults: cfg.onyx.maxResults,
-        maxInputTokens: cfg.llm.summarizeMaxInputTokens,
+        maxInputTokens: inputBudgetTokens(cfg.llm),
+        charsPerToken: cfg.llm.charsPerToken,
       },
   }),
 );

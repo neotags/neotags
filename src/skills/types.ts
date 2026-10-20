@@ -20,6 +20,8 @@ export interface SkillContext {
   maxSearchResults: number;
   /** Prompt budget for summarization, in tokens (estimated). */
   maxInputTokens: number;
+  /** Characters per token, to turn the token budget into a character budget (llm.charsPerToken). */
+  charsPerToken: number;
 }
 
 export interface SkillAction {

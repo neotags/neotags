@@ -11,7 +11,6 @@ import type { Skill, SkillAction, SkillContext } from "../types.js";
 export const docId = (channel: string, threadTs: string) => `neotags-slack-${channel}-${threadTs}`;
 
 const NAME = "kb-collect";
-const CHARS_PER_TOKEN = 4;
 /** Up to this many prompt-sized parts are summarized by map-reduce; a thread beyond that is thinned first. */
 const MAX_PARTS = 8;
 
@@ -70,7 +69,7 @@ export function createKbCollect(): Skill {
       const raw = all.filter((m) => m.ts !== task.triggerTs);
 
       // 1. drop noise, redact, number the messages
-      const budgetChars = ctx.maxInputTokens * CHARS_PER_TOKEN;
+      const budgetChars = ctx.maxInputTokens * ctx.charsPerToken;
       const prepared = fitToBudget(prepare(raw), budgetChars * MAX_PARTS);
       if (prepared.msgs.length === 0) return reply("There is nothing in this thread to record yet.");
 

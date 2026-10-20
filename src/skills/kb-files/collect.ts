@@ -99,7 +99,7 @@ export async function collectFiles(files: SharedFile[], ctx: SkillContext, src: 
       let summary: FileSummary | undefined;
       if (ctx.attachments.summarize) {
         try {
-          const budget = Math.min(ctx.maxInputTokens * 4, MAX_SUMMARY_INPUT_CHARS);
+          const budget = Math.min(ctx.maxInputTokens * ctx.charsPerToken, MAX_SUMMARY_INPUT_CHARS);
           summary = await describeFile(ctx.llm, { name: file.name, kind: ex.kind, note, sections }, budget);
           // The input was already redacted; scrub the output too in case the model reconstructs a secret.
           const scrub = (t: string) => redact(t).text;

@@ -41,6 +41,8 @@ export interface OnyxSettings {
   ccPairId: number;
   apiKey?: string;
   timeoutMs?: number;
+  /** Search runs query expansion and reranking with an LLM inside Onyx, so it is allowed longer. */
+  searchTimeoutMs?: number;
 }
 
 /** Onyx ingestion API (`POST {path}` upsert, `DELETE {path}/{id}`); needs a key with MANAGE_CONNECTORS. */
@@ -56,7 +58,7 @@ export class HttpOnyxClient implements OnyxClient {
     this.searchUrl = s.baseUrl.replace(/\/+$/, "") + "/" + (s.searchPath ?? "/api/search").replace(/^\/+|\/+$/g, "");
   }
 
-  private async call(url: string, init: RequestInit): Promise<Response> {
+  private async call(url: string, init: RequestInit, timeoutMs = this.s.timeoutMs ?? 30_000): Promise<Response> {
     const headers: Record<string, string> = { "content-type": "application/json" };
     if (this.s.apiKey) headers.authorization = `Bearer ${this.s.apiKey}`;
     let res: Response;
@@ -64,7 +66,7 @@ export class HttpOnyxClient implements OnyxClient {
       res = await this.fetchImpl(url, {
         ...init,
         headers,
-        signal: AbortSignal.timeout(this.s.timeoutMs ?? 30_000),
+        signal: AbortSignal.timeout(timeoutMs),
       });
     } catch (err) {
       throw new OnyxError(`Onyx request failed: ${(err as Error).message}`);
@@ -92,7 +94,11 @@ export class HttpOnyxClient implements OnyxClient {
 
   async search(query: string, limit: number): Promise<OnyxSearchResult[]> {
     // Onyx rejects queries over 2048 characters.
-    const res = await this.call(this.searchUrl, { method: "POST", body: JSON.stringify({ query: query.slice(0, 2048) }) });
+    const res = await this.call(
+      this.searchUrl,
+      { method: "POST", body: JSON.stringify({ query: query.slice(0, 2048) }) },
+      this.s.searchTimeoutMs ?? 90_000,
+    );
     const j = (await res.json().catch(() => ({}))) as {
       results?: { title?: string; content?: string; link?: string | null; updated_at?: string | null }[];
     };
