@@ -10,6 +10,9 @@ import { isDmMessage, type MaybeDm } from "./dm.js";
 import { Inflight } from "./inflight.js";
 import { stripMention } from "./mention.js";
 
+/** Bolt's event types omit `files`, but a mention or DM posted with an upload carries them. */
+const fileCount = (e: object) => (e as { files?: unknown[] }).files?.length ?? 0;
+
 export interface SlackDeps {
   notifier: Notifier;
   slack: SlackReader;
@@ -59,6 +62,7 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
     ts: string;
     threadTs?: string;
     text: string;
+    files?: number;
     dm?: boolean;
   }
 
@@ -96,6 +100,7 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
           reply,
           triggerTs: ts,
           ...(input.threadTs && { thread: { ts: input.threadTs } }),
+          ...(input.files && { files: input.files }),
           ...(input.dm && { dm: true }),
         };
         log.info({ taskId: task.id, user, channel, ...(input.dm && { dm: true }) }, "task received");
@@ -129,6 +134,7 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
       ts: event.ts,
       ...(event.thread_ts && { threadTs: event.thread_ts }),
       text: stripMention(event.text, context.botUserId),
+      files: fileCount(event),
     });
   });
 
@@ -147,6 +153,7 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
       ts: e.ts,
       ...(e.thread_ts && { threadTs: e.thread_ts }),
       text: context.botUserId ? stripMention(e.text, context.botUserId) : e.text,
+      files: fileCount(e),
       dm: true,
     });
   });

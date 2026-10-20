@@ -63,8 +63,9 @@ export class Router {
       : task.dm
         ? "the message was sent to you in a 1:1 direct message; there is no channel thread to record"
         : "the message was posted at the top level of a channel, not in a thread";
+    const files = task.files ? `; ${task.files} file${task.files === 1 ? " was" : "s were"} uploaded with this message` : "";
     const messages = [
-      { role: "system" as const, content: SYSTEM(this.d.skills, context) },
+      { role: "system" as const, content: SYSTEM(this.d.skills, context + files) },
       { role: "user" as const, content: `<message>\n${task.text}\n</message>` },
     ];
     let lastError = "";

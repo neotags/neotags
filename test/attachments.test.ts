@@ -654,6 +654,17 @@ describe("router", () => {
     expect(system).toMatch(/or "none" if no skill clearly applies/);
   });
 
+  it("tells the router when the message itself carries files", async () => {
+    const chat = vi.fn(async () => ({ text: JSON.stringify({ skill: "none" }), usage: { promptTokens: 1, completionTokens: 1 } }));
+    const f = fakes();
+    const router = new Router({ botName: "moose", notifier: f.ctx.notifier, llm: { chat }, log, context: () => f.ctx, skills: [createKbCollect(), createKbFiles()] });
+    await router.handle(task({ text: "save the file", thread: undefined, files: 1 }));
+    await router.handle(task({ text: "save the file", thread: undefined }));
+    const system = (i: number) => (chat.mock.calls[i] as unknown as [{ content: string }[]])[0][0]!.content;
+    expect(system(0)).toMatch(/top level of a channel, not in a thread; 1 file was uploaded with this message/);
+    expect(system(1)).not.toMatch(/uploaded/);
+  });
+
   it("still answers a 'none' decision with the help text", async () => {
     const chat = vi.fn(async () => ({ text: JSON.stringify({ skill: "none" }), usage: { promptTokens: 1, completionTokens: 1 } }));
     const f = fakes();
