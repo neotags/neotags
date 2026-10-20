@@ -61,7 +61,8 @@ export function createKbAsk(): Skill {
   return {
     name: NAME,
     description:
-      "Answer a question from the team knowledge base: recorded Slack threads and files collected from Slack (PDF, Word, Excel, PowerPoint, ...) (e.g. 'what does the Q3 report say about churn?', 'has this error happened before?', 'search the KB for the failover runbook'). Not for saving anything.",
+      "Answer a question or look something up in the team knowledge base: recorded Slack threads and files collected from Slack (PDF, Word, Excel, PowerPoint, ...). Fits any factual or technical question, such as specs, how something works or is configured, or whether something happened before (e.g. 'what does the Q3 report say about churn?', 'what's the max bandwidth of the SN5600 switch?', 'has this error happened before?', 'search the KB for the failover runbook'), even when the KB is not mentioned. Not for saving anything.",
+    defaultForQuestions: true,
 
     async run(task: Task, ctx: SkillContext) {
       const reply = (text: string, blocks?: unknown[]) => ctx.notifier.reply(task.reply, text, blocks);
