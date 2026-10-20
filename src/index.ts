@@ -5,6 +5,7 @@ import { loadConfig } from "./config/index.js";
 import { createSlack } from "./gateway/slack.js";
 import { Router } from "./router/index.js";
 import { createKbCollect } from "./skills/kb-collect/index.js";
+import { createKbFiles } from "./skills/kb-files/index.js";
 import { HttpOnyxClient, type OnyxClient } from "./tools/onyx.js";
 
 // Kubernetes sends SIGTERM then waits terminationGracePeriodSeconds (default 30s) before SIGKILL.
@@ -40,7 +41,7 @@ const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
     notifier,
     llm: routerLlm,
     log,
-    skills: [createKbCollect()],
+    skills: [createKbCollect(), createKbFiles()],
     context: () =>
       llm && {
         notifier,
