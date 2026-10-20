@@ -665,6 +665,21 @@ describe("router", () => {
     expect(system(1)).not.toMatch(/uploaded/);
   });
 
+  it("counts the thread's files when the mention is a reply without its own upload", async () => {
+    const chat = vi.fn(async () => ({ text: JSON.stringify({ skill: "none" }), usage: { promptTokens: 1, completionTokens: 1 } }));
+    const f = fakes({ messages: [msg("100", [att("F1", "spec.pdf")]), msg("102", [], "@moose save the file")] });
+    const router = new Router({ botName: "moose", notifier: f.ctx.notifier, llm: { chat }, log, context: () => f.ctx, skills: [createKbCollect(), createKbFiles()] });
+    await router.handle(task({ text: "save the file" }));
+    const system = (chat.mock.calls[0] as unknown as [{ content: string }[]])[0][0]!.content;
+    expect(system).toMatch(/inside a thread; 1 file was shared in this thread/);
+    expect(f.slack.thread).toHaveBeenCalledWith("C1", "100");
+
+    // A Slack failure here must not block routing.
+    (f.slack.thread as ReturnType<typeof vi.fn>).mockRejectedValueOnce(new Error("ratelimited"));
+    await router.handle(task({ text: "save the file" }));
+    expect(chat).toHaveBeenCalledTimes(2);
+  });
+
   it("still answers a 'none' decision with the help text", async () => {
     const chat = vi.fn(async () => ({ text: JSON.stringify({ skill: "none" }), usage: { promptTokens: 1, completionTokens: 1 } }));
     const f = fakes();

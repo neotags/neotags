@@ -2,6 +2,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { parseWith } from "../agent/json.js";
 import type { LlmClient } from "../agent/llm.js";
+import { sharedFiles } from "../skills/kb-files/collect.js";
 import type { Skill, SkillAction, SkillContext } from "../skills/types.js";
 import type { Notifier, Task } from "../task.js";
 
@@ -56,16 +57,32 @@ export class Router {
     );
   }
 
-  private async decide(task: Task): Promise<z.infer<typeof decisionSchema>> {
+  /**
+   * Files the request can refer to: those uploaded with the mention, or anywhere in its thread. Without
+   * this, "save the file" reads as ambiguous since the router only sees the text.
+   */
+  private async fileCount(task: Task, ctx: SkillContext | undefined): Promise<number> {
+    if (task.files || !task.thread || !ctx) return task.files ?? 0;
+    try {
+      return sharedFiles(await ctx.slack.thread(task.reply.channel, task.thread.ts)).length;
+    } catch (err) {
+      // Routing still works from the text alone; the skill reports a real Slack failure itself.
+      this.d.log.warn({ err, taskId: task.id }, "router could not read the thread's files");
+      return 0;
+    }
+  }
+
+  private async decide(task: Task, files: number): Promise<z.infer<typeof decisionSchema>> {
     const llm = this.d.llm!;
     const context = task.thread
       ? "the message was posted inside a thread"
       : task.dm
         ? "the message was sent to you in a 1:1 direct message; there is no channel thread to record"
         : "the message was posted at the top level of a channel, not in a thread";
-    const files = task.files ? `; ${task.files} file${task.files === 1 ? " was" : "s were"} uploaded with this message` : "";
+    const where = task.files ? "uploaded with this message" : "shared in this thread";
+    const attached = files ? `; ${files} file${files === 1 ? " was" : "s were"} ${where}` : "";
     const messages = [
-      { role: "system" as const, content: SYSTEM(this.d.skills, context + files) },
+      { role: "system" as const, content: SYSTEM(this.d.skills, context + attached) },
       { role: "user" as const, content: `<message>\n${task.text}\n</message>` },
     ];
     let lastError = "";
@@ -89,13 +106,14 @@ export class Router {
       return say("I need an LLM to understand requests, and none is configured (set `llm.model` / `LLM_MODEL`).");
     }
 
-    const decision = await this.decide(task);
+    const ctx = this.d.context();
+    const files = await this.fileCount(task, ctx);
+    const decision = await this.decide(task, files);
     const skill = this.d.skills.find((s) => s.name === decision.skill);
-    this.d.log.info({ taskId: task.id, routed: skill?.name ?? "none" }, "routed");
+    this.d.log.info({ taskId: task.id, routed: skill?.name ?? "none", files }, "routed");
     if (!skill) {
       return say(decision.clarification?.trim() || `I'm not sure what you need. ${this.help()}`);
     }
-    const ctx = this.d.context();
     if (!ctx) return say("That skill is not available right now: its dependencies are not configured.");
     await skill.run(task, ctx);
   }
