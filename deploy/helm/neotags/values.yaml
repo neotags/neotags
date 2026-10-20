@@ -19,7 +19,14 @@ config:
   onyx:
     baseUrl: https://onyx.example.com
     ingestionPath: /api/ingestion
+    searchPath: /api/search       # Q&A (kb-ask); the API key needs READ_SEARCH
     ccPairId: 1
+    maxResults: 8
+  attachments:       # Slack files (PDF/DOCX/XLSX/PPTX/text/HTML) indexed with threads or on request
+    enabled: true
+    maxFileMb: 25
+    maxFiles: 10
+    summarize: true      # one LLM call per file: description, contents, key facts
   llm:               # any OpenAI-compatible gateway
     baseUrl: https://api.openai.com/v1
     model: gpt-4o-mini
@@ -49,7 +56,7 @@ ingress:
 
 resources:
   requests: { cpu: 100m, memory: 256Mi }
-  limits: { memory: 512Mi }
+  limits: { memory: 1Gi }   # PDF/XLSX extraction can briefly need a few hundred MB
 
 podAnnotations: {}
 nodeSelector: {}

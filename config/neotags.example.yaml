@@ -9,7 +9,15 @@ slack:
 onyx:
   baseUrl: https://onyx.example.com
   ingestionPath: /api/ingestion
+  searchPath: /api/search   # used by kb-ask; the API key also needs READ_SEARCH
   ccPairId: 1
+  maxResults: 8             # sections fetched from Onyx per question
+attachments:             # Slack files (PDF, DOCX, XLSX, PPTX, text, HTML) read into the KB
+  enabled: true          # false: files are never downloaded (kb-files is disabled; kb-collect ignores them)
+  maxFileMb: 25
+  maxFiles: 10           # per request; the rest are reported as skipped
+  maxTextChars: 600000   # extracted text kept per file
+  summarize: true       # one LLM call per file: description, contents and key facts stored with its text
 llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM, ...)
   baseUrl: https://api.openai.com/v1   # or env LLM_BASE_URL
   model: gpt-4o-mini                   # or env LLM_MODEL (required once an LLM skill runs)
