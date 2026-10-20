@@ -3,3 +3,4 @@ dist
 .env
 *.log
 config/neotags.yaml
+.claude/
