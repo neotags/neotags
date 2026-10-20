@@ -20,7 +20,23 @@ const fileSchema = z.object({
     .object({
       baseUrl: z.string().url().optional(),
       ingestionPath: z.string().default("/api/ingestion"),
+      searchPath: z.string().default("/api/search"),
       ccPairId: z.number().int().default(1),
+      // Sections fetched from Onyx to answer one question.
+      maxResults: z.number().int().positive().default(8),
+    })
+    .prefault({}),
+  // Slack files (PDF, Word, Excel, PowerPoint, text, HTML) read into the KB alongside recorded threads.
+  attachments: z
+    .object({
+      enabled: z.boolean().default(true),
+      maxFileMb: z.number().positive().default(25),
+      // Per request; the rest are listed as skipped.
+      maxFiles: z.number().int().positive().default(10),
+      // Extracted text kept per file.
+      maxTextChars: z.number().int().positive().default(600_000),
+      // One LLM call per file writes a catalogue entry (what it is, contents, key facts) stored with its text.
+      summarize: z.boolean().default(true),
     })
     .prefault({}),
   // Any OpenAI-compatible endpoint (OpenAI, LiteLLM, vLLM, an internal AI gateway, ...), driven by pi-ai.

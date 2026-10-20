@@ -25,6 +25,7 @@ function fakes(opts: { messages?: SlackMessage[]; kind?: "public" | "private" | 
   const onyx: OnyxClient = {
     upsert: vi.fn(async (d) => (docs.push(d), { alreadyExisted: false })),
     delete: vi.fn(async () => {}),
+    search: vi.fn(async () => []),
   };
   const messages = opts.messages ?? [
     { ts: "100", userId: "U1", userName: "Ann", text: "checkout is 502ing, password=hunter2hunter2", files: [], bot: false },
@@ -36,12 +37,13 @@ function fakes(opts: { messages?: SlackMessage[]; kind?: "public" | "private" | 
     permalink: vi.fn(async (_c: string, ts: string) => `https://slack.test/p/${ts}`),
     channel: vi.fn(async () => ({ id: "C1", name: "ops", kind: opts.kind ?? "public" })),
     userName: vi.fn(async (id) => (id === "U1" ? "Ann" : id)),
+    download: vi.fn(async () => Buffer.alloc(0)),
   };
   const replies = [...(opts.llmReplies ?? [JSON.stringify(goodSummary)])];
   const llm: LlmClient = {
     chat: vi.fn(async () => ({ text: replies.shift() ?? replies[0] ?? "", usage: { promptTokens: 1, completionTokens: 1 } })),
   };
-  const ctx: SkillContext = { notifier, slack, llm, onyx, log, botName: "moose", maxInputTokens: 60000, allowPrivateChannels: opts.allowPrivate ?? false };
+  const ctx: SkillContext = { notifier, slack, llm, onyx, log, botName: "moose", maxInputTokens: 60000, maxSearchResults: 8, attachments: { enabled: true, maxFileBytes: 1_000_000, maxFiles: 10, maxTextChars: 100_000, summarize: false }, allowPrivateChannels: opts.allowPrivate ?? false };
   return { sent, notifier, onyx, docs, slack, llm, ctx };
 }
 const task = (over: Partial<Task> = {}): Task => ({

@@ -36,7 +36,7 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
       await app.client.reactions.add({ channel: t.channel, timestamp: ts, name: emoji });
     },
   };
-  const slack = createSlackReader(app.client as unknown as SlackWebApi);
+  const slack = createSlackReader(app.client as unknown as SlackWebApi, { token: cfg.secrets.slackBotToken });
   const router = makeRouter({ notifier, slack });
   const dedupe = new Dedupe();
   const inflight = new Inflight();

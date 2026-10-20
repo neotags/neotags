@@ -14,6 +14,10 @@ export interface SkillContext {
   botName: string;
   /** Record threads from private channels (config slack.allowPrivateChannels). DMs are never recorded. */
   allowPrivateChannels: boolean;
+  /** Reading files shared in Slack into the KB (config attachments.*). */
+  attachments: { enabled: boolean; maxFileBytes: number; maxFiles: number; maxTextChars: number; summarize: boolean };
+  /** Sections fetched from Onyx to answer one question (config onyx.maxResults). */
+  maxSearchResults: number;
   /** Prompt budget for summarization, in tokens (estimated). */
   maxInputTokens: number;
 }

@@ -28,6 +28,7 @@ if (cfg.onyx.baseUrl) {
   onyx = new HttpOnyxClient({
     baseUrl: cfg.onyx.baseUrl,
     ingestionPath: cfg.onyx.ingestionPath,
+    searchPath: cfg.onyx.searchPath,
     ccPairId: cfg.onyx.ccPairId,
     apiKey: cfg.secrets.onyxApiKey,
   });
@@ -49,6 +50,14 @@ const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
         log,
         botName: cfg.bot.name,
         allowPrivateChannels: cfg.slack.allowPrivateChannels,
+        attachments: {
+          enabled: cfg.attachments.enabled,
+          maxFileBytes: Math.floor(cfg.attachments.maxFileMb * 1024 * 1024),
+          maxFiles: cfg.attachments.maxFiles,
+          maxTextChars: cfg.attachments.maxTextChars,
+          summarize: cfg.attachments.summarize,
+        },
+        maxSearchResults: cfg.onyx.maxResults,
         maxInputTokens: cfg.llm.summarizeMaxInputTokens,
       },
   }),
