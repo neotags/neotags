@@ -107,6 +107,45 @@ describe("PiLlmClient", () => {
     const complete = vi.fn().mockResolvedValue(msg({ content: [] }));
     await expect(new PiLlmClient({ complete, timeoutMs: 1, maxRetries: 0 }).chat([])).rejects.toThrow(/no text/);
   });
+
+  // The model "thinks" until max_tokens, so the reply has no text block (seen with a reasoning model on the router's 200 tokens).
+  it("retries once with a bigger budget when the answer was eaten by thinking", async () => {
+    const thinkingOnly = msg({ content: [{ type: "thinking", thinking: "hmm..." }], stopReason: "length", usage: { input: 3, output: 200 } });
+    const complete = vi.fn().mockResolvedValueOnce(thinkingOnly).mockResolvedValueOnce(msg({ content: [{ type: "text", text: '{"skill":"kb-ask"}' }] }));
+    const c = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0, maxTokensCap: 8192 });
+    expect((await c.chat([{ role: "user", content: "x" }], { maxTokens: 200 })).text).toBe('{"skill":"kb-ask"}');
+    expect(complete.mock.calls.map((c) => c[1].maxTokens)).toEqual([200, 1024]);
+  });
+
+  it("also widens when the reply was cut off mid-JSON, but only once and never past the cap", async () => {
+    const cut = msg({ content: [{ type: "text", text: '{"description": "cut' }], stopReason: "length" });
+    const complete = vi.fn().mockResolvedValue(cut);
+    const c = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0, maxTokensCap: 3000 });
+    await c.chat([{ role: "user", content: "x" }], { maxTokens: 1200 });
+    expect(complete.mock.calls.map((c) => c[1].maxTokens)).toEqual([1200, 3000]);
+    // no budget given, or already at the cap: nothing to widen
+    const again = vi.fn().mockResolvedValue(cut);
+    await new PiLlmClient({ complete: again, timeoutMs: 1000, maxRetries: 0, maxTokensCap: 3000 }).chat([{ role: "user", content: "x" }], { maxTokens: 3000 });
+    expect(again).toHaveBeenCalledTimes(1);
+  });
+
+  it("explains an empty reply in the error: stop reason, tokens, thinking", async () => {
+    const complete = vi.fn().mockResolvedValue(msg({ content: [{ type: "thinking", thinking: "abc" }], stopReason: "length", usage: { input: 1, output: 4096 } }));
+    await expect(new PiLlmClient({ complete, timeoutMs: 1, maxRetries: 0, maxTokensCap: 4096 }).chat([{ role: "user", content: "x" }], { maxTokens: 4096 })).rejects.toThrow(
+      /stopReason=length, output tokens=4096, thinking chars=3, maxTokens=4096/,
+    );
+  });
+
+  it("adds llm.extraBody to the request, next to json mode", async () => {
+    const complete = vi.fn().mockResolvedValue(msg());
+    const c = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0, extraBody: { chat_template_kwargs: { enable_thinking: false } } });
+    await c.chat([{ role: "user", content: "x" }], { json: true });
+    expect(complete.mock.calls[0]![1].onPayload({ model: "m" })).toEqual({
+      model: "m", response_format: { type: "json_object" }, chat_template_kwargs: { enable_thinking: false },
+    });
+    await c.chat([{ role: "user", content: "x" }]);
+    expect(complete.mock.calls[1]![1].onPayload({ model: "m" })).toEqual({ model: "m", chat_template_kwargs: { enable_thinking: false } });
+  });
 });
 
 describe("end to end against a fake OpenAI-compatible gateway", () => {

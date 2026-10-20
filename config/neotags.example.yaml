@@ -23,5 +23,9 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
   model: gpt-4o-mini                   # or env LLM_MODEL (required once an LLM skill runs)
   # routerModel: <fast model>          # or env LLM_ROUTER_MODEL; smaller/faster model for intent routing
   #                                    # (same gateway and key). Defaults to `model`.
+  # Reasoning models (DeepSeek, Qwen3, ...) can spend a whole small max_tokens thinking and return no answer.
+  # The client retries once with a bigger budget (up to maxTokens). If your gateway can turn thinking off,
+  # add its switch to every request, e.g.:
+  # extraBody: { chat_template_kwargs: { enable_thinking: false } }
 logLevel: info
 # Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none)

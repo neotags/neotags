@@ -61,6 +61,9 @@ const fileSchema = z.object({
           supportsUsageInStreaming: z.boolean().optional(),
         })
         .prefault({}),
+      // Extra JSON fields added to every chat request, for gateway-specific switches, e.g. turning off
+      // thinking on a reasoning model: { chat_template_kwargs: { enable_thinking: false } }.
+      extraBody: z.record(z.string(), z.unknown()).prefault({}),
       summarizeMaxInputTokens: z.number().int().default(60000),
     })
     .prefault({}),
