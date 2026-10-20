@@ -16,6 +16,8 @@ config:
     allowedChannels: []
     allowedUsers: []
     allowPrivateChannels: false   # true also records private-channel threads (see config example)
+  skills:
+    disabled: []                  # e.g. [kb-ask] to switch Q&A off; kb-collect, kb-files, kb-ask
   onyx:
     baseUrl: https://onyx.example.com
     ingestionPath: /api/ingestion

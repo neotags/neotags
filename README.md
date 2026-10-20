@@ -26,6 +26,7 @@ Try it: invite the bot to a public channel (private channels are off unless `sla
 
 - **Collect files.** `@moose save these files` (in a thread, or in a message that carries an upload) reads the PDF, DOCX, XLSX/XLSM, PPTX, CSV/text/log/JSON/YAML and HTML files shared there, redacts secrets, and indexes each as its own Onyx entry (tables become `Column: value` records and each file gets a short LLM-written summary with key facts, `attachments.summarize`) (`neotags-file-<slack file id>`, so repeating it updates rather than duplicates). `record the knowledge` also indexes the thread's files and links them from the thread entry. One Undo removes everything it saved. Needs the `files:read` Slack scope; `attachments.*` in the config sets limits.
 - **Ask.** `@moose what does the Q3 report say about churn?` — or the same question in a DM with the bot — searches Onyx (`onyx.searchPath`, key needs `READ_SEARCH`), answers from the retrieved sections only, and cites them. The same entries are searchable in the Onyx UI.
+- Switch a skill off with `skills.disabled: [kb-ask]` (or env `NEOTAGS_DISABLED_SKILLS=kb-ask`). It is then not offered by the router, not in the help text, and its buttons stop working. Without `kb-ask`, a question gets the help text.
 - Not supported yet: images and scanned PDFs (no OCR), legacy `.doc`/`.xls`/`.ppt`, password-protected files.
 
 ## Secret scanning

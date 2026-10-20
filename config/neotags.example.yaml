@@ -6,6 +6,9 @@ slack:
   allowedUsers: []       # empty = everyone
   allowPrivateChannels: false  # true: also record private-channel threads (bot invited; groups:read + groups:history).
   #                            # KB entries are visible to everyone who can search the KB. DMs are never recorded.
+skills:
+  disabled: []           # leave skills out: kb-collect, kb-files, kb-ask (e.g. [kb-ask] while answers are not good enough)
+  #                      # or env NEOTAGS_DISABLED_SKILLS=kb-ask,kb-files. Unknown names fail at startup.
 onyx:
   baseUrl: https://onyx.example.com
   ingestionPath: /api/ingestion
