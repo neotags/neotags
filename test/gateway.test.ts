@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config/index.js";
 import { Dedupe } from "../src/gateway/dedupe.js";
+import { isDmMessage } from "../src/gateway/dm.js";
 import { stripMention } from "../src/gateway/mention.js";
 import { authorize } from "../src/guardrails/policy.js";
 
@@ -59,6 +60,21 @@ describe("loadConfig", () => {
 describe("stripMention escaping", () => {
   it("treats the bot id literally", () => {
     expect(stripMention("<@U.BOT> hi <@UXBOT>", "U.BOT")).toBe("hi <@UXBOT>");
+  });
+});
+
+describe("isDmMessage", () => {
+  it("accepts a plain user DM and a file upload", () => {
+    expect(isDmMessage({ channel: "D1", ts: "1", channel_type: "im", user: "U1", text: "hi" })).toBe(true);
+    expect(isDmMessage({ channel: "D1", ts: "2", channel_type: "im", subtype: "file_share", user: "U1", text: "" })).toBe(true);
+  });
+  it("rejects channel traffic, bot echoes, edits and subtypes without user text", () => {
+    expect(isDmMessage({ channel: "C1", ts: "1", channel_type: "channel", user: "U1", text: "hi" })).toBe(false);
+    expect(isDmMessage({ channel: "D1", ts: "1", channel_type: "im", subtype: "bot_message", bot_id: "B1", text: "hi" })).toBe(false);
+    expect(isDmMessage({ channel: "D1", ts: "1", channel_type: "im", bot_id: "B1", user: "U1", text: "hi" })).toBe(false);
+    expect(isDmMessage({ channel: "D1", ts: "1", channel_type: "im", subtype: "message_changed" })).toBe(false);
+    expect(isDmMessage({ channel: "G1", ts: "1", channel_type: "group", user: "U1", text: "hi" })).toBe(false);
+    expect(isDmMessage({ channel: "G1", ts: "1", channel_type: "mpim", user: "U1", text: "hi" })).toBe(false);
   });
 });
 

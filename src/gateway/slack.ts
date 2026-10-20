@@ -6,6 +6,7 @@ import type { Router } from "../router/index.js";
 import { createSlackReader, type SlackReader, type SlackWebApi } from "../tools/slack.js";
 import type { Notifier, ReplyTarget, Task } from "../task.js";
 import { Dedupe } from "./dedupe.js";
+import { isDmMessage, type MaybeDm } from "./dm.js";
 import { Inflight } from "./inflight.js";
 import { stripMention } from "./mention.js";
 
@@ -50,30 +51,40 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
     }
   };
 
-  app.event("app_mention", async ({ event, body, context }) => {
-    // Bolt acks the HTTP request itself; the work below runs after the 3s window is safe.
-    const eventId = (body as { event_id?: string }).event_id ?? `${event.channel}:${event.ts}`;
-    const user = event.user;
-    if (!user || !context.botUserId) return;
-    const botUserId = context.botUserId;
-    if (dedupe.isDuplicate(eventId)) return;
+  /** A message event ready to be authorized and routed: channel mention or 1:1 DM. */
+  interface Incoming {
+    eventId: string;
+    user: string;
+    channel: string;
+    ts: string;
+    threadTs?: string;
+    text: string;
+    dm?: boolean;
+  }
 
+  /**
+   * Shared pipeline for `app_mention` and DM `message` events. DMs skip the channel allowlist: each
+   * user's DM has its own D-channel id, so `slack.allowedChannels` (channel ids) could never match.
+   * The user allowlist applies to both.
+   */
+  const runTask = async (input: Incoming) => {
+    const { eventId, user, channel, ts } = input;
     await inflight.track(
       (async () => {
         const reply: ReplyTarget = {
           kind: "slack",
-          channel: event.channel,
-          threadTs: event.thread_ts ?? event.ts,
+          channel,
+          threadTs: input.threadTs ?? ts,
         };
         const decision = authorize(
-          { allowedChannels: cfg.slack.allowedChannels, allowedUsers: cfg.slack.allowedUsers },
-          event.channel,
+          { allowedChannels: input.dm ? [] : cfg.slack.allowedChannels, allowedUsers: cfg.slack.allowedUsers },
+          channel,
           user,
         );
         if (!decision.ok) {
           // Quiet 🚫 reaction instead of a public message: no channel noise, no hint to outsiders.
-          log.info({ eventId, user, channel: event.channel, reason: decision.reason }, "denied");
-          await safely("react", () => notifier.react(reply, event.ts, "no_entry_sign"), { eventId });
+          log.info({ eventId, user, channel, reason: decision.reason, ...(input.dm && { dm: true }) }, "denied");
+          await safely("react", () => notifier.react(reply, ts, "no_entry_sign"), { eventId });
           return;
         }
 
@@ -81,12 +92,13 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
           id: eventId,
           source: "slack",
           actor: { id: user },
-          text: stripMention(event.text, botUserId),
+          text: input.text,
           reply,
-          triggerTs: event.ts,
-          ...(event.thread_ts && { thread: { ts: event.thread_ts } }),
+          triggerTs: ts,
+          ...(input.threadTs && { thread: { ts: input.threadTs } }),
+          ...(input.dm && { dm: true }),
         };
-        log.info({ taskId: task.id, user, channel: event.channel }, "task received");
+        log.info({ taskId: task.id, user, channel, ...(input.dm && { dm: true }) }, "task received");
         try {
           await router.handle(task);
         } catch (err) {
@@ -101,6 +113,42 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
         }
       })(),
     );
+  };
+
+  app.event("app_mention", async ({ event, body, context }) => {
+    // Bolt acks the HTTP request itself; the work below runs after the 3s window is safe.
+    const eventId = (body as { event_id?: string }).event_id ?? `${event.channel}:${event.ts}`;
+    const user = event.user;
+    if (!user || !context.botUserId) return;
+    if (dedupe.isDuplicate(eventId)) return;
+
+    await runTask({
+      eventId,
+      user,
+      channel: event.channel,
+      ts: event.ts,
+      ...(event.thread_ts && { threadTs: event.thread_ts }),
+      text: stripMention(event.text, context.botUserId),
+    });
+  });
+
+  // 1:1 messages to the app's Messages tab arrive as `message.im` (no @mention). Channel/group traffic
+  // stays mention-only.
+  app.event("message", async ({ event, body, context }) => {
+    const e = event as unknown as MaybeDm;
+    if (!isDmMessage(e)) return;
+    const eventId = (body as { event_id?: string }).event_id ?? `${e.channel}:${e.ts}`;
+    if (dedupe.isDuplicate(eventId)) return;
+
+    await runTask({
+      eventId,
+      user: e.user,
+      channel: e.channel,
+      ts: e.ts,
+      ...(e.thread_ts && { threadTs: e.thread_ts }),
+      text: context.botUserId ? stripMention(e.text, context.botUserId) : e.text,
+      dm: true,
+    });
   });
 
   // Button clicks (e.g. Undo). Action ids are `<skill>:<action>`; the same allowlists apply.

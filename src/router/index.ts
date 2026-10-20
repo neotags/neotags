@@ -52,7 +52,9 @@ export class Router {
     const llm = this.d.llm!;
     const context = task.thread
       ? "the message was posted inside a thread"
-      : "the message was posted at the top level of a channel, not in a thread";
+      : task.dm
+        ? "the message was sent to you in a 1:1 direct message; there is no channel thread to record"
+        : "the message was posted at the top level of a channel, not in a thread";
     const messages = [
       { role: "system" as const, content: SYSTEM(this.d.skills, context) },
       { role: "user" as const, content: `<message>\n${task.text}\n</message>` },

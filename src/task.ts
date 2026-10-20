@@ -18,6 +18,8 @@ export interface Task {
   triggerTs?: string;
   /** Present when the mention was posted inside an existing thread (the thread root's ts). */
   thread?: { ts: string };
+  /** True when the task came from a 1:1 DM with the bot: no mention, and no channel thread to record. */
+  dm?: boolean;
 }
 
 export interface Notifier {
