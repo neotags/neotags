@@ -63,7 +63,10 @@ const fileSchema = z.object({
       compat: z
         .object({
           supportsStore: z.boolean().optional(),
-          supportsDeveloperRole: z.boolean().optional(),
+          // With `reasoning: true` pi-ai sends the system prompt as a "developer" message. OpenAI-compatible
+          // gateways that don't know that role drop it without an error, so every call silently loses its
+          // instructions (and the untrusted-input rules). "system" works everywhere, so it is the default.
+          supportsDeveloperRole: z.boolean().default(false),
           supportsReasoningEffort: z.boolean().optional(),
           supportsUsageInStreaming: z.boolean().optional(),
         })

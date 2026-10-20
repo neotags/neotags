@@ -69,11 +69,13 @@ describe("createGateway", () => {
     const { model } = createGateway(c);
     expect(model).toMatchObject({
       id: "m", api: "openai-completions", baseUrl: "http://gw.test/v1", contextWindow: 32000,
-      compat: { supportsStore: false },
+      compat: { supportsStore: false, supportsDeveloperRole: false },
     });
   });
-  it("omits compat when none is configured", () => {
-    expect(createGateway(cfgFor({ LLM_MODEL: "m" })).model.compat).toBeUndefined();
+  it("sends the system prompt as 'system', not 'developer', unless the gateway opts in", () => {
+    expect(createGateway(cfgFor({ LLM_MODEL: "m" })).model.compat).toEqual({ supportsDeveloperRole: false });
+    const optIn = cfgFor({ LLM_MODEL: "m" }, "llm:\n  compat:\n    supportsDeveloperRole: true\n");
+    expect(createGateway(optIn).model.compat).toEqual({ supportsDeveloperRole: true });
   });
 });
 
