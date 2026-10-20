@@ -7,7 +7,13 @@ export interface ChatMessage {
   content: string;
 }
 
+/** What a call is for; config (llm.outputTokens) sets the output budget of each. */
+export type Purpose = "router" | "notes" | "summary" | "fileSummary" | "answer";
+
 export interface ChatOptions {
+  /** Picks the output budget from config. An explicit `maxTokens` wins. */
+  purpose?: Purpose;
+  /** Overrides llm.temperature for this call. */
   temperature?: number;
   maxTokens?: number;
   /** Ask the gateway for a JSON object. Not every gateway supports it; callers must still validate. */
@@ -42,6 +48,10 @@ export interface LlmDeps {
   maxTokensCap?: number;
   /** Extra fields merged into every request body (llm.extraBody), e.g. to switch off thinking on a gateway. */
   extraBody?: Record<string, unknown>;
+  /** Output budget per purpose (llm.outputTokens). */
+  outputTokens?: Partial<Record<Purpose, number>>;
+  /** Default sampling temperature (llm.temperature); undefined sends none, leaving the gateway's default. */
+  temperature?: number;
 }
 
 // pi-ai reports failures as stopReason "error" rather than throwing; retry the transient ones.
@@ -61,7 +71,8 @@ export class PiLlmClient implements LlmClient {
     const sleep = this.d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
     const extra = this.d.extraBody && Object.keys(this.d.extraBody).length > 0 ? this.d.extraBody : undefined;
-    let budget = opts.maxTokens;
+    let budget = opts.maxTokens ?? (opts.purpose ? this.d.outputTokens?.[opts.purpose] : undefined);
+    const temperature = opts.temperature ?? this.d.temperature;
     let widened = false;
     let last = "LLM request failed";
     for (let attempt = 0; attempt <= this.d.maxRetries; attempt++) {
@@ -70,7 +81,7 @@ export class PiLlmClient implements LlmClient {
       try {
         msg = await this.d.complete(context, {
           signal: AbortSignal.timeout(this.d.timeoutMs),
-          ...(opts.temperature !== undefined && { temperature: opts.temperature }),
+          ...(temperature !== undefined && { temperature }),
           ...(budget !== undefined && { maxTokens: budget }),
           ...((opts.json || extra) && {
             onPayload: (p: unknown) => ({
@@ -132,5 +143,7 @@ export function createLlm(
     maxRetries: cfg.llm.maxRetries,
     maxTokensCap: cfg.llm.maxTokens,
     extraBody: cfg.llm.extraBody,
+    outputTokens: cfg.llm.outputTokens,
+    ...(cfg.llm.temperature !== null && { temperature: cfg.llm.temperature }),
   });
 }

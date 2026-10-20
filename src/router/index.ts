@@ -62,7 +62,7 @@ export class Router {
     let lastError = "";
     for (let attempt = 0; attempt < 2; attempt++) {
       const extra = attempt === 0 ? [] : [{ role: "user" as const, content: `Invalid reply (${lastError}). JSON object only.` }];
-      const r = await llm.chat([...messages, ...extra], { json: true, temperature: 0, maxTokens: 200 });
+      const r = await llm.chat([...messages, ...extra], { json: true, purpose: "router" });
       try {
         return parseWith(decisionSchema, r.text);
       } catch (err) {

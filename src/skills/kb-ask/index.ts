@@ -4,7 +4,6 @@ import { redact } from "../../tools/redact.js";
 import type { Skill, SkillContext } from "../types.js";
 
 const NAME = "kb-ask";
-const CHARS_PER_TOKEN = 4;
 const MAX_SOURCE_CHARS = 6000;
 // Slack caps a section block's text at 3000 characters.
 const MAX_ANSWER_CHARS = 2800;
@@ -80,7 +79,7 @@ export function createKbAsk(): Skill {
         ctx.log.warn({ taskId: task.id, status: err.status, err: err.message }, "knowledge search failed");
         return reply(searchFailure(err));
       }
-      const sources = pickSources(hits, ctx.maxInputTokens * CHARS_PER_TOKEN);
+      const sources = pickSources(hits, ctx.maxInputTokens * ctx.charsPerToken);
       ctx.log.info({ taskId: task.id, hits: hits.length, used: sources.length }, "knowledge searched");
       if (!sources.length) {
         return reply("I couldn't find anything about that in the knowledge base. If it's in a file or thread, ask me to save it first.");
@@ -94,7 +93,7 @@ export function createKbAsk(): Skill {
           { role: "system", content: SYSTEM },
           { role: "user", content: `${context}\n\n<question>\n${question}\n</question>` },
         ],
-        { temperature: 0, maxTokens: 1200 },
+        { purpose: "answer" },
       );
       const answer = r.text.trim();
       if (!answer) return reply("I couldn't put an answer together from what I found. Try rephrasing the question.");

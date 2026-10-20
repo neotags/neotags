@@ -31,6 +31,11 @@ config:
     baseUrl: https://api.openai.com/v1
     model: gpt-4o-mini
     # routerModel: <fast model>   # optional smaller/faster model for intent routing (default: model)
+    # Limits and request tweaks (all optional; see config/neotags.example.yaml for the full list):
+    # contextWindow: 128000       # the model's context size; the prompt budget follows it
+    # maxTokens: 8192             # ceiling for one reply
+    # outputTokens: { router: 200, summary: 3000, fileSummary: 1200, answer: 1200 }   # raise for reasoning models
+    # extraBody: { chat_template_kwargs: { enable_thinking: false } }                 # gateway-specific switch
   logLevel: info
 
 # Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional).

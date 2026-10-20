@@ -43,7 +43,7 @@ function fakes(opts: { messages?: SlackMessage[]; kind?: "public" | "private" | 
   const llm: LlmClient = {
     chat: vi.fn(async () => ({ text: replies.shift() ?? replies[0] ?? "", usage: { promptTokens: 1, completionTokens: 1 } })),
   };
-  const ctx: SkillContext = { notifier, slack, llm, onyx, log, botName: "moose", maxInputTokens: 60000, maxSearchResults: 8, attachments: { enabled: true, maxFileBytes: 1_000_000, maxFiles: 10, maxTextChars: 100_000, summarize: false }, allowPrivateChannels: opts.allowPrivate ?? false };
+  const ctx: SkillContext = { notifier, slack, llm, onyx, log, botName: "moose", maxInputTokens: 60000, charsPerToken: 4, maxSearchResults: 8, attachments: { enabled: true, maxFileBytes: 1_000_000, maxFiles: 10, maxTextChars: 100_000, summarize: false }, allowPrivateChannels: opts.allowPrivate ?? false };
   return { sent, notifier, onyx, docs, slack, llm, ctx };
 }
 const task = (over: Partial<Task> = {}): Task => ({

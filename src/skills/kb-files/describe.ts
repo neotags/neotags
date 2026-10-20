@@ -55,7 +55,7 @@ export async function describeFile(llm: LlmClient, f: DescribeInput, budgetChars
   const excerpt = picked.length < total ? `\nThis is an EXCERPT: ${picked.length} of ${total} parts are shown.` : "";
   const body = picked.map((s) => `[${s.title}]\n${s.text}`).join("\n\n");
   const user = `File name: ${f.name}\nFile type: ${f.kind}${excerpt}\n${f.note ? `\n<message>\n${f.note}\n</message>\n` : ""}\n<file>\n${body}\n</file>`;
-  return ask(llm, SYSTEM, user, fileSummarySchema, 1200);
+  return ask(llm, SYSTEM, user, fileSummarySchema, "fileSummary");
 }
 
 /** The summary as it is stored: plain Markdown, searchable alongside the file's own text. */
