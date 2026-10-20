@@ -52,7 +52,7 @@ Non-goals (v1)
 ```
 
 Components
-1. **Slack gateway** — Slack Bolt. Verifies signing secret, acks within 3 s, drops duplicate `event_id`s (Slack retries), turns `app_mention` and `block_actions` into internal `Task`s.
+1. **Slack gateway** — Slack Bolt. Verifies signing secret, acks within 3 s, drops duplicate `event_id`s (Slack retries), turns `app_mention`, DM `message.im` and `block_actions` into internal `Task`s. (`allowedChannels` does not apply to DMs — each DM has its own D-channel id — but `allowedUsers` does.)
 2. **Router** — removes the bot mention, then picks a skill. v1: a cheap LLM/keyword intent match against the registered skills' descriptions (only `kb-collect` exists; anything else gets a friendly "I can't do that yet"). The router is where future skills register.
 3. **Agent runtime** — pi-agent-core, consistent with the SRE Agent in the diagram. A skill is a prompt + a set of allowed tools. For `kb-collect` the flow is mostly deterministic; the LLM is used for summarization, not for deciding whether to write.
 4. **Guardrails** — enforced in code before any tool runs, never delegated to the prompt.
@@ -155,7 +155,7 @@ Mention detection uses the bot's **user ID**, so renaming the bot (Slack app dis
 
 ## 8. Security & audit
 
-- Least-privilege Slack scopes. `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `reactions:write`, `users:read`, plus `groups:read` and `groups:history` only when private channels are enabled; interactivity is enabled for the Undo button. No private-channel/DM scopes in v1.
+- Least-privilege Slack scopes. `app_mentions:read`, `channels:history`, `channels:read`, `chat:write`, `reactions:write`, `users:read`, plus `groups:read` and `groups:history` only when private channels are enabled; `im:read` + `im:history` let the bot answer in DMs (record skills still refuse DM channels); interactivity is enabled for the Undo button. No group-DM (`mpim`) scopes.
 - Private channels: off by default. When enabled the bot must be invited, the app needs `groups:read` + `groups:history`, entries are labelled (`source_visibility` metadata, a "Source: a private Slack channel" footer) and the reply warns that the entry is visible KB-wide, with Undo one click away.
 - Denied requests (channel/user not allowlisted) get a quiet 🚫 reaction rather than a public reply.
 - Channel allowlist + user allowlist enforced in the gateway.
@@ -247,7 +247,7 @@ Everything flows through one internal `Task` abstraction, so skills don't care a
 
 ```
 Triggers (inbound)                          Outputs (outbound)
- Slack app_mention / button  ─┐             ┌─ Slack: reply in thread / post to channel / DM
+ Slack app_mention / DM / button  ─┐         ┌─ Slack: reply in thread / post to channel / DM
  Alert webhook (later)        ├─▶ Router ─▶ Skill ─▶ Notifier ─┤ GitHub/GitLab: comment / review (later)
  Scheduler (cron, later)      ─┘             └─ Onyx: ingest/delete
 ```

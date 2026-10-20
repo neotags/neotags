@@ -31,7 +31,7 @@
       "id": "users",
       "type": "external",
       "label": "Team",
-      "sublabel": "@moose mention",
+      "sublabel": "@moose mention · DM",
       "pos": [
         20,
         220
@@ -233,7 +233,7 @@
       "id": "c1",
       "from": "users",
       "to": "slack",
-      "label": "1 @mention",
+      "label": "1 @mention / DM",
       "variant": "emphasis"
     },
     {

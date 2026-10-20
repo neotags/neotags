@@ -2,6 +2,9 @@
 display_information:
   name: moose
 features:
+  app_home:
+    messages_tab_enabled: true        # users can DM the bot
+    messages_tab_read_only_enabled: false
   bot_user:
     display_name: moose
     always_online: true
@@ -9,6 +12,8 @@ oauth_config:
   scopes:
     bot:
       - app_mentions:read
+      - im:read               # recognize the DM channel
+      - im:history            # receive message.im and read the DM thread
       - channels:history   # read the thread to record (public channels)
       - channels:read      # check the channel type
       - groups:history     # only needed when slack.allowPrivateChannels is on
@@ -22,6 +27,7 @@ settings:
     request_url: https://neotags.example.com/slack/events
     bot_events:
       - app_mention
+      - message.im           # direct messages to the bot
   interactivity:
     is_enabled: true     # the Undo button
     request_url: https://neotags.example.com/slack/events
