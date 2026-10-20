@@ -6,10 +6,21 @@ export interface OnyxDocument {
   doc_updated_at?: string;
 }
 
+export interface OnyxSearchResult {
+  title: string;
+  /** The chunk text the retriever matched. */
+  content: string;
+  link?: string;
+  /** Onyx's own ranking is kept: index 0 is the best match. */
+  updatedAt?: string;
+}
+
 export interface OnyxClient {
   /** Create or replace the document with this id. */
   upsert(doc: OnyxDocument): Promise<{ alreadyExisted: boolean }>;
   delete(id: string): Promise<void>;
+  /** Ranked sections for a question (hybrid retrieval, filtered by the key's document permissions). */
+  search(query: string, limit: number): Promise<OnyxSearchResult[]>;
 }
 
 export class OnyxError extends Error {
@@ -25,6 +36,8 @@ export class OnyxError extends Error {
 export interface OnyxSettings {
   baseUrl: string;
   ingestionPath: string;
+  /** Onyx search API (`POST {path}` with `{query}`); needs READ_SEARCH. */
+  searchPath?: string;
   ccPairId: number;
   apiKey?: string;
   timeoutMs?: number;
@@ -33,12 +46,14 @@ export interface OnyxSettings {
 /** Onyx ingestion API (`POST {path}` upsert, `DELETE {path}/{id}`); needs a key with MANAGE_CONNECTORS. */
 export class HttpOnyxClient implements OnyxClient {
   private base: string;
+  private searchUrl: string;
 
   constructor(
     private s: OnyxSettings,
     private fetchImpl: typeof fetch = fetch,
   ) {
     this.base = s.baseUrl.replace(/\/+$/, "") + "/" + s.ingestionPath.replace(/^\/+|\/+$/g, "");
+    this.searchUrl = s.baseUrl.replace(/\/+$/, "") + "/" + (s.searchPath ?? "/api/search").replace(/^\/+|\/+$/g, "");
   }
 
   private async call(url: string, init: RequestInit): Promise<Response> {
@@ -73,5 +88,22 @@ export class HttpOnyxClient implements OnyxClient {
 
   async delete(id: string): Promise<void> {
     await this.call(`${this.base}/${encodeURIComponent(id)}`, { method: "DELETE" });
+  }
+
+  async search(query: string, limit: number): Promise<OnyxSearchResult[]> {
+    // Onyx rejects queries over 2048 characters.
+    const res = await this.call(this.searchUrl, { method: "POST", body: JSON.stringify({ query: query.slice(0, 2048) }) });
+    const j = (await res.json().catch(() => ({}))) as {
+      results?: { title?: string; content?: string; link?: string | null; updated_at?: string | null }[];
+    };
+    return (j.results ?? [])
+      .filter((r) => r.content)
+      .slice(0, limit)
+      .map((r) => ({
+        title: r.title || "Untitled",
+        content: r.content!,
+        ...(r.link && { link: r.link }),
+        ...(r.updated_at && { updatedAt: r.updated_at }),
+      }));
   }
 }

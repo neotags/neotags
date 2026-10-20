@@ -1,10 +1,23 @@
+/** A file shared in Slack. Contents are fetched on demand with `SlackReader.download`. */
+export interface SlackFile {
+  id: string;
+  name: string;
+  mimetype?: string;
+  size?: number;
+  /** Slack's page for the file; used as the citation link. */
+  permalink?: string;
+  downloadUrl?: string;
+}
+
 export interface SlackMessage {
   ts: string;
   userId?: string;
   userName: string;
   text: string;
-  /** Attachment names only; file contents are not read in v1. */
+  /** Attachment names only (for the transcript). */
   files: string[];
+  /** The same files with what is needed to fetch them. */
+  attachments?: SlackFile[];
   bot: boolean;
 }
 
@@ -25,6 +38,15 @@ export interface SlackReader {
   permalink(channel: string, ts: string): Promise<string>;
   channel(channel: string): Promise<ChannelInfo>;
   userName(userId: string): Promise<string>;
+  /** Fetch a file's bytes. Throws SlackFileError (message safe to show) when it can't be read or is over `maxBytes`. */
+  download(file: SlackFile, maxBytes: number): Promise<Buffer>;
+}
+
+export class SlackFileError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "SlackFileError";
+  }
 }
 
 interface RawMessage {
@@ -34,7 +56,20 @@ interface RawMessage {
   username?: string;
   text?: string;
   subtype?: string;
-  files?: { name?: string; title?: string }[];
+  files?: RawFile[];
+}
+
+interface RawFile {
+  id?: string;
+  name?: string;
+  title?: string;
+  mimetype?: string;
+  size?: number;
+  mode?: string;
+  file_access?: string;
+  permalink?: string;
+  url_private_download?: string;
+  url_private?: string;
 }
 
 /** The slice of the Slack Web API we use (structural, so tests can fake it). */
@@ -58,7 +93,28 @@ export interface SlackWebApi {
 
 const MAX_MESSAGES = 1000;
 
-export function createSlackReader(api: SlackWebApi): SlackReader {
+export interface SlackDownloadSettings {
+  token: string;
+  fetchImpl?: typeof fetch;
+  timeoutMs?: number;
+}
+
+/** Files that can actually be fetched: not deleted ("tombstone"), not hidden by the plan limit, not external links. */
+function toFile(f: RawFile): SlackFile | undefined {
+  if (!f.id || f.mode === "tombstone" || f.mode === "hidden_by_limit" || f.mode === "external" || f.file_access === "access_denied") {
+    return undefined;
+  }
+  return {
+    id: f.id,
+    name: f.name || f.title || f.id,
+    mimetype: f.mimetype,
+    size: f.size,
+    permalink: f.permalink,
+    downloadUrl: f.url_private_download ?? f.url_private,
+  };
+}
+
+export function createSlackReader(api: SlackWebApi, dl?: SlackDownloadSettings): SlackReader {
   const names = new Map<string, Promise<string>>();
 
   const userName = (id: string): Promise<string> => {
@@ -109,10 +165,50 @@ export function createSlackReader(api: SlackWebApi): SlackReader {
           userName: m.user ? await userName(m.user) : (m.username ?? "bot"),
           text: await clean(m.text ?? ""),
           files: (m.files ?? []).map((f) => f.name || f.title || "file"),
+          attachments: (m.files ?? []).map(toFile).filter((f): f is SlackFile => Boolean(f)),
           bot: Boolean(m.bot_id),
         });
       }
       return out;
+    },
+
+    async download(file, maxBytes) {
+      if (!dl) throw new SlackFileError("file download is not configured");
+      if (file.size !== undefined && file.size > maxBytes) throw new SlackFileError("the file is too large");
+      let url: URL;
+      try {
+        url = new URL(file.downloadUrl ?? "");
+      } catch {
+        throw new SlackFileError("Slack gave no download link for it");
+      }
+      // The bot token is sent along, so only ever to Slack's file host over https.
+      if (url.protocol !== "https:" || !/(^|\.)slack\.com$/.test(url.hostname)) {
+        throw new SlackFileError("unexpected download host");
+      }
+      let res: Response;
+      try {
+        res = await (dl.fetchImpl ?? fetch)(url, {
+          headers: { authorization: `Bearer ${dl.token}` },
+          redirect: "manual", // a redirect would carry (or drop) the token somewhere we did not vet
+          signal: AbortSignal.timeout(dl.timeoutMs ?? 60_000),
+        });
+      } catch (err) {
+        throw new SlackFileError(`download failed: ${(err as Error).message}`);
+      }
+      // Without files:read Slack answers with a login page instead of the bytes.
+      if (res.status >= 300 || (/text\/html/i.test(res.headers.get("content-type") ?? "") && !/html?$/i.test(file.name))) {
+        throw new SlackFileError("Slack refused the download (is the files:read scope granted?)");
+      }
+      const declared = Number(res.headers.get("content-length"));
+      if (declared > maxBytes) throw new SlackFileError("the file is too large");
+      const chunks: Uint8Array[] = [];
+      let got = 0;
+      for await (const chunk of res.body ?? []) {
+        got += chunk.length;
+        if (got > maxBytes) throw new SlackFileError("the file is too large");
+        chunks.push(chunk);
+      }
+      return Buffer.concat(chunks);
     },
 
     async permalink(channel, ts) {

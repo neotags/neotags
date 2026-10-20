@@ -201,7 +201,7 @@ Status (2026-10): milestones 1–3 are implemented and unit-tested with fakes (S
 Not bugs: deliberate v1 scope. Grouped by area; none are scheduled.
 
 **Summarization quality** (`src/skills/kb-collect`)
-- Attachments, images and linked pages (Grafana, PRs, Jira, runbooks) are not read; only file names appear. Screenshots and log files can hold the key evidence.
+- Linked pages (Grafana, PRs, Jira, runbooks) are not read. Attached files are indexed separately (§16), but their content is not fed into the thread summary, and images/screenshots are not read (no OCR).
 - Bot alerts are collapsed and quoted but not interpreted (e.g. which alert fired first, how long it lasted).
 - A low-confidence or unresolved thread is saved with a warning instead of asking the requester to confirm first.
 - A thread longer than 8 prompt-sized parts is thinned (least informative messages first), so a very long incident can lose detail.
@@ -268,3 +268,50 @@ Triggers (inbound)                          Outputs (outbound)
 
 - Ask for a **separate API key for neotags** (recommended, so it can be revoked independently).
 - `kubectl` in my shell is broken (`_aws_sso_ensure` missing); not needed for v1 development.
+
+## 16. Attachments and Q&A (added 2026-10-20)
+
+Two skills plus a hook into kb-collect; no gateway changes.
+
+- **Collect.** `kb-files` (explicit: "save these files") and `kb-collect` (automatically, for files in the recorded thread) call `collectFiles`: `SlackReader.download` -> `extract` -> `redact` -> Onyx upsert. One KB entry per file, id `neotags-file-<slack file id>` (idempotent). Sections carry a location label ("Page 3-4", "Sheet: Budget", "Slide 2"), and the link is the Slack file permalink. Metadata: `type: attachment`, `file_name`, `file_type`, `channel`, `shared_by`, `thread_doc` (when collected with a thread), plus the usual `origin`, `source_visibility`. Same channel policy as threads (`checkChannel`): public by default, private opt-in, never DMs. The thread entry lists its files; one Undo removes the thread entry and its files.
+- **Searchable by meaning, not just by words.** Tables (XLSX sheets, CSV/TSV) are rendered as self-describing records (`Role: Compute6 | Inband: 100.82.3.4 | ...`, empty cells dropped, header repeated per row), so a hit on one row, or one chunk of a long sheet, still says which value is which column. Each file also gets a **catalogue entry** from one tool-less LLM call (`attachments.summarize`, default on): description, contents (sheets/sections/columns), key facts and tags, written from the redacted text plus the Slack message the file came with. It is stored as the entry's first section (with the sharing message) ahead of the file's own text; metadata carries `tags` and `summarized`. Long files are sampled evenly across their length (the summary says when it saw an excerpt). A failed summary never blocks indexing. The thread entry lists each file with its description.
+- **Extraction is in-process** (unpdf, mammoth, exceljs, jszip), so redaction and limits stay in our code and the ingestion API is unchanged. Supported: PDF, DOCX, XLSX/XLSM (visible sheets, formula results), PPTX (slides + speaker notes), text-like files, HTML (including pages that render from a script: JS object/array literals such as `const ITEMS = [...]` are *parsed, never executed*, and flattened to labelled records with their group path; positional rows take column names from a same-width `<thead>`). PDF text has running headers/footers (lines repeated on many pages) and table-of-contents lines removed, and keeps `[Page n]` markers; table structure and figures/diagrams are not preserved (no OCR). Unsupported types are refused *before* downloading, with a reason shown to the user.
+- **Safety.** The bot token is sent only to `https://*.slack.com`, redirects are not followed, downloads are size-capped while streaming, OOXML zip central directories are checked for absurd unpacked sizes, extracted text is capped (`attachments.maxTextChars`), and the Slack-supplied file name is escaped in replies. File content is untrusted: it is never given to an LLM with tools, and ask-time answers are escaped so documents cannot cause Slack pings.
+- **Ask.** `kb-ask` calls Onyx `POST /search` (v5 search API, `{query}` -> ranked sections with text and link; verified in source at `v5.0.0-beta.1`, `backend/onyx/server/features/search`), then one tool-less LLM call answers only from the numbered sources with `[n]` citations; with no hits the LLM is not called. Retrieval permissions are the API key's, i.e. everything in the KB is visible to everyone who can ask (Q3).
+- **Config.** `attachments.{enabled,maxFileMb,maxFiles,maxTextChars}`, `onyx.searchPath`, `onyx.maxResults`. Slack needs the `files:read` scope; the Onyx key needs `READ_SEARCH` in addition to `MANAGE_CONNECTORS`.
+
+Known limitations: no OCR (images, scanned PDFs are reported as "no text found"); legacy Office formats and password-protected files are refused; extraction runs on the event loop (bounded by the size caps, Helm memory limit raised to 1Gi); questions are a single turn with no thread context; the search endpoint and `files:read` flow are covered by fakes, not yet run against live Slack/Onyx.
+
+### 16.1 Attachment entry layout in Onyx
+
+One Onyx document per Slack file, written by `collectFiles` (`src/skills/kb-files/collect.ts`) through the ingestion API (§5). Example for a two-sheet XLSX (values shortened):
+
+```jsonc
+{
+  "id": "neotags-file-F0ABC123",                    // Slack file id: stable, so re-saving updates; Undo deletes by it
+  "semantic_identifier": "Denver SRE subnet IP record.xlsx",   // title shown in Onyx and in our citations
+  "sections": [
+    { "text": "<file name>\nXLSX file shared by Ann in #sre-network (thread: <permalink>)\n\n"
+            + "Summary: ...\nShared with the message: \"...\"\nContents:\n- ...\nKey facts:\n- Compute6 Inband: 100.82.3.4",
+      "link": "<Slack file permalink>" },            // [0] catalogue section (only when summarize is on and succeeded)
+    { "text": "Sheet: BareMetal\nColumns: Role | Rack | Inband | ...\nRole: Compute6 | Rack: BJ.18 | Inband: 100.82.3.4 | ...",
+      "link": "<Slack file permalink>" },            // [1..n] the file's own text, ~6000 chars each
+    { "text": "Sheet: VM\n...", "link": "<Slack file permalink>" }
+  ],
+  "metadata": { "type": "attachment", "file_name": "...", "file_type": "xlsx", "channel": "#sre-network",
+                "shared_by": "Ann", "recorded_by": "Ann", "slack_user": "U1", "origin": "neotags",
+                "source_visibility": "public-channel", "schema_version": "2", "truncated": "false",
+                "summarized": "true", "tags": ["network", "ip"], "thread_doc": "neotags-slack-C1-1760000000.000100" },
+  "doc_updated_at": "<time of the Slack message that carried the file>"
+}
+```
+
+Rules that keep it retrievable:
+
+- **Sections are self-contained.** Onyx chunks and embeds each section on its own, so every section carries its own location and labels: `Sheet: <name>` with `Column: value` records (header repeated per row), `[Page n]` for PDF, `Slide n` for PPTX, `[Group > Subgroup]` for data embedded in HTML. A chunk never depends on a header that lives in another chunk.
+- **Section 0 is the catalogue** (file name, who shared it and where, summary, contents, key facts, the sharing message). Without a summary (disabled or failed) the same header line is prepended to the first text section instead, and `summarized` is `"false"`.
+- **Every section links to the Slack file**, which is what `kb-ask` cites.
+- **Metadata values are strings or lists of strings** (Onyx requirement). `tags` come from the summary; `thread_doc` is set only when the file was collected with `kb-collect`, and points at the thread entry `neotags-slack-<channel>-<thread_ts>`, which in turn lists its files and their descriptions. The link is informational: search does not follow it, and metadata is not yet used as a search filter.
+- **`schema_version`** (now `2`) lets entries be found and re-generated when this layout changes. Version 1 had no catalogue section and rendered tables as pipe-joined rows.
+- **Redaction** is applied to every section and to the summary before upsert; file names and metadata are not scanned.
+- **Size limits:** extracted text is capped at `attachments.maxTextChars` (`truncated: "true"` when hit); files over `attachments.maxFileMb` are not read.

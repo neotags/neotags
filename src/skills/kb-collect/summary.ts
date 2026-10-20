@@ -69,7 +69,7 @@ const REDUCE_SYSTEM = SYSTEM.replace(
   "You are given ordered working notes extracted from consecutive parts of one long Slack thread, plus its opening and closing messages. Turn them into",
 );
 
-async function ask<T>(
+export async function ask<T>(
   llm: LlmClient,
   system: string,
   user: string,

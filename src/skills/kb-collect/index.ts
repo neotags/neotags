@@ -2,6 +2,9 @@ import { excerpts, fitToBudget, prepare } from "./prepare.js";
 import { renderMarkdown, SCHEMA_VERSION, summarizeThread, type Summary } from "./summary.js";
 import type { Task } from "../../task.js";
 import { redact } from "../../tools/redact.js";
+import { checkChannel } from "../channel-policy.js";
+import { collectFiles, describeCollected, sharedFiles, type CollectResult } from "../kb-files/collect.js";
+import { undoEntries, undoValue } from "../kb-files/index.js";
 import type { Skill, SkillAction, SkillContext } from "../types.js";
 
 /** Deterministic, so recording the same thread again updates the same KB entry. */
@@ -15,12 +18,13 @@ const MAX_PARTS = 8;
 const esc = (s: string) => s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 const clip = (s: string, n: number) => (s.length > n ? `${s.slice(0, n - 1)}…` : s);
 
-function resultBlocks(s: Summary, id: string, redactions: number, permalink: string, isPrivate: boolean) {
+function resultBlocks(s: Summary, ids: string[], redactions: number, permalink: string, isPrivate: boolean, files?: CollectResult) {
   const lines = [
     `*Saved to the knowledge base: ${esc(s.title)}*`,
     esc(clip(s.summary, 600)),
     s.root_cause && s.root_cause !== "unknown" ? `*Root cause:* ${esc(clip(s.root_cause, 300))}` : "",
     s.confidence === "low" ? "_Low confidence: the thread did not reach a clear conclusion._" : "",
+    files?.indexed.length || files?.skipped.length ? `*Attachments:*\n${describeCollected(files).join("\n")}` : "",
     isPrivate ? ":lock: _This thread is from a private channel. The entry is visible to everyone who can search the knowledge base. Use Undo if that is not what you want._" : "",
   ].filter(Boolean);
   return [
@@ -37,7 +41,7 @@ function resultBlocks(s: Summary, id: string, redactions: number, permalink: str
     {
       type: "actions",
       elements: [
-        { type: "button", action_id: `${NAME}:undo`, value: id, text: { type: "plain_text", text: "Undo" }, style: "danger" },
+        { type: "button", action_id: `${NAME}:undo`, value: undoValue(ids), text: { type: "plain_text", text: "Undo" }, style: "danger" },
       ],
     },
   ];
@@ -58,19 +62,9 @@ export function createKbCollect(): Skill {
       if (!ctx.onyx) return reply("The knowledge base (Onyx) is not configured for me yet.");
 
       const channel = task.reply.channel;
-      const info = await ctx.slack.channel(channel);
-      if (info.kind === "dm") return reply("I don't record direct messages.");
-      if (info.kind === "unknown") {
-        return reply(
-          ctx.allowPrivateChannels
-            ? "I can't see this channel. If it's private, invite me to it and make sure the Slack app has the `groups:read` and `groups:history` scopes."
-            : "I can't see this channel, so I only record threads from *public* channels I'm in. (Private channels need to be enabled for me.)",
-        );
-      }
-      if (info.kind === "private" && !ctx.allowPrivateChannels) {
-        return reply("For now I only record threads from *public* channels. Private channels aren't enabled for me.");
-      }
-      const isPrivate = info.kind === "private";
+      const check = await checkChannel(ctx, channel, "threads");
+      if (!check.ok) return reply(check.message);
+      const { info, isPrivate } = check;
 
       const all = await ctx.slack.thread(channel, task.thread.ts);
       const raw = all.filter((m) => m.ts !== task.triggerTs);
@@ -104,6 +98,26 @@ export function createKbCollect(): Skill {
       ]);
       const participants = [...new Set(prepared.msgs.filter((m) => !m.bot).map((m) => m.who))];
       const id = docId(channel, task.thread.ts);
+
+      // Files shared in the thread are indexed as their own KB entries; a failure here must not lose the summary.
+      let files: CollectResult | undefined;
+      if (ctx.attachments.enabled) {
+        try {
+          const shared = sharedFiles(all);
+          if (shared.length) {
+            files = await collectFiles(shared, ctx, {
+              channelName: info.name,
+              isPrivate,
+              recordedBy,
+              actorId: task.actor.id,
+              threadDocId: id,
+              threadLink: permalink,
+            });
+          }
+        } catch (err) {
+          ctx.log.warn({ err, taskId: task.id }, "attachment collection failed; thread recorded without files");
+        }
+      }
       const markdown = renderMarkdown(summary, {
         participants,
         permalink,
@@ -124,6 +138,9 @@ export function createKbCollect(): Skill {
         sections: [
           { text: markdown, link: permalink },
           ...(verbatim ? [{ text: `Key excerpts from the thread (verbatim, redacted)\n\n${verbatim}`, link: permalink }] : []),
+          ...(files?.indexed.length
+            ? [{ text: `Files shared in this thread, indexed as separate entries:\n${files.indexed.map((f) => `- ${f.name}${f.description ? `: ${f.description}` : ""}`).join("\n")}`, link: permalink }]
+            : []),
         ],
         metadata: {
           type: summary.type,
@@ -148,15 +165,15 @@ export function createKbCollect(): Skill {
 
       await reply(
         `Saved to the knowledge base: ${summary.title}`,
-        resultBlocks(summary, id, prepared.redactions, permalink, isPrivate),
+        resultBlocks(summary, [id, ...(files?.indexed.map((f) => f.id) ?? [])], prepared.redactions, permalink, isPrivate, files),
       );
     },
 
     async onAction(action: SkillAction, ctx: SkillContext) {
       if (action.id !== "undo") return "Unknown action.";
       if (!ctx.onyx) return "The knowledge base (Onyx) is not configured.";
-      await ctx.onyx.delete(action.value);
-      ctx.log.info({ docId: action.value, by: action.actor.id }, "knowledge entry undone");
+      await undoEntries(action.value, ctx);
+      ctx.log.info({ docIds: action.value, by: action.actor.id }, "knowledge entry undone");
       return `↩️ Removed from the knowledge base (undone by <@${action.actor.id}>).`;
     },
   };

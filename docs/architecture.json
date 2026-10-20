@@ -116,7 +116,7 @@
       "id": "skills",
       "type": "backend",
       "label": "Skills",
-      "sublabel": "kb-collect · triage · review",
+      "sublabel": "kb-collect · kb-files · kb-ask",
       "pos": [
         1080,
         220
@@ -203,7 +203,7 @@
       "id": "onyx",
       "type": "database",
       "label": "Onyx KB",
-      "sublabel": "/api/ingestion · cc_pair 1",
+      "sublabel": "ingest + search · cc_pair 1",
       "pos": [
         1340,
         220
