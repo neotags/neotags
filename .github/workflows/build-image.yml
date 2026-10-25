@@ -88,11 +88,12 @@ jobs:
       # Post-push scan: the multi-arch build-push-action publishes in one step, so the image is
       # briefly available before the scan completes. Only fixed vulnerabilities fail the job;
       # unfixable noise is left to the GHCR/GitHub advisory views.
+      # No platform pinning: Trivy scans the variant matching the runner's arch, which is also
+      # the arch running in production (Graviton/arm64).
       - name: Scan image for fixed vulnerabilities
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
           image-ref: ${{ steps.meta.outputs.image }}
-          platform: linux/amd64
           severity: CRITICAL,HIGH
           ignore-unfixed: true
           exit-code: '1'
