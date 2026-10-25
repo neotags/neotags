@@ -1,7 +1,8 @@
 name: Build Image
 
 # Builds the neotags image (linux/amd64 + linux/arm64) and pushes it to GitHub Container Registry
-# using the built-in GITHUB_TOKEN. Runs on free GitHub-hosted runners (public repo).
+# using the built-in GITHUB_TOKEN, then scans it with Trivy and fails on fixed HIGH/CRITICAL
+# vulnerabilities. Runs on free GitHub-hosted runners (public repo).
 
 on:
   push:
@@ -83,3 +84,15 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64,linux/arm64
+
+      # Post-push scan: the multi-arch build-push-action publishes in one step, so the image is
+      # briefly available before the scan completes. Only fixed vulnerabilities fail the job;
+      # unfixable noise is left to the GHCR/GitHub advisory views.
+      - name: Scan image for fixed vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.meta.outputs.image }}
+          platform: linux/amd64
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
