@@ -1,7 +1,7 @@
 import { pino } from "pino";
 import { createLlm, type LlmClient } from "./agent/llm.js";
 import { createGateway } from "./agent/models.js";
-import { inputBudgetTokens, loadConfig } from "./config/index.js";
+import { CHAINS, inputBudgetTokens, llmConfigured, loadConfig } from "./config/index.js";
 import { createSlack } from "./gateway/slack.js";
 import { Router } from "./router/index.js";
 import { allSkills, selectSkills } from "./skills/registry.js";
@@ -16,12 +16,22 @@ const log = pino({ level: cfg.logLevel });
 // Optional integrations: the bot still starts without them and tells users what is missing.
 let llm: LlmClient | undefined;
 let routerLlm: LlmClient | undefined;
-if (cfg.llm.model) {
-  const gateway = createGateway(cfg);
+if (llmConfigured(cfg.llm)) {
+  const gateway = createGateway(cfg, {
+    onBreakerChange: (model, state) =>
+      state === "closed" ? log.info({ model, breaker: state }, "llm model available again") : log.warn({ model, breaker: state }, "llm model circuit breaker"),
+  });
   llm = createLlm(cfg, { gateway });
   routerLlm = createLlm(cfg, { role: "router", gateway });
-  log.info({ model: cfg.llm.model, routerModel: cfg.llm.routerModel ?? cfg.llm.model }, "llm configured");
-} else log.warn("llm.model is not set; requests cannot be routed until it is configured");
+  const chains = Object.fromEntries(
+    CHAINS.map((c) => [c, gateway.policy.steps(c).map((s) => (s.effort ? `${s.model.id}@${s.effort}` : s.model.id))]),
+  );
+  log.info({ chains }, "llm configured");
+  if (cfg.llm.chains && (cfg.llm.model || cfg.llm.routerModel)) {
+    log.warn("llm.model / llm.routerModel (or LLM_MODEL / LLM_ROUTER_MODEL) are ignored because llm.chains is set");
+  }
+  if (!cfg.llm.chains && Object.keys(cfg.llm.models).length > 0) log.warn("llm.models is ignored without llm.chains");
+} else log.warn("no LLM configured (llm.model or llm.chains); requests cannot be routed until it is");
 
 let onyx: OnyxClient | undefined;
 if (cfg.onyx.baseUrl) {

@@ -26,6 +26,24 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
   model: gpt-4o-mini                   # or env LLM_MODEL (required once an LLM skill runs)
   # routerModel: <fast model>          # or env LLM_ROUTER_MODEL; smaller/faster model for intent routing
   #                                    # (same gateway and key). Defaults to `model`.
+  # Models per use with a reasoning effort each (replaces model / routerModel when set). Chains: agent
+  # (tool-using runs), job (scheduled judgements), gate (fast decisions, intent routing), summary (summaries,
+  # kb-ask answers). Entries are tried in order; one whose breaker is open is skipped. effort: none | low |
+  # medium | high | max (unset = send no reasoning setting); finalEffort: last step of an agent run.
+  # models:
+  #   fast:
+  #     id: <gateway model id>
+  #     reasoning: true
+  #     compat: { thinkingFormat: deepseek, supportsReasoningEffort: true }   # how the effort is sent (pi-ai)
+  #     thinkingLevelMap: { max: max }   # gateway value per level (null = unsupported); agents need "max" mapped
+  #     effortBody: { none: { chat_template_kwargs: { enable_thinking: false } } }   # extra fields per effort
+  # chains:
+  #   agent:   [{ model: fast, effort: high, finalEffort: max }]
+  #   job:     [{ model: fast, effort: high }]
+  #   gate:    [{ model: fast, effort: none }]
+  #   summary: [{ model: fast, effort: low }]
+  # failover:
+  #   breaker: { failures: 5, windowSec: 60, cooldownSec: 120 }   # per model; open = calls fail fast
   # Reasoning models (DeepSeek, Qwen3, ...) can spend a whole small max_tokens thinking and return no answer.
   # The client retries once with a bigger budget (up to maxTokens). If your gateway can turn thinking off,
   # add its switch to every request, e.g.:

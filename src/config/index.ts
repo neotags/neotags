@@ -2,6 +2,54 @@ import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
 
+export const EFFORTS = ["none", "low", "medium", "high", "max"] as const;
+export type Effort = (typeof EFFORTS)[number];
+export const CHAINS = ["agent", "job", "gate", "summary"] as const;
+export type ChainName = (typeof CHAINS)[number];
+
+const effortSchema = z.enum(EFFORTS);
+
+// Per-gateway quirks (pi-ai `compat`), for the whole gateway (llm.compat) or one model (llm.models.<key>.compat).
+const compatSchema = z.object({
+  // e.g. LiteLLM needs supportsStore: false.
+  supportsStore: z.boolean().optional(),
+  // With `reasoning: true` pi-ai sends the system prompt as a "developer" message. OpenAI-compatible
+  // gateways that don't know that role drop it without an error, so every call silently loses its
+  // instructions (and the untrusted-input rules). "system" works everywhere, so it is the default.
+  supportsDeveloperRole: z.boolean().optional(),
+  supportsReasoningEffort: z.boolean().optional(),
+  supportsUsageInStreaming: z.boolean().optional(),
+  // How the effort reaches the gateway: "openai" (reasoning_effort), "deepseek" (thinking + reasoning_effort),
+  // "qwen", "chat-template", ... (see pi-ai). Unset: reasoning_effort when supportsReasoningEffort is on.
+  thinkingFormat: z
+    .enum(["openai", "openrouter", "deepseek", "together", "baseten", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"])
+    .optional(),
+});
+
+const modelSchema = z.object({
+  // Model id on the gateway.
+  id: z.string().min(1),
+  // Only OpenAI-compatible gateways today; the field is here so another API is a config change.
+  api: z.literal("openai-completions").default("openai-completions"),
+  // Defaults to llm.reasoning. A chain entry with an effort other than "none" needs a reasoning model.
+  reasoning: z.boolean().optional(),
+  // Merged over llm.compat.
+  compat: compatSchema.optional(),
+  // Gateway value per pi-ai thinking level, e.g. { max: max } to allow "max"; null marks a level unsupported.
+  thinkingLevelMap: z.partialRecord(z.enum(["off", "minimal", "low", "medium", "high", "xhigh", "max"]), z.string().nullable()).optional(),
+  // Extra request fields per effort, merged after llm.extraBody, e.g. { none: { chat_template_kwargs: { enable_thinking: false } } }.
+  effortBody: z.partialRecord(effortSchema, z.record(z.string(), z.unknown())).optional(),
+});
+
+// effort: reasoning effort of every step; finalEffort: of the last step of a tool-using agent run.
+// Unset effort sends no reasoning setting at all, leaving the gateway's default.
+const chainEntrySchema = z.object({
+  model: z.string().min(1),
+  effort: effortSchema.optional(),
+  finalEffort: effortSchema.optional(),
+});
+const chainSchema = z.array(chainEntrySchema).min(1);
+
 const fileSchema = z.object({
   bot: z.object({ name: z.string().min(1).default("neotags") }).prefault({}),
   slack: z
@@ -51,26 +99,35 @@ const fileSchema = z.object({
   llm: z
     .object({
       baseUrl: z.string().url().default("https://api.openai.com/v1"),
+      // Single-model setup: one model for everything. Ignored when `chains` is set.
       model: z.string().min(1).optional(),
       // Optional smaller/faster model (same gateway and key) for intent routing; defaults to `model`.
       routerModel: z.string().min(1).optional(),
+      // Models on the gateway, by a local key that chains refer to.
+      models: z.record(z.string().min(1), modelSchema).default({}),
+      // Models per use, tried in order (the next one when a model's breaker is open). Unset: built from
+      // `model` / `routerModel` with no effort, which is exactly the single-model behaviour.
+      chains: z
+        .object({ agent: chainSchema, job: chainSchema, gate: chainSchema, summary: chainSchema })
+        .optional(),
+      failover: z
+        .object({
+          // Per model: `failures` within `windowSec` open it; after `cooldownSec` one probe call is let through.
+          breaker: z
+            .object({
+              failures: z.number().int().positive().default(5),
+              windowSec: z.number().positive().default(60),
+              cooldownSec: z.number().positive().default(120),
+            })
+            .prefault({}),
+        })
+        .prefault({}),
       contextWindow: z.number().int().positive().default(128_000),
       maxTokens: z.number().int().positive().default(8192),
       reasoning: z.boolean().default(false),
       timeoutMs: z.number().int().positive().default(60_000),
       maxRetries: z.number().int().min(0).default(2),
-      // Per-gateway quirks (pi-ai `compat`); e.g. LiteLLM needs supportsStore: false.
-      compat: z
-        .object({
-          supportsStore: z.boolean().optional(),
-          // With `reasoning: true` pi-ai sends the system prompt as a "developer" message. OpenAI-compatible
-          // gateways that don't know that role drop it without an error, so every call silently loses its
-          // instructions (and the untrusted-input rules). "system" works everywhere, so it is the default.
-          supportsDeveloperRole: z.boolean().default(false),
-          supportsReasoningEffort: z.boolean().optional(),
-          supportsUsageInStreaming: z.boolean().optional(),
-        })
-        .prefault({}),
+      compat: compatSchema.extend({ supportsDeveloperRole: z.boolean().default(false) }).prefault({}),
       // Extra JSON fields added to every chat request, for gateway-specific switches, e.g. turning off
       // thinking on a reasoning model: { chat_template_kwargs: { enable_thinking: false } }.
       extraBody: z.record(z.string(), z.unknown()).prefault({}),
@@ -92,6 +149,24 @@ const fileSchema = z.object({
       summarizeMaxInputTokens: z.number().int().positive().optional(),
       // Rough size of a token in characters, to turn token budgets into character budgets.
       charsPerToken: z.number().positive().default(4),
+    })
+    .superRefine((llm, ctx) => {
+      for (const name of CHAINS) {
+        (llm.chains?.[name] ?? []).forEach((entry, i) => {
+          const path = ["chains", name, i, "model"];
+          const model = llm.models[entry.model];
+          if (!model) return ctx.addIssue({ code: "custom", path, message: `unknown model "${entry.model}" (not in llm.models)` });
+          const thinks = [entry.effort, entry.finalEffort].some((e) => e !== undefined && e !== "none");
+          if (thinks && !(model.reasoning ?? llm.reasoning)) {
+            ctx.addIssue({ code: "custom", path, message: `model "${entry.model}" is not a reasoning model; only effort "none" applies` });
+          }
+          // Agent runs stream through pi-ai, which lowers a level the model does not map; "max" must be mapped.
+          const max = [entry.effort, entry.finalEffort].includes("max");
+          if (name === "agent" && max && typeof model.thinkingLevelMap?.max !== "string") {
+            ctx.addIssue({ code: "custom", path, message: `model "${entry.model}" needs thinkingLevelMap.max for effort "max" in the agent chain` });
+          }
+        });
+      }
     })
     .prefault({}),
   logLevel: z.string().default("info"),
@@ -119,6 +194,11 @@ function parseJsonEnv(key: string, value: string): unknown {
   } catch {
     throw new Error(`env var ${key} is not valid JSON`);
   }
+}
+
+/** Is any model configured, through `chains` or the single `model`? */
+export function llmConfigured(llm: Config["llm"]): boolean {
+  return llm.chains !== undefined || llm.model !== undefined;
 }
 
 /** Prompt budget in tokens: the explicit setting, else half the context window minus the summary output. */
