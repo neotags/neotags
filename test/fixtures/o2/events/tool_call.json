@@ -1,0 +1,1 @@
+{"type":"tool_call","tool":"SearchSQL","call_id":"call_02","message":"Counting errors by namespace","context":{"stream_name":"app_logs","type":"logs","request_body":{"query":{"sql":"SELECT namespace, count(*) AS errors FROM \"app_logs\" WHERE level = 'error' GROUP BY namespace ORDER BY errors DESC LIMIT 20","start_time":1793869200000000,"end_time":1793872800000000,"size":20}}}}

@@ -1,0 +1,50 @@
+{
+  "method": "POST",
+  "path": "/o2/v1/query",
+  "headers": {
+    "content-type": "application/json",
+    "x-o2-agent-key": "<agent-key>",
+    "x-o2-user-email": "user@example.com",
+    "x-o2-assistant-session-id": "019a5b3c-1d2e-7f40-8a1b-2c3d4e5f6a7b",
+    "x-o2-assistant-turn-id": "019a5b3c-9e8d-7c6b-8a59-4f3e2d1c0b0a",
+    "traceparent": "00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01",
+    "user-agent": "Mozilla/5.0"
+  },
+  "body": {
+    "clis": null,
+    "confirm_timeout_secs": null,
+    "context": {
+      "currentPage": "logs",
+      "currentSQLQuery": "SELECT * FROM \"app_logs\" WHERE level = 'error'",
+      "sqlMode": true,
+      "currentVRLQuery": "",
+      "selectedStreams": ["app_logs"],
+      "streamType": "logs",
+      "interestingFields": { "app_logs": ["namespace", "level", "message"] },
+      "timeRange": {
+        "type": "relative",
+        "relativeTimePeriod": "1h",
+        "startTime": 1793869200000000,
+        "endTime": 1793872800000000
+      },
+      "organization_identifier": "default",
+      "quickMode": false,
+      "request_timestamp": 1793872800123000,
+      "user_timezone": "UTC",
+      "org_id": "default"
+    },
+    "history": [
+      { "role": "user", "content": "What is in this stream?" },
+      { "role": "assistant", "content": "app_logs holds application logs with namespace, level and message fields." }
+    ],
+    "images": null,
+    "known_opencode_session_id": null,
+    "known_seq": null,
+    "mcps": null,
+    "model": null,
+    "query": "Why did these errors increase?",
+    "session_epoch": null,
+    "skills": null,
+    "turn_id": null
+  }
+}
