@@ -31,7 +31,7 @@ Try it: invite the bot to a public channel (private channels are off unless `sla
 
 ### LLM traces (OpenObserve / Langfuse)
 
-Each request becomes one OpenTelemetry trace: `invoke_agent <bot>` (task id, Slack user, `session.id` = channel + thread) → `skill <name>` → one `chat <model>` span per gateway call, retries and budget widening included, so every billed call shows up. Chat spans carry the GenAI attributes both backends read: `gen_ai.request.model`, `gen_ai.usage.input_tokens` / `output_tokens`, `gen_ai.response.finish_reasons`, plus `neotags.llm.purpose` (router, notes, summary, fileSummary, answer), `neotags.llm.chain` and `neotags.llm.effort` (the `llm.chains` entry that served the call, so failover to the next model is visible) and `neotags.llm.attempt`. Latency is the span duration.
+Each request becomes one OpenTelemetry trace: `invoke_agent <bot>` (task id, Slack user, `session.id` = channel + thread) → `intent` (the router's choice: `neotags.intent.skill`, `matched`, `invalid_replies`) and `skill <name>`, each with one `chat <model>` span per gateway call under it, retries and budget widening included, so every billed call shows up. Chat spans carry the GenAI attributes both backends read: `gen_ai.request.model`, `gen_ai.usage.input_tokens` / `output_tokens`, `gen_ai.response.finish_reasons`, plus `neotags.llm.purpose` (router, notes, summary, fileSummary, answer), `neotags.llm.chain` and `neotags.llm.effort` (the `llm.chains` entry that served the call, so failover to the next model is visible) and `neotags.llm.attempt`. Latency is the span duration.
 
 Tracing is off unless an OTLP/HTTP endpoint is set with the standard env vars (protobuf; header values URL-encoded, so the space after `Basic` is `%20`):
 

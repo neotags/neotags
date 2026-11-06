@@ -74,6 +74,7 @@ describe("traces", () => {
     const byName = (n: string) => spans.filter((s) => s.name === n);
     const [root] = byName("invoke_agent moose");
     const [skillSpan] = byName("skill echo");
+    const [intent] = byName("intent");
     const chats = byName("chat m1");
     expect(root!.attributes).toMatchObject({
       "gen_ai.operation.name": "invoke_agent", "neotags.task.id": "T1", "neotags.skill": "echo",
@@ -85,7 +86,9 @@ describe("traces", () => {
     expect(skillSpan!.parentSpanContext?.spanId).toBe(root!.spanContext().spanId);
 
     const [routing, failed, answer] = chats;
-    expect(routing!.parentSpanContext?.spanId).toBe(root!.spanContext().spanId);
+    expect(intent!.parentSpanContext?.spanId).toBe(root!.spanContext().spanId);
+    expect(intent!.attributes).toMatchObject({ "neotags.intent.skill": "echo", "neotags.intent.matched": true, "neotags.intent.files": 0 });
+    expect(routing!.parentSpanContext?.spanId).toBe(intent!.spanContext().spanId);
     expect(routing!.attributes).toMatchObject({ "neotags.llm.purpose": "router", "neotags.llm.chain": "gate", "gen_ai.output.type": "json" });
     expect(failed!.status).toMatchObject({ code: 2, message: "503 upstream" });
     expect(answer!.parentSpanContext?.spanId).toBe(skillSpan!.spanContext().spanId);
@@ -95,6 +98,28 @@ describe("traces", () => {
       "gen_ai.response.finish_reasons": ["stop"],
     });
     expect(Object.keys(answer!.attributes).some((k) => k.startsWith("gen_ai.prompt") || k.startsWith("gen_ai.completion"))).toBe(false);
+  });
+});
+
+describe("intent traces", () => {
+  beforeEach(() => exporter.reset());
+
+  it("records an invalid routing reply and an unknown skill on the intent span", async () => {
+    const complete = vi
+      .fn()
+      .mockResolvedValueOnce(msg({ content: [{ type: "text", text: "not json" }] }))
+      .mockResolvedValueOnce(msg({ content: [{ type: "text", text: '{"skill":"deploy"}' }] }));
+    const llm = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0, policy });
+    const router = new Router({
+      botName: "moose", notifier: { reply: async () => {}, react: async () => {} }, skills: [], llm, log,
+      context: () => ({ llm }) as unknown as SkillContext,
+    });
+    await router.handle({ id: "T2", source: "slack", actor: { id: "U1" }, text: "deploy it", reply: { kind: "slack", channel: "C1" } });
+    const spans = await flushed();
+    const [intent] = spans.filter((s) => s.name === "intent");
+    expect(intent!.attributes).toMatchObject({ "neotags.intent.skill": "deploy", "neotags.intent.matched": false, "neotags.intent.invalid_replies": 1 });
+    expect(spans.filter((s) => s.name === "chat m1" && s.parentSpanContext?.spanId === intent!.spanContext().spanId)).toHaveLength(2);
+    expect(spans.find((s) => s.name === "invoke_agent moose")!.attributes["neotags.skill"]).toBe("none");
   });
 });
 

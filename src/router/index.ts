@@ -1,4 +1,5 @@
 import type { Logger } from "pino";
+import type { Span } from "@opentelemetry/api";
 import { z } from "zod";
 import { parseWith } from "../agent/json.js";
 import type { LlmClient } from "../agent/llm.js";
@@ -73,7 +74,7 @@ export class Router {
     }
   }
 
-  private async decide(task: Task, files: number): Promise<z.infer<typeof decisionSchema>> {
+  private async decide(task: Task, files: number, span: Span): Promise<z.infer<typeof decisionSchema>> {
     const llm = this.d.llm!;
     const context = task.thread
       ? "the message was posted inside a thread"
@@ -94,6 +95,7 @@ export class Router {
         return parseWith(decisionSchema, r.text);
       } catch (err) {
         lastError = (err as Error).message;
+        span.setAttribute("neotags.intent.invalid_replies", attempt + 1);
       }
     }
     throw new Error(`router returned invalid output twice: ${lastError}`);
@@ -127,8 +129,14 @@ export class Router {
 
     const ctx = this.d.context();
     const files = await this.fileCount(task, ctx);
-    const decision = await this.decide(task, files);
-    const skill = this.d.skills.find((s) => s.name === decision.skill);
+    // Its own span so routing accuracy and latency (JSON retry included) can be judged apart from the skill.
+    const { decision, skill } = await inSpan("intent", { "neotags.intent.files": files }, async (span) => {
+      const decision = await this.decide(task, files, span);
+      const skill = this.d.skills.find((s) => s.name === decision.skill);
+      // The model's raw choice: a name outside the registry shows up here and as matched=false.
+      span.setAttributes({ "neotags.intent.skill": decision.skill, "neotags.intent.matched": Boolean(skill) });
+      return { decision, skill };
+    });
     this.d.log.info({ taskId: task.id, routed: skill?.name ?? "none", files }, "routed");
     routed(skill?.name ?? "none");
     if (!skill) {
