@@ -6,6 +6,9 @@ export const EFFORTS = ["none", "low", "medium", "high", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];
 export const CHAINS = ["agent", "job", "gate", "summary"] as const;
 export type ChainName = (typeof CHAINS)[number];
+/** Where an agent run comes from; budgets and default skill packs are set per source. */
+export const RUN_SOURCES = ["o2", "slack", "job"] as const;
+export type RunSource = (typeof RUN_SOURCES)[number];
 
 const effortSchema = z.enum(EFFORTS);
 
@@ -112,6 +115,9 @@ const fileSchema = z.object({
         .optional(),
       failover: z
         .object({
+          // Agent runs stream; a request with no first token (text, thinking or tool call) by then is aborted
+          // and retried like a gateway error.
+          firstTokenTimeoutSec: z.number().positive().default(30),
           // Per model: `failures` within `windowSec` open it; after `cooldownSec` one probe call is let through.
           breaker: z
             .object({
@@ -169,7 +175,56 @@ const fileSchema = z.object({
       }
     })
     .prefault({}),
+  // Tool-using agent runs (RunManager): budgets, concurrency and the skill packs each entry starts with.
+  agent: z
+    .object({
+      // Skill packs whose SKILL.md is in the system prompt of every run from that entry (o2, slack, job).
+      entries: z.partialRecord(z.enum(RUN_SOURCES), z.array(z.string().min(1))).default({}),
+      // Tool-calling turns per run; then the model answers with what it has.
+      maxSteps: z.number().int().positive().default(30),
+      // Wall clock per run, by entry. The last `finalReserveSec` are kept for the final answer.
+      wallClockSec: z
+        .object({
+          slack: z.number().positive().default(360),
+          o2: z.number().positive().default(600),
+          job: z.number().positive().default(600),
+        })
+        .prefault({}),
+      finalReserveSec: z.number().nonnegative().default(90),
+      // Prompt budget of one request; the oldest tool outputs are stubbed out first.
+      maxInputTokens: z.number().int().positive().default(100_000),
+      concurrency: z
+        .object({
+          // Runs at once across all entries; more wait in a FIFO queue.
+          total: z.number().int().positive().default(4),
+          // Per user (or per session when the user is unknown).
+          perUserPerHour: z.number().int().positive().default(20),
+        })
+        .prefault({}),
+      // On shutdown, how long running runs may finish; keep below terminationGracePeriodSeconds.
+      drainSec: z.number().positive().default(640),
+    })
+    .prefault({}),
+  // Skill packs (Agent Skills: <pack>/SKILL.md + references/) mounted read-only. Only these files are loaded.
+  skillPacks: z
+    .object({
+      dir: z.string().min(1).optional(),
+      // Whole packs: SKILL.md and every file under references/.
+      packs: z.array(z.string().min(1)).default([]),
+      // Single reference files of other packs, relative to the pack's references/ (e.g. data/x.json).
+      refs: z.record(z.string().min(1), z.array(z.string().min(1))).default({}),
+      maxFileKb: z.number().positive().default(256),
+    })
+    .prefault({}),
   logLevel: z.string().default("info"),
+}).superRefine((cfg, ctx) => {
+  for (const [entry, packs] of Object.entries(cfg.agent.entries)) {
+    (packs ?? []).forEach((p, i) => {
+      if (!cfg.skillPacks.packs.includes(p)) {
+        ctx.addIssue({ code: "custom", path: ["agent", "entries", entry, i], message: `skill pack "${p}" is not in skillPacks.packs` });
+      }
+    });
+  }
 });
 
 export interface Secrets {

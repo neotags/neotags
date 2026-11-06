@@ -30,9 +30,10 @@ src/index.ts            entrypoint
 src/config/             YAML (NEOTAGS_CONFIG) + env secrets, validated with zod
 src/gateway/            Slack Events gateway (Bolt, HTTP), mention stripping, event dedupe
 src/agent/              pi-ai gateway model from config (baseUrl/model/key), tool-less LlmClient, pi Agent factory + tool guard
+src/runs/               RunManager (state machine, concurrency, per-session lock, budgets, rate limit, drain) + AgentRunner (pi-agent-core); not wired to an entry yet
 src/router/             LLM intent routing: one tool-less call picks a registered skill; also dispatches button actions
 src/skills/             Skill interface; kb-collect/ (thread -> redact -> summarize -> Onyx upsert, Undo); kb-files/ (Slack files -> extract -> redact -> Onyx); kb-ask/ (Onyx search -> grounded, cited answer)
-src/tools/              slack (thread reader, file download), onyx (ingestion + search client), extract (PDF/DOCX/XLSX/PPTX/text -> sections), redact (secret scrubbing)
+src/tools/              slack (thread reader, file download), onyx (ingestion + search client), extract (PDF/DOCX/XLSX/PPTX/text -> sections), redact (secret scrubbing), skillpacks (allowlisted Agent Skills loader + read_skill tools)
 src/guardrails/         channel/user allowlist policy (enforced in code, not prompts)
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport
 test/                   vitest

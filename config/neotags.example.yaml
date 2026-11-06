@@ -43,6 +43,7 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
   #   gate:    [{ model: fast, effort: none }]
   #   summary: [{ model: fast, effort: low }]
   # failover:
+  #   firstTokenTimeoutSec: 30   # agent runs: a streamed request with no first token by then is retried
   #   breaker: { failures: 5, windowSec: 60, cooldownSec: 120 }   # per model; open = calls fail fast
   # Reasoning models (DeepSeek, Qwen3, ...) can spend a whole small max_tokens thinking and return no answer.
   # The client retries once with a bigger budget (up to maxTokens). If your gateway can turn thinking off,
@@ -62,5 +63,19 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
   #   answer: 1200                       #   kb-ask answer
   # summarizeMaxInputTokens: 60000       # prompt budget; default = contextWindow / 2 - outputTokens.summary
   # charsPerToken: 4                     # lower (e.g. 2-3) for CJK-heavy text so budgets are not overrun
+# Tool-using agent runs (RunManager). Not reachable from an entry yet; the O2 gateway is next.
+# agent:
+#   entries: { o2: [o2-query-assistant] }   # skill packs in the system prompt per entry (must be in skillPacks.packs)
+#   maxSteps: 30                  # tool-calling turns, then the model answers with what it has
+#   wallClockSec: { slack: 360, o2: 600, job: 600 }
+#   finalReserveSec: 90           # the last seconds of the wall clock are kept for the final answer
+#   maxInputTokens: 100000        # prompt budget per request; the oldest tool outputs are stubbed out first
+#   concurrency: { total: 4, perUserPerHour: 20 }
+#   drainSec: 640                 # on shutdown; keep below terminationGracePeriodSeconds
+# skillPacks:                     # Agent Skills (<pack>/SKILL.md + references/), mounted read-only
+#   dir: /etc/neotags/skills
+#   packs: [o2-query-assistant]   # whole packs: SKILL.md + every text file under references/
+#   refs:                         # single reference files of other packs, relative to references/
+#     some-pack: [method.md, data/table.json]
 logLevel: info
 # Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none)
