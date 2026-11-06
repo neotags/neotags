@@ -108,11 +108,16 @@ describe("O2 stream fixtures", () => {
 describe("O2 query request fixture", () => {
   it("carries the fields moose reads", () => {
     const req = JSON.parse(readFileSync(join(dir, "request", "query-request.json"), "utf8")) as {
+      path: string;
       headers: Record<string, string>;
       body: Record<string, unknown> & { context: Record<string, unknown> };
     };
+    expect(req.path).toBe("/o2_agent/o2/query/stream");
     expect(req.headers).not.toHaveProperty("authorization");
-    for (const h of ["x-o2-agent-key", "x-o2-user-email", "x-o2-assistant-session-id", "x-o2-assistant-turn-id", "traceparent"]) {
+    // O2 sends no turn id while persistence is off.
+    expect(req.headers).not.toHaveProperty("x-o2-assistant-turn-id");
+    expect(req.body.turn_id).toBeNull();
+    for (const h of ["x-o2-agent-key", "x-o2-user-email", "x-o2-assistant-session-id", "traceparent"]) {
       expect(req.headers).toHaveProperty(h);
     }
     expect(typeof req.body.query).toBe("string");
