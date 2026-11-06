@@ -104,16 +104,20 @@ export class Router {
   /** One trace per task: the routing call and the skill's LLM calls are its children. */
   async handle(task: Task): Promise<void> {
     const anchor = task.thread?.ts ?? task.triggerTs;
+    const session = anchor && `${task.reply.channel}:${anchor}`;
     return inSpan(
-      `invoke_agent ${this.d.botName}`,
+      // Named for the entry, like agent runs (invoke_agent o2), so entries are told apart; the bot name is config.
+      `invoke_agent ${task.source}`,
       {
         "gen_ai.operation.name": "invoke_agent",
-        "gen_ai.agent.name": this.d.botName,
+        "gen_ai.agent.name": task.source,
+        "neotags.bot.name": this.d.botName,
         "neotags.task.id": task.id,
         "neotags.task.source": task.source,
         "user.id": task.actor.id,
-        // A Slack thread is the conversation: follow-up mentions in it group into one session.
-        ...(anchor && { "session.id": `${task.reply.channel}:${anchor}` }),
+        // A Slack thread is the conversation: follow-up mentions in it group into one session. session.id is
+        // what Langfuse groups by.
+        ...(session && { "gen_ai.conversation.id": session, "session.id": session }),
       },
       (span) => this.route(task, (skill) => span.setAttribute("neotags.skill", skill)),
     );

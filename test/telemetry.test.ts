@@ -102,13 +102,13 @@ describe("traces", () => {
 
     const spans = await flushed();
     const byName = (n: string) => spans.filter((s) => s.name === n);
-    const [root] = byName("invoke_agent moose");
+    const [root] = byName("invoke_agent slack");
     const [skillSpan] = byName("skill echo");
     const [intent] = byName("intent");
     const chats = byName("chat m1");
     expect(root!.attributes).toMatchObject({
-      "gen_ai.operation.name": "invoke_agent", "neotags.task.id": "T1", "neotags.skill": "echo",
-      "user.id": "U1", "session.id": "C1:100",
+      "gen_ai.operation.name": "invoke_agent", "gen_ai.agent.name": "slack", "neotags.bot.name": "moose",
+      "neotags.task.id": "T1", "neotags.skill": "echo", "user.id": "U1", "gen_ai.conversation.id": "C1:100", "session.id": "C1:100",
     });
     expect(chats).toHaveLength(3); // router + a failed attempt + its retry: each billed call is its own span
     const traceId = root!.spanContext().traceId;
@@ -149,7 +149,7 @@ describe("intent traces", () => {
     const [intent] = spans.filter((s) => s.name === "intent");
     expect(intent!.attributes).toMatchObject({ "neotags.intent.skill": "deploy", "neotags.intent.matched": false, "neotags.intent.invalid_replies": 1 });
     expect(spans.filter((s) => s.name === "chat m1" && s.parentSpanContext?.spanId === intent!.spanContext().spanId)).toHaveLength(2);
-    expect(spans.find((s) => s.name === "invoke_agent moose")!.attributes["neotags.skill"]).toBe("none");
+    expect(spans.find((s) => s.name === "invoke_agent slack")!.attributes["neotags.skill"]).toBe("none");
   });
 });
 

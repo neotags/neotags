@@ -384,7 +384,7 @@
         "LLM router with optional faster router model",
         "kb-collect: thread reader, redaction, summarizer, Onyx upsert + Undo",
         "OpenAI-compatible gateway via pi-ai, verified live; Agent factory + tool guard ready",
-        "LLM traces over OTLP: one trace per task, one span per LLM call (model, tokens, latency)"
+        "LLM traces over OTLP: one trace per task or agent run, a span per LLM request and tool call (model, tokens, latency)"
       ]
     },
     {

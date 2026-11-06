@@ -25,6 +25,11 @@ export interface ResilientStreamOptions {
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** A failed attempt, retried or not. */
   onAttemptError?: (error: string, attempt: number, retrying: boolean) => void;
+  /**
+   * Called as each gateway request (attempt) starts; the returned function gets how it ended, timeouts included.
+   * For tracing: one chat span per billed request. Must not throw.
+   */
+  onAttempt?: (attempt: number, context: Parameters<StreamFn>[1], options: SimpleStreamOptions | undefined) => ((final: AssistantMessage) => void) | undefined;
 }
 
 /** pi's thinking level back to the configured effort ("off" is "none"). */
@@ -88,6 +93,7 @@ export function resilientStream(inner: StreamFn, o: ResilientStreamOptions): Str
         let start: Extract<AssistantMessageEvent, { type: "start" }> | undefined;
         let forwarded = false;
         let final: AssistantMessage | undefined;
+        const ended = o.onAttempt?.(attempt, context, options);
         try {
           const s = await inner(model, context, {
             ...options,
@@ -131,6 +137,7 @@ export function resilientStream(inner: StreamFn, o: ResilientStreamOptions): Str
               timedOut === "first" ? `no first token within ${o.firstTokenMs / 1000}s (timed out)` : `stream stalled for ${(o.idleMs ?? 0) / 1000}s (timed out)`;
             final = { ...final, stopReason: "error", errorMessage };
           }
+          ended?.(final);
           const error = final.errorMessage ?? `LLM stopped: ${final.stopReason}`;
           const retry =
             !forwarded && !userSignal?.aborted && final.stopReason === "error" && attempt < o.maxRetries && (timedOut === "first" || isTransientError(error));
@@ -143,6 +150,7 @@ export function resilientStream(inner: StreamFn, o: ResilientStreamOptions): Str
           out.push({ type: "error", reason: final.stopReason === "aborted" ? "aborted" : "error", error: final });
           return;
         }
+        ended?.(final);
         if (!forwarded && start) out.push(start);
         out.push({ type: "done", reason: final.stopReason as Extract<AssistantMessageEvent, { type: "done" }>["reason"], message: final });
         return;

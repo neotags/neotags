@@ -1,5 +1,7 @@
 import { randomUUID } from "node:crypto";
+import type { Span } from "@opentelemetry/api";
 import type { Logger } from "pino";
+import { endRunSpan, startRunSpan, withSpan } from "../telemetry/spans.js";
 import { contextPackage, notice, type DegradeReason } from "./degrade.js";
 import { RateLimiter, limitKey } from "./limits.js";
 import {
@@ -31,6 +33,10 @@ export interface RunManagerOptions {
   abortGraceMs?: number;
   /** The answer when the runner cannot give one; default: the context package. */
   degrade?: (input: RunInput, why: DegradeReason) => string;
+  /** On the run's trace span (`neotags.bot.name`). */
+  botName?: string;
+  /** Put the question and the answer on the run's trace span (telemetry.captureContent), redacted. */
+  captureContent?: boolean;
 }
 
 export type SubmitResult =
@@ -60,11 +66,16 @@ interface Run {
   timer?: NodeJS.Timeout;
   /** Finishes a run whose runner ignores the abort, so its slot and session lock are not held forever. */
   backstop?: NodeJS.Timeout;
+  /** invoke_agent: from start to finish; the runner's chat and tool spans are its children. */
+  span?: Span;
   resolve: (r: RunResult) => void;
   result: Promise<RunResult>;
 }
 
 const ZERO = { steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 } };
+
+/** A run's result before the manager stamps id and timing; `errorType` is for the trace span only. */
+type Finished = Omit<RunResult, "id" | "sessionId" | "durationMs"> & { errorType?: string };
 /** After an abort, how long a runner gets to return before the run is finished without it. */
 const ABORT_GRACE_MS = 10_000;
 
@@ -215,6 +226,14 @@ export class RunManager {
       },
       { once: true },
     );
+    run.span = startRunSpan({
+      agent: input.source,
+      ...(this.o.botName && { botName: this.o.botName }),
+      runId: run.id,
+      sessionId: input.sessionId,
+      ...(input.user && { user: input.user }),
+      queuedMs: run.startedAt - run.enqueuedAt,
+    });
     run.observer.started?.({ runId: run.id });
     const ctx = {
       runId: run.id,
@@ -224,43 +243,49 @@ export class RunManager {
     };
     // Defer so a runner that throws synchronously still goes through the same path.
     void Promise.resolve()
-      .then(() => this.o.runner.run(input, ctx))
+      .then(() => withSpan(run.span!, () => this.o.runner.run(input, ctx)))
       .then(
         (outcome) => this.finish(run, this.fromOutcome(run, outcome)),
         (err: unknown) => this.finish(run, this.fromError(run, err)),
       );
   }
 
-  private fromOutcome(run: Run, out: RunOutcome): Omit<RunResult, "id" | "sessionId" | "durationMs"> {
+  private fromOutcome(run: Run, out: RunOutcome): Finished {
     if (out.state !== "cancelled") return out;
     const why = run.controller.signal.reason;
     const kind = why instanceof RunAbort && why.kind === "shutdown" ? "interrupted" : "cancelled";
-    return { ...out, answer: out.answer || notice(kind, run.input.question), reason: out.reason ?? (why instanceof RunAbort ? why.message : "cancelled") };
+    return {
+      ...out,
+      answer: out.answer || notice(kind, run.input.question),
+      reason: out.reason ?? (why instanceof RunAbort ? why.message : "cancelled"),
+      errorType: kind,
+    };
   }
 
-  private fromError(run: Run, err: unknown): Omit<RunResult, "id" | "sessionId" | "durationMs"> {
+  private fromError(run: Run, err: unknown): Finished {
     const partial: typeof ZERO & RunError["partial"] = { ...ZERO, ...(err instanceof RunError ? err.partial : {}) };
     const why = run.controller.signal.reason;
     if (run.controller.signal.aborted && why instanceof RunAbort && why.kind !== "deadline") {
       const kind = why.kind === "shutdown" ? "interrupted" : "cancelled";
-      return { ...partial, state: "cancelled", answer: notice(kind, run.input.question), reason: why.message };
+      return { ...partial, state: "cancelled", answer: notice(kind, run.input.question), reason: why.message, errorType: kind };
     }
     const degradeKind: DegradeReason =
       run.controller.signal.aborted && why instanceof RunAbort ? "deadline" : err instanceof RunError ? err.kind : "error";
     const message = (err as Error)?.message ?? String(err);
     if (degradeKind === "error") this.o.log?.error({ err, runId: run.id }, "agent run crashed");
-    if (partial.answer) return { ...partial, answer: partial.answer, state: "failed", reason: message };
+    if (partial.answer) return { ...partial, answer: partial.answer, state: "failed", reason: message, errorType: degradeKind };
     const degrade = this.o.degrade ?? contextPackage;
-    return { ...partial, state: "failed", answer: degrade(run.input, degradeKind), degraded: true, reason: message };
+    return { ...partial, state: "failed", answer: degrade(run.input, degradeKind), degraded: true, reason: message, errorType: degradeKind };
   }
 
-  private finish(run: Run, r: Omit<RunResult, "id" | "sessionId" | "durationMs">): void {
+  private finish(run: Run, finished: Finished): void {
     // A run the backstop finished may still settle later; only the first outcome counts.
     if (run.state !== "queued" && run.state !== "running") return;
     if (run.timer) clearTimeout(run.timer);
     if (run.backstop) clearTimeout(run.backstop);
     const wasRunning = this.running.delete(run.id);
     if (wasRunning) this.busySessions.delete(run.input.sessionId);
+    const { errorType, ...r } = finished;
     run.state = r.state;
     const result: RunResult = { ...r, id: run.id, sessionId: run.input.sessionId, durationMs: this.now() - (run.startedAt ?? run.enqueuedAt) };
     // One summary line per run (§15): enough to chart volume, cost and outcomes from the logs.
@@ -284,6 +309,14 @@ export class RunManager {
       },
       "agent run finished",
     );
+    if (run.span) {
+      endRunSpan(run.span, {
+        ...result,
+        question: run.input.question,
+        ...(errorType && { errorType }),
+        captureContent: this.o.captureContent ?? false,
+      });
+    }
     run.observer.done?.(result);
     run.resolve(result);
     if (wasRunning) this.schedule();

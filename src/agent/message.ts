@@ -13,3 +13,8 @@ export function messageText(m: Pick<Message, "content">): string {
     .filter(Boolean)
     .join("\n");
 }
+
+/** An agent transcript as prompt messages for a trace span (tool results under the GenAI role "tool"). */
+export function promptMessages(messages: readonly Pick<Message, "role" | "content">[]): { role: string; content: string }[] {
+  return messages.map((m) => ({ role: m.role === "toolResult" ? "tool" : m.role, content: messageText(m) }));
+}

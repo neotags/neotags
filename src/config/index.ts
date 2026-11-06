@@ -220,8 +220,8 @@ const fileSchema = z.object({
   // OTEL_EXPORTER_OTLP_* env vars; tracing is off unless an endpoint is set.
   telemetry: z
     .object({
-      // Put prompts and replies on spans, for judging answer quality. Off by default: they carry (redacted) Slack
-      // threads and files, and whoever can read the traces can read them. Or env
+      // Put prompts, replies and tool input/output on spans (redacted), for judging answer quality. Off by default:
+      // they carry Slack threads, files and O2 query results, and whoever can read the traces can read them. Or env
       // OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true.
       captureContent: z.boolean().default(false),
     })

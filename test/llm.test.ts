@@ -256,7 +256,7 @@ describe("end to end against a fake OpenAI-compatible gateway", () => {
 });
 
 describe("toBeforeToolCall", () => {
-  const call = (name: string) => ({ toolCall: { name }, args: {} });
+  const call = (name: string) => ({ toolCall: { id: "c1", name }, args: {} });
   it("allows what the guard allows and blocks the rest with a reason for the model", async () => {
     const hook = toBeforeToolCall(({ name }) => (name === "query" ? { ok: true } : { ok: false, reason: "needs approval" }));
     expect(await hook(call("query"))).toBeUndefined();
