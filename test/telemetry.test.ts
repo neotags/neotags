@@ -1,17 +1,21 @@
 import { pino } from "pino";
 import { InMemorySpanExporter, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { diag } from "@opentelemetry/api";
+import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
+import { tracedStreamFn } from "../src/agent/index.js";
 import { PiLlmClient } from "../src/agent/llm.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 import { Router } from "../src/router/index.js";
 import type { Skill, SkillContext } from "../src/skills/types.js";
 import type { Task } from "../src/task.js";
-import { startTelemetry, tracingEnabled } from "../src/telemetry/index.js";
+import { ReportingExporter, startTelemetry, tracingEnabled } from "../src/telemetry/index.js";
 
 // The global tracer provider can be set once per process; vitest runs each test file in its own.
 const exporter = new InMemorySpanExporter();
-const telemetry = startTelemetry({ exporter })!;
+const appLog = { error: vi.fn(), warn: vi.fn(), info: vi.fn() };
+const telemetry = startTelemetry({ exporter, log: appLog as never })!;
 const flushed = async (): Promise<ReadableSpan[]> => {
   await telemetry.flush();
   return exporter.getFinishedSpans();
@@ -134,5 +138,64 @@ describe("traces with content", () => {
       "gen_ai.prompt.1.role": "user", "gen_ai.prompt.1.content": "hi",
       "gen_ai.completion.0.content": "ok",
     });
+  });
+});
+
+describe("export failures", () => {
+  const fakeLog = () => ({ error: vi.fn(), warn: vi.fn(), info: vi.fn() });
+  const span = {} as ReadableSpan;
+  const results: ExportResult[] = [];
+  const inner = {
+    export: (_s: ReadableSpan[], done: (r: ExportResult) => void) => done(results.shift()!),
+    shutdown: async () => {},
+  };
+  const failed: ExportResult = { code: ExportResultCode.FAILED, error: new Error("503 Service Unavailable") };
+  const ok: ExportResult = { code: ExportResultCode.SUCCESS };
+
+  it("logs a failed batch once per interval with running counts, then the recovery, and never fails the processor", () => {
+    let t = 0;
+    const log = fakeLog();
+    const e = new ReportingExporter(inner, log as never, () => t, 60_000);
+    const seen: ExportResult[] = [];
+    results.push(failed, failed, failed, ok);
+    e.export([span, span], (r) => seen.push(r));
+    t = 5_000;
+    e.export([span], (r) => seen.push(r)); // inside the interval: counted, not logged
+    t = 61_000;
+    e.export([span], (r) => seen.push(r));
+    e.export([span], (r) => seen.push(r));
+    expect(log.warn).toHaveBeenCalledTimes(2);
+    expect(log.warn.mock.calls[0]![0]).toMatchObject({ failedBatches: 1, droppedSpans: 2 });
+    expect(log.warn.mock.calls[1]![0]).toMatchObject({ failedBatches: 3, droppedSpans: 4 });
+    expect(log.info).toHaveBeenCalledWith({ failedBatches: 3, droppedSpans: 4 }, "trace export recovered");
+    expect(seen.every((r) => r.code === ExportResultCode.SUCCESS)).toBe(true);
+  });
+
+  it("sends SDK warnings (dropped spans, partial success) to the app log", () => {
+    diag.warn("Dropped 3 spans because maxQueueSize reached");
+    expect(appLog.warn).toHaveBeenCalledWith({ otel: [] }, "Dropped 3 spans because maxQueueSize reached");
+  });
+});
+
+describe("agent traces", () => {
+  beforeEach(() => exporter.reset());
+
+  it("records each agent turn as a chat span, tool calls included in the reply", async () => {
+    const reply = msg({
+      content: [{ type: "toolCall", id: "1", name: "search", arguments: { q: "disk" } }],
+      stopReason: "toolUse",
+    });
+    const inner = vi.fn(async () => ({ result: async () => reply }) as never);
+    const stream = tracedStreamFn(inner, { captureContent: true, effort: "high" });
+    const s = await stream({ id: "m1" } as never, { messages: [{ role: "user", content: "why is disk full?", timestamp: 0 }] } as never);
+    await s.result();
+    const [span] = (await flushed()).filter((x) => x.name === "chat m1");
+    expect(span!.attributes).toMatchObject({
+      "neotags.llm.purpose": "agent", "neotags.llm.chain": "agent", "neotags.llm.effort": "high",
+      "gen_ai.prompt.0.role": "user", "gen_ai.prompt.0.content": "why is disk full?",
+      "gen_ai.completion.0.content": 'search({"q":"disk"})', "gen_ai.response.finish_reasons": ["tool_calls"],
+      "gen_ai.usage.input_tokens": 30,
+    });
+    expect(span!.attributes["neotags.llm.attempt"]).toBeUndefined();
   });
 });

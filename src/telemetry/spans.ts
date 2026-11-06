@@ -1,5 +1,5 @@
 import { SpanKind, SpanStatusCode, trace, type Attributes, type Span } from "@opentelemetry/api";
-import type { AssistantMessage } from "@earendil-works/pi-ai";
+import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 
 // A proxy until startTelemetry registers a provider; a no-op when tracing is off.
 const tracer = trace.getTracer("neotags");
@@ -31,7 +31,8 @@ export interface ChatRequest {
   chain?: string;
   effort?: string;
   purpose?: string;
-  attempt: number;
+  /** Retry number within one LlmClient call; absent for agent turns. */
+  attempt?: number;
   maxTokens?: number;
   temperature?: number;
   json?: boolean;
@@ -55,7 +56,7 @@ export function startChatSpan(req: ChatRequest): Span {
     // The wire API, not the vendor: the gateway is OpenAI-compatible whatever model sits behind it.
     "gen_ai.system": "openai",
     "gen_ai.request.model": req.model,
-    "neotags.llm.attempt": req.attempt,
+    ...(req.attempt !== undefined && { "neotags.llm.attempt": req.attempt }),
     ...(req.purpose && { "neotags.llm.purpose": req.purpose }),
     ...(req.chain && { "neotags.llm.chain": req.chain }),
     ...(req.effort && { "neotags.llm.effort": req.effort }),
@@ -102,4 +103,13 @@ export function endChatSpan(span: Span, outcome: { msg: AssistantMessage; text: 
   }
   if (msg.stopReason === "error" || msg.stopReason === "aborted") fail(span, msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`);
   span.end();
+}
+
+/** Span text of a pi message: its text parts, tool calls as `name(args)`. Images and thinking are left out. */
+export function messageText(m: Pick<Message, "content">): string {
+  if (typeof m.content === "string") return m.content;
+  return (m.content as { type: string; text?: string; name?: string; arguments?: unknown }[])
+    .map((c) => (c.type === "text" ? c.text : c.type === "toolCall" ? `${c.name}(${JSON.stringify(c.arguments)})` : undefined))
+    .filter(Boolean)
+    .join("\n");
 }

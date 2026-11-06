@@ -15,7 +15,7 @@ const TRACE_FLUSH_TIMEOUT_MS = 5_000;
 
 const cfg = loadConfig();
 const log = pino({ level: cfg.logLevel });
-const telemetry = startTelemetry();
+const telemetry = startTelemetry({ log });
 if (telemetry) log.info({ captureContent: cfg.telemetry.captureContent }, "tracing to OTLP");
 
 // Optional integrations: the bot still starts without them and tells users what is missing.

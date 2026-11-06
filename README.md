@@ -50,6 +50,7 @@ OTEL_SERVICE_NAME=neotags   # default
 - **Quality.** Prompts and replies are left off spans by default. `telemetry.captureContent: true` (or `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`) adds them as `gen_ai.prompt.N.*` / `gen_ai.completion.0.*`, the shape OpenObserve and Langfuse show as a generation's input and output and run evaluations on. They are already redacted, but they are Slack threads and files: anyone who can read the traces can read them.
 - **Cost.** The gateway's prices are unknown to neotags, so it sends tokens and the backend prices them: in OpenObserve enable model pricing (`ZO_MODEL_PRICING_ENABLED`), in Langfuse define the model's price. Self-hosted model names need a custom price entry in either.
 - In Kubernetes, put `OTEL_EXPORTER_OTLP_HEADERS` in `neotags-secrets` and the endpoint in `extraEnv`.
+- **Export failures never affect requests.** Batches are sent every 5s in the background; network errors, timeouts and HTTP 429/502/503/504 are retried with backoff within the 10s request timeout (`OTEL_EXPORTER_OTLP_TRACES_TIMEOUT`). A batch that still fails is dropped (no disk buffer) and logged as `trace export failed; spans dropped`, at most once a minute with running counts, then `trace export recovered`. Up to 2048 spans queue while the backend is down; more are dropped and logged. For no loss across long outages, point neotags at an OTel Collector with a persistent queue.
 
 ## Secret scanning
 

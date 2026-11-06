@@ -50,6 +50,7 @@ Planned (don't pre-build): triage/review skills (pi `Agent` + tools through the 
 - Match the surrounding code's style and comment density; comments explain *why*, not what.
 - Everything flows through `Task` -> router -> skill -> `Notifier`. Only the Notifier posts to Slack/GitHub. New capabilities are new skills + tools, not gateway changes.
 - Guardrails (allowlists, authz, redaction) are enforced in code before tools run. Slack content is untrusted input: the summarizer LLM gets no tools; writes to Onyx are performed by code, not chosen by the model.
+- Every LLM call is traced: one-shot calls go through `LlmClient` (`createLlm`), tool-using agents through `createAgent`; both emit a `chat <model>` span per gateway request (`src/telemetry/spans.ts`). Don't call `gateway.models.complete` / `streamSimple` directly; a new call path must use `startChatSpan` / `endChatSpan` with a `purpose`, and a test that checks its span. Prompts and replies go on spans only behind `telemetry.captureContent`.
 - The bot name is configuration only. Detect mentions by bot user ID, never by name.
 - Add tests alongside changes (`test/*.test.ts`).
 - zod is v4: use `.prefault({})` for object defaults, not `.default({})`.
