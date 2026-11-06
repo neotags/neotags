@@ -51,6 +51,8 @@ export interface ChatRequest {
   purpose?: string;
   /** Retry number within one LlmClient call; absent for agent turns. */
   attempt?: number;
+  /** The repeat of an attempt with a larger output budget (same attempt number). */
+  widened?: boolean;
   maxTokens?: number;
   temperature?: number;
   json?: boolean;
@@ -79,6 +81,7 @@ function chatSpan(req: ChatRequest): Span {
     "gen_ai.system": "openai",
     "gen_ai.request.model": req.model,
     ...(req.attempt !== undefined && { "neotags.llm.attempt": req.attempt }),
+    ...(req.widened && { "neotags.llm.widened": true }),
     ...(req.purpose && { "neotags.llm.purpose": req.purpose }),
     ...(req.chain && { "neotags.llm.chain": req.chain }),
     ...(req.effort && { "neotags.llm.effort": req.effort }),
@@ -107,11 +110,12 @@ export function endChatSpan(span: Span, outcome: ChatOutcome) {
   }, undefined);
 }
 
-type ChatOutcome = { msg: AssistantMessage; text: string; captureContent: boolean } | { error: string };
+/** `text` defaults to the reply's text parts and tool calls (messageText). */
+type ChatOutcome = { msg: AssistantMessage; text?: string; captureContent: boolean } | { error: string };
 
 function closeChatSpan(span: Span, outcome: ChatOutcome) {
   if ("error" in outcome) return fail(span, outcome.error);
-  const { msg, text } = outcome;
+  const { msg } = outcome;
   const finish = msg.rawStopReason ?? FINISH[msg.stopReason] ?? msg.stopReason;
   const thinking = msg.content.reduce((n, c) => n + (c.type === "thinking" ? c.thinking.length : 0), 0);
   span.setAttributes({
@@ -127,7 +131,7 @@ function closeChatSpan(span: Span, outcome: ChatOutcome) {
   if (outcome.captureContent) {
     span.setAttributes({
       "gen_ai.completion.0.role": "assistant",
-      "gen_ai.completion.0.content": text,
+      "gen_ai.completion.0.content": outcome.text ?? messageText(msg),
       "gen_ai.completion.0.finish_reason": finish,
     });
   }

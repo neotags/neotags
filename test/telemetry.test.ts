@@ -172,9 +172,24 @@ describe("export failures", () => {
     expect(seen.every((r) => r.code === ExportResultCode.SUCCESS)).toBe(true);
   });
 
-  it("sends SDK warnings (dropped spans, partial success) to the app log", () => {
+  it("reports failures still unlogged at shutdown", async () => {
+    let t = 0;
+    const log = fakeLog();
+    const e = new ReportingExporter(inner, log as never, () => t, 60_000);
+    results.push(failed, failed);
+    e.export([span], () => {});
+    t = 5_000;
+    e.export([span], () => {}); // inside the interval: counted, not logged
+    await e.shutdown();
+    expect(log.warn).toHaveBeenLastCalledWith({ failedBatches: 2, droppedSpans: 2 }, "trace export failed; spans dropped");
+  });
+
+  it("sends SDK warnings (dropped spans, partial success) to the app log, errors under err", () => {
     diag.warn("Dropped 3 spans because maxQueueSize reached");
-    expect(appLog.warn).toHaveBeenCalledWith({ otel: [] }, "Dropped 3 spans because maxQueueSize reached");
+    expect(appLog.warn).toHaveBeenCalledWith({}, "Dropped 3 spans because maxQueueSize reached");
+    const err = new Error("boom");
+    diag.warn("export failed", err, "detail");
+    expect(appLog.warn).toHaveBeenCalledWith({ err, otel: ["detail"] }, "export failed");
   });
 });
 
@@ -202,7 +217,11 @@ describe("agent traces", () => {
 });
 
 describe("tracing never fails the traced work", () => {
-  beforeEach(() => exporter.reset());
+  // Flush first: a test that does not flush leaves its spans in the batch queue for the next one.
+  beforeEach(async () => {
+    await telemetry.flush();
+    exporter.reset();
+  });
 
   it("survives malformed requests and replies, reporting the bug once", async () => {
     appLog.warn.mockClear();
@@ -221,6 +240,24 @@ describe("tracing never fails the traced work", () => {
     const odd = msg({ content: [{ type: "text", text: "ok" }, { type: "thinking", thinking: null }] });
     const llm = new PiLlmClient({ complete: vi.fn().mockResolvedValue(odd), timeoutMs: 1000, maxRetries: 0, policy });
     await expect(llm.chat([{ role: "user", content: "hi" }])).resolves.toMatchObject({ text: "ok" });
+  });
+
+  it("marks the widened repeat of an attempt", async () => {
+    const complete = vi.fn().mockResolvedValueOnce(msg({ content: [] })).mockResolvedValueOnce(msg());
+    const llm = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 0, maxTokensCap: 4096, policy });
+    await llm.chat([{ role: "user", content: "hi" }], { maxTokens: 100 });
+    const spans = (await flushed()).filter((s) => s.name === "chat m1");
+    expect(spans.map((s) => [s.attributes["neotags.llm.attempt"], s.attributes["neotags.llm.widened"]])).toEqual([[0, undefined], [0, true]]);
+  });
+
+  it("retries an error reply without content, closing its span", async () => {
+    const complete = vi
+      .fn()
+      .mockResolvedValueOnce(msg({ stopReason: "error", errorMessage: "503 upstream", content: undefined }))
+      .mockResolvedValueOnce(msg());
+    const llm = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 1, sleep: async () => {}, policy });
+    await expect(llm.chat([{ role: "user", content: "hi" }])).resolves.toMatchObject({ text: "ok" });
+    expect((await flushed()).filter((s) => s.name === "chat m1")).toHaveLength(2);
   });
 
   it("does not leave an unhandled rejection when an agent reply cannot be traced", async () => {

@@ -35,7 +35,10 @@ export function tracedStreamFn(inner: StreamFn, opts: { captureContent: boolean;
       purpose: "agent",
       ...(options?.maxTokens !== undefined && { maxTokens: options.maxTokens }),
       ...(options?.temperature !== undefined && { temperature: options.temperature }),
-      messages: context.messages.map((m) => ({ role: m.role === "toolResult" ? "tool" : m.role, content: messageText(m) })),
+      // Only walked when recorded: the transcript grows every turn.
+      messages: opts.captureContent
+        ? context.messages.map((m) => ({ role: m.role === "toolResult" ? "tool" : m.role, content: messageText(m) }))
+        : [],
       captureContent: opts.captureContent,
     }), undefined);
     let stream: Awaited<ReturnType<StreamFn>>;
@@ -47,9 +50,13 @@ export function tracedStreamFn(inner: StreamFn, opts: { captureContent: boolean;
     }
     // Not awaited: the agent loop consumes the stream. Both handlers are guarded, so neither can reject.
     if (span) {
-      stream.result().then(
-        (msg) => guarded(() => endChatSpan(span, { msg, text: messageText(msg), captureContent: opts.captureContent }), undefined),
-        (err: unknown) => endChatSpan(span, { error: String((err as Error)?.message ?? err) }),
+      guarded(
+        () =>
+          stream.result().then(
+            (msg) => endChatSpan(span, { msg, captureContent: opts.captureContent }),
+            (err: unknown) => endChatSpan(span, { error: String((err as Error)?.message ?? err) }),
+          ),
+        undefined,
       );
     }
     return stream;

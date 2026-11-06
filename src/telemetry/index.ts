@@ -21,7 +21,8 @@ export interface Telemetry {
  * OpenObserve, Langfuse, an OTel collector. Without one, spans go to the API's no-op tracer and cost nothing.
  */
 export function tracingEnabled(env: NodeJS.ProcessEnv = process.env): boolean {
-  if (env.OTEL_SDK_DISABLED === "true") return false;
+  // OTel boolean env vars are case-insensitive.
+  if (env.OTEL_SDK_DISABLED?.trim().toLowerCase() === "true") return false;
   return Boolean(env.OTEL_EXPORTER_OTLP_TRACES_ENDPOINT || env.OTEL_EXPORTER_OTLP_ENDPOINT);
 }
 
@@ -66,6 +67,10 @@ export class ReportingExporter implements SpanExporter {
   }
 
   shutdown(): Promise<void> {
+    // Failures since the last (rate-limited) log would otherwise go unreported when the process exits.
+    if (this.failedBatches > 0) {
+      this.log.warn({ failedBatches: this.failedBatches, droppedSpans: this.droppedSpans }, "trace export failed; spans dropped");
+    }
     return this.inner.shutdown();
   }
 
@@ -74,13 +79,20 @@ export class ReportingExporter implements SpanExporter {
   }
 }
 
+/** An Error nested in `otel` would serialize as `{}`; under `err` pino's serializer keeps message and stack. */
+function diagFields(args: unknown[]) {
+  const err = args.find((a) => a instanceof Error);
+  const rest = args.filter((a) => a !== err);
+  return { ...(err !== undefined && { err }), ...(rest.length > 0 && { otel: rest }) };
+}
+
 /** SDK warnings (spans dropped from a full queue, partial-success rejections) go to the app log; the rest is noise. */
 function routeDiagnostics(log: Log) {
   const off = () => {};
   diag.setLogger(
     {
-      error: (msg, ...args) => log.error({ otel: args }, msg),
-      warn: (msg, ...args) => log.warn({ otel: args }, msg),
+      error: (msg, ...args) => log.error(diagFields(args), msg),
+      warn: (msg, ...args) => log.warn(diagFields(args), msg),
       info: off,
       debug: off,
       verbose: off,

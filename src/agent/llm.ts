@@ -124,11 +124,10 @@ export class PiLlmClient implements LlmClient {
 
   async chat(messages: ChatMessage[], opts: ChatOptions = {}): Promise<ChatResult> {
     const system = messages.filter((m) => m.role === "system").map((m) => m.content).join("\n\n");
+    const userMessages = messages.filter((m) => m.role === "user");
     const context: Context = {
       ...(system && { systemPrompt: system }),
-      messages: messages
-        .filter((m) => m.role === "user")
-        .map((m) => ({ role: "user" as const, content: m.content, timestamp: Date.now() })),
+      messages: userMessages.map((m) => ({ role: "user" as const, content: m.content, timestamp: Date.now() })),
     };
     const sleep = this.d.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
 
@@ -158,11 +157,12 @@ export class PiLlmClient implements LlmClient {
           ...(step?.effort && { effort: step.effort }),
           ...(opts.purpose && { purpose: opts.purpose }),
           attempt,
+          ...(widened && { widened: true }),
           ...(budget !== undefined && { maxTokens: budget }),
           ...(temperature !== undefined && { temperature }),
           ...(opts.json && { json: true }),
           system,
-          messages: messages.filter((m) => m.role === "user"),
+          messages: userMessages,
           captureContent: this.d.captureContent ?? false,
         });
         let msg: AssistantMessage;
@@ -184,17 +184,18 @@ export class PiLlmClient implements LlmClient {
           if (TRANSIENT.test(last)) continue;
           throw new LlmError(`LLM request failed: ${last}`);
         }
-        const text = msg.content
-          .filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text")
-          .map((c) => c.text)
-          .join("");
-        endChatSpan(span, { msg, text, captureContent: this.d.captureContent ?? false });
+        // The span reads the reply inside its guard: an error reply is closed before its content is touched here.
+        endChatSpan(span, { msg, captureContent: this.d.captureContent ?? false });
         if (msg.stopReason === "error" || msg.stopReason === "aborted") {
           last = msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`;
           outcome = REQUEST_ERROR.test(last) ? "neutral" : "failure";
           if (TRANSIENT.test(last)) continue;
           throw new LlmError(`LLM request failed: ${last}`);
         }
+        const text = msg.content
+          .filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text")
+          .map((c) => c.text)
+          .join("");
         outcome = "success"; // the model answered, even if the answer turns out unusable below
         // A reasoning model spends the output budget thinking: the reply has no answer, or one cut off by the
         // limit. Retry once with more room (not counted against the transient-error retries).
