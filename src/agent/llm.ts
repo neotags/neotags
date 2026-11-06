@@ -97,6 +97,11 @@ const TRANSIENT = /\b(408|409|425|429|500|502|503|504)\b|timed? ?out|econn|socke
 // Every other error counts, 400 included, since some gateways answer an unknown model name with a 400.
 const REQUEST_ERROR = /context[ _-]?(length|window)|maximum context|too long|too many tokens|content[ _-]?(filter|policy|management)|response_format/i;
 
+/** A gateway error worth retrying (rate limit, 5xx, timeout, ...). */
+export const isTransientError = (message: string): boolean => TRANSIENT.test(message);
+/** The gateway rejected this request's content, which says nothing about the model's health. */
+export const isRequestError = (message: string): boolean => REQUEST_ERROR.test(message);
+
 const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /** Merge request-body fields: nested objects (e.g. chat_template_kwargs) are merged, everything else replaced. */

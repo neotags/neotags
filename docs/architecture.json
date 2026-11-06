@@ -130,7 +130,7 @@
       "id": "agentrt",
       "type": "backend",
       "label": "Agent runtime",
-      "sublabel": "pi Agent loop + tools · planned",
+      "sublabel": "RunManager · pi Agent · skill packs",
       "tag": "planned",
       "pos": [
         1055,
