@@ -216,6 +216,16 @@ const fileSchema = z.object({
       maxFileKb: z.number().positive().default(256),
     })
     .prefault({}),
+  // LLM traces over OTLP (OpenObserve, Langfuse, an OTel collector). The exporter is configured with the standard
+  // OTEL_EXPORTER_OTLP_* env vars; tracing is off unless an endpoint is set.
+  telemetry: z
+    .object({
+      // Put prompts, replies and tool input/output on spans (redacted), for judging answer quality. Off by default:
+      // they carry Slack threads, files and O2 query results, and whoever can read the traces can read them. Or env
+      // OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true.
+      captureContent: z.boolean().default(false),
+    })
+    .prefault({}),
   logLevel: z.string().default("info"),
 }).superRefine((cfg, ctx) => {
   for (const [entry, packs] of Object.entries(cfg.agent.entries)) {
@@ -281,7 +291,14 @@ export function loadConfig(
     env.NEOTAGS_DISABLED_SKILLS !== undefined
       ? { disabled: env.NEOTAGS_DISABLED_SKILLS.split(",").map((s) => s.trim()).filter(Boolean) }
       : {};
-  const file = fileSchema.parse({ ...raw, llm: { ...raw.llm, ...llmEnv }, skills: { ...raw.skills, ...skillsEnv } });
+  const capture = env.OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT;
+  const telemetryEnv = capture !== undefined ? { captureContent: capture.trim().toLowerCase() === "true" } : {};
+  const file = fileSchema.parse({
+    ...raw,
+    llm: { ...raw.llm, ...llmEnv },
+    skills: { ...raw.skills, ...skillsEnv },
+    telemetry: { ...raw.telemetry, ...telemetryEnv },
+  });
   return {
     ...file,
     secrets: {

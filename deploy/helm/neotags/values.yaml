@@ -40,6 +40,8 @@ config:
     # maxTokens: 8192             # ceiling for one reply
     # outputTokens: { router: 200, summary: 3000, fileSummary: 1200, answer: 1200 }   # raise for reasoning models
     # extraBody: { chat_template_kwargs: { enable_thinking: false } }                 # gateway-specific switch
+  telemetry:
+    captureContent: false   # true: prompts/replies on trace spans (see config example)
   logLevel: info
 
 # Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional).
@@ -71,4 +73,6 @@ podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# e.g. LLM traces (README "LLM traces"); put OTEL_EXPORTER_OTLP_HEADERS (the auth header) in the Secret instead:
+# - { name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, value: "https://o2.example.com/api/default/v1/traces" }
 extraEnv: []

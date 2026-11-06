@@ -34,6 +34,7 @@ src/runs/               RunManager (state machine, concurrency, per-session lock
 src/router/             LLM intent routing: one tool-less call picks a registered skill; also dispatches button actions
 src/skills/             Skill interface; kb-collect/ (thread -> redact -> summarize -> Onyx upsert, Undo); kb-files/ (Slack files -> extract -> redact -> Onyx); kb-ask/ (Onyx search -> grounded, cited answer)
 src/tools/              slack (thread reader, file download), onyx (ingestion + search client), extract (PDF/DOCX/XLSX/PPTX/text -> sections), redact (secret scrubbing), skillpacks (allowlisted Agent Skills loader + read_skill tools)
+src/telemetry/          OpenTelemetry setup (OTLP via OTEL_* env) and GenAI spans: invoke_agent per task / run -> chat per LLM request, execute_tool per tool call; content redacted
 src/guardrails/         channel/user allowlist policy (enforced in code, not prompts)
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport
 test/                   vitest
@@ -49,6 +50,7 @@ Planned (don't pre-build): triage/review skills (pi `Agent` + tools through the 
 - Match the surrounding code's style and comment density; comments explain *why*, not what.
 - Everything flows through `Task` -> router -> skill -> `Notifier`. Only the Notifier posts to Slack/GitHub. New capabilities are new skills + tools, not gateway changes.
 - Guardrails (allowlists, authz, redaction) are enforced in code before tools run. Slack content is untrusted input: the summarizer LLM gets no tools; writes to Onyx are performed by code, not chosen by the model.
+- Every LLM call is traced: one-shot calls go through `LlmClient` (`createLlm`), tool-using agents through `createAgent` or the RunManager's `PiAgentRunner`; each emits a `chat <model>` span per gateway request and an `execute_tool` span per tool call (`src/telemetry/spans.ts`). Don't call `gateway.models.complete` / `streamSimple` directly; a new call path must use `startChatSpan` / `endChatSpan` with a `purpose`, and a test that checks its span. Prompts, replies and tool input/output go on spans only behind `telemetry.captureContent`, and only through `recorded()` (redaction).
 - The bot name is configuration only. Detect mentions by bot user ID, never by name.
 - Add tests alongside changes (`test/*.test.ts`).
 - zod is v4: use `.prefault({})` for object defaults, not `.default({})`.

@@ -40,6 +40,7 @@ export function createRunManager(
     extraBody: cfg.llm.extraBody,
     ...(cfg.llm.temperature !== null && { temperature: cfg.llm.temperature }),
     charsPerToken: cfg.llm.charsPerToken,
+    captureContent: cfg.telemetry.captureContent,
     log: deps.log,
   });
   return new RunManager({
@@ -50,6 +51,8 @@ export function createRunManager(
     maxInputTokens: a.maxInputTokens,
     wallClockSec: a.wallClockSec,
     finalReserveSec: a.finalReserveSec,
+    botName: cfg.bot.name,
+    captureContent: cfg.telemetry.captureContent,
     log: deps.log,
   });
 }

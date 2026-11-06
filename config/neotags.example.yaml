@@ -77,5 +77,11 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #   packs: [o2-query-assistant]   # whole packs: SKILL.md + every text file under references/
 #   refs:                         # single reference files of other packs, relative to references/
 #     some-pack: [method.md, data/table.json]
+telemetry:               # LLM traces over OTLP/HTTP (OpenObserve, Langfuse, an OTel collector): one trace per
+  #                      # request, one span per LLM call with model, tokens, latency, retries. Off unless
+  #                      # OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (or OTEL_EXPORTER_OTLP_ENDPOINT) is set; auth via
+  #                      # OTEL_EXPORTER_OTLP_HEADERS. See README "LLM traces".
+  captureContent: false  # true: prompts, replies and tool input/output on spans (redacted; readable by anyone who
+  #                      # can read the traces). Or env OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
 logLevel: info
 # Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none)

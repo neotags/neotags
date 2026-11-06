@@ -1,10 +1,12 @@
 import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { context as otelContext } from "@opentelemetry/api";
 import type { Logger } from "pino";
-import { thinkingLevel, toBeforeToolCall, type ToolGuard } from "../agent/index.js";
+import { agentChatRequest, thinkingLevel, toBeforeToolCall, toolOutput, traceToolCalls, type ToolGuard } from "../agent/index.js";
 import { ModelUnavailableError, isRequestError } from "../agent/llm.js";
 import type { Gateway } from "../agent/models.js";
 import type { Effort } from "../config/index.js";
+import { endChatSpan, startChatSpan, ToolSpans } from "../telemetry/spans.js";
 import { skillPackTools, type SkillPackIndex } from "../tools/skillpacks.js";
 import { compactToBudget } from "./budget.js";
 import { prefersChinese } from "./degrade.js";
@@ -29,6 +31,8 @@ export interface PiRunnerOptions {
   extraBody?: Record<string, unknown>;
   temperature?: number;
   charsPerToken: number;
+  /** Put prompts, replies and tool input/output on trace spans (telemetry.captureContent), redacted. */
+  captureContent?: boolean;
   log?: Pick<Logger, "warn">;
   now?: () => number;
   /** Replaces gateway.models.streamSimple (tests). */
@@ -82,6 +86,10 @@ export class PiAgentRunner implements AgentRunner {
     // Effort of the request being made; the stream wrapper adds that effort's effortBody.
     let effortNow: Effort | undefined = step.effort;
 
+    const captureContent = o.captureContent ?? false;
+    // The run's span (the RunManager's invoke_agent) is active here; tool spans hang off it, next to the chat spans.
+    const toolSpans = new ToolSpans({ captureContent, parent: otelContext.active() });
+
     const initialLevel = thinkingLevel(step.effort);
     const agent = new Agent({
       initialState: {
@@ -100,9 +108,14 @@ export class PiAgentRunner implements AgentRunner {
         ...(o.temperature !== undefined && { temperature: o.temperature }),
         ...(o.sleep && { sleep: o.sleep }),
         onAttemptError: (error, attempt, retrying) => o.log?.warn({ runId: ctx.runId, model: step.model.id, attempt, retrying, error }, "agent llm request failed"),
+        // One chat span per gateway request: retries and the tool-less final turn each get their own.
+        onAttempt: (attempt, request, options) => {
+          const span = startChatSpan(agentChatRequest(step.model, request, options, { captureContent, ...(effortNow && { effort: effortNow }), phase, attempt }));
+          return (msg) => endChatSpan(span, { msg, captureContent });
+        },
       }),
       sessionId: input.sessionId,
-      beforeToolCall: toBeforeToolCall(guard),
+      beforeToolCall: toBeforeToolCall(guard, (id, reason) => toolSpans.denied(id, reason)),
       transformContext: async (messages) =>
         compactToBudget(messages, { maxTokens: budget.maxInputTokens, charsPerToken: o.charsPerToken }).messages,
       finishTurn: (turn) => {
@@ -116,6 +129,7 @@ export class PiAgentRunner implements AgentRunner {
       },
     });
 
+    traceToolCalls(agent, toolSpans);
     agent.subscribe((ev) => {
       switch (ev.type) {
         case "tool_execution_start":
@@ -123,8 +137,7 @@ export class PiAgentRunner implements AgentRunner {
           ctx.observer.toolStart?.({ id: ev.toolCallId, name: ev.toolName, args: ev.args });
           break;
         case "tool_execution_end": {
-          const content = (ev.result?.content ?? []) as { type: string; text?: string }[];
-          const output = content.map((c) => (c.type === "text" ? (c.text ?? "") : `[${c.type}]`)).join("\n");
+          const output = toolOutput(ev.result);
           ctx.observer.toolEnd?.({
             id: ev.toolCallId,
             name: ev.toolName,
@@ -215,6 +228,7 @@ export class PiAgentRunner implements AgentRunner {
       outcome = "success";
       throw new RunError("the model returned no answer", "model_error", stats);
     } finally {
+      toolSpans.closeAll("the run stopped before the tool finished");
       ctx.signal.removeEventListener("abort", onAbort);
       if (outcome === "failure") lease.failure(failure);
       else if (outcome === "success" || answered) lease.success();

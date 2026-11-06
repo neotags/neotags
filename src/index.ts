@@ -5,13 +5,18 @@ import { CHAINS, inputBudgetTokens, llmConfigured, loadConfig } from "./config/i
 import { createSlack } from "./gateway/slack.js";
 import { Router } from "./router/index.js";
 import { allSkills, selectSkills } from "./skills/registry.js";
+import { startTelemetry } from "./telemetry/index.js";
 import { HttpOnyxClient, type OnyxClient } from "./tools/onyx.js";
 
 // Kubernetes sends SIGTERM then waits terminationGracePeriodSeconds (default 30s) before SIGKILL.
 const DRAIN_TIMEOUT_MS = 20_000;
+// What is left of the grace period after the drain, for exporting the last traces.
+const TRACE_FLUSH_TIMEOUT_MS = 5_000;
 
 const cfg = loadConfig();
 const log = pino({ level: cfg.logLevel });
+const telemetry = startTelemetry({ log });
+if (telemetry) log.info({ captureContent: cfg.telemetry.captureContent }, "tracing to OTLP");
 
 // Optional integrations: the bot still starts without them and tells users what is missing.
 let llm: LlmClient | undefined;
@@ -94,6 +99,14 @@ async function shutdown(sig: string) {
   if (!(await drain(DRAIN_TIMEOUT_MS))) {
     log.warn("timed out waiting for in-flight tasks");
     code = 1;
+  }
+  if (telemetry) {
+    const timeout = new Promise<"timeout">((r) => setTimeout(r, TRACE_FLUSH_TIMEOUT_MS, "timeout").unref());
+    const flushed = await Promise.race([telemetry.shutdown().then(() => "ok" as const), timeout]).catch((err: unknown) => {
+      log.warn({ err }, "failed to flush traces");
+      return "failed" as const;
+    });
+    if (flushed === "timeout") log.warn("timed out flushing traces");
   }
   process.exit(code);
 }
