@@ -111,6 +111,15 @@ describe("skill pack loader", () => {
     expect(warnings.join("\n")).toMatch(/missing: no SKILL.md/);
   });
 
+  it.skipIf(process.getuid?.() === 0)("skips an unreadable file with a warning instead of failing the load", async () => {
+    const { chmodSync } = await import("node:fs");
+    chmodSync(path.join(dir, "o2-query-assistant/references/o2-sql.md"), 0);
+    const { index, warnings } = await load();
+    expect(index.ref("o2-query-assistant", "o2-sql.md")).toBeUndefined();
+    expect(index.get("o2-query-assistant")!.body).toContain("Check StreamSchema first.");
+    expect(warnings.join("\n")).toMatch(/o2-sql.md: EACCES/);
+  });
+
   it("reports a missing dir instead of throwing", async () => {
     const { index, warnings } = await load({ dir: path.join(dir, "nope") });
     expect(index.list()).toEqual([]);

@@ -105,7 +105,8 @@ export class RunError extends Error {
     message: string,
     /** model_unavailable: every model's breaker is open; model_error: the gateway failed this run. */
     public readonly kind: "model_unavailable" | "model_error" | "error",
-    public readonly partial: Partial<Pick<RunOutcome, "steps" | "toolCalls" | "usage" | "model" | "effort">> = {},
+    /** `answer`: text already streamed to the asker, which stands as the answer instead of the context package. */
+    public readonly partial: Partial<Pick<RunOutcome, "steps" | "toolCalls" | "usage" | "model" | "effort" | "answer">> = {},
     options?: { cause?: unknown },
   ) {
     super(message, options);

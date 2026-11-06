@@ -12,11 +12,15 @@ import type { Effort } from "../config/index.js";
 export interface ResilientStreamOptions {
   /** Abort and retry a request that sent nothing (no text, thinking or tool call) by then. */
   firstTokenMs: number;
+  /** Abort a request whose output stalls this long between two events (llm.timeoutMs). */
+  idleMs?: number;
   /** Retries of a transient failure (429, 5xx, timeout, first-token timeout) before any output. */
   maxRetries: number;
   /** llm.extraBody, then the effort's llm.models.<key>.effortBody, merged into every request body. */
   extraBody?: Record<string, unknown>;
   effortBody?: ChainStep["effortBody"];
+  /** Effort of the current request, for effortBody; undefined adds none. Default: derived from the thinking level. */
+  effort?: () => Effort | undefined;
   temperature?: number;
   sleep?: (ms: number, signal?: AbortSignal) => Promise<void>;
   /** A failed attempt, retried or not. */
@@ -31,8 +35,13 @@ export function effortOf(level: SimpleStreamOptions["reasoning"]): Effort {
 
 const defaultSleep = (ms: number, signal?: AbortSignal) =>
   new Promise<void>((resolve) => {
-    const t = setTimeout(resolve, ms);
-    signal?.addEventListener("abort", () => (clearTimeout(t), resolve()), { once: true });
+    const done = () => {
+      clearTimeout(t);
+      signal?.removeEventListener("abort", done);
+      resolve();
+    };
+    const t = setTimeout(done, ms);
+    signal?.addEventListener("abort", done, { once: true });
   });
 
 /**
@@ -45,7 +54,8 @@ export function resilientStream(inner: StreamFn, o: ResilientStreamOptions): Str
   return (model, context, options) => {
     const out = createAssistantMessageEventStream();
     const userSignal = options?.signal;
-    const body = mergeBody(o.extraBody, o.effortBody?.[effortOf(options?.reasoning)]);
+    const effort = o.effort ? o.effort() : effortOf(options?.reasoning);
+    const body = mergeBody(o.extraBody, effort === undefined ? undefined : o.effortBody?.[effort]);
     const userPayload = options?.onPayload;
     const onPayload =
       Object.keys(body).length > 0 || userPayload
@@ -61,11 +71,20 @@ export function resilientStream(inner: StreamFn, o: ResilientStreamOptions): Str
         const forward = () => ac.abort(userSignal?.reason);
         if (userSignal?.aborted) forward();
         else userSignal?.addEventListener("abort", forward, { once: true });
-        let timedOut = false;
-        const timer = setTimeout(() => {
-          timedOut = true;
+        let timedOut: "first" | "idle" | undefined;
+        let timer = setTimeout(() => {
+          timedOut = "first";
           ac.abort(new Error("first token timeout"));
         }, o.firstTokenMs);
+        // After the first token, a stall between events aborts the request (no retry: output has gone out).
+        const resetIdle = () => {
+          if (!o.idleMs) return;
+          clearTimeout(timer);
+          timer = setTimeout(() => {
+            timedOut = "idle";
+            ac.abort(new Error("stream stalled"));
+          }, o.idleMs);
+        };
         let start: Extract<AssistantMessageEvent, { type: "start" }> | undefined;
         let forwarded = false;
         let final: AssistantMessage | undefined;
@@ -90,6 +109,7 @@ export function resilientStream(inner: StreamFn, o: ResilientStreamOptions): Str
                 clearTimeout(timer);
                 if (start) out.push(start);
               }
+              resetIdle();
               out.push(ev);
               continue;
             }
@@ -107,11 +127,13 @@ export function resilientStream(inner: StreamFn, o: ResilientStreamOptions): Str
 
         if (final.stopReason === "error" || final.stopReason === "aborted") {
           if (timedOut && !userSignal?.aborted) {
-            final = { ...final, stopReason: "error", errorMessage: `no first token within ${o.firstTokenMs / 1000}s (timed out)` };
+            const errorMessage =
+              timedOut === "first" ? `no first token within ${o.firstTokenMs / 1000}s (timed out)` : `stream stalled for ${(o.idleMs ?? 0) / 1000}s (timed out)`;
+            final = { ...final, stopReason: "error", errorMessage };
           }
           const error = final.errorMessage ?? `LLM stopped: ${final.stopReason}`;
           const retry =
-            !forwarded && !userSignal?.aborted && final.stopReason === "error" && attempt < o.maxRetries && (timedOut || isTransientError(error));
+            !forwarded && !userSignal?.aborted && final.stopReason === "error" && attempt < o.maxRetries && (timedOut === "first" || isTransientError(error));
           o.onAttemptError?.(error, attempt, retry);
           if (retry) {
             await sleep(Math.min(500 * 2 ** attempt, 8000), userSignal);

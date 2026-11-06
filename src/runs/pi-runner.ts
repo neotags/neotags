@@ -1,12 +1,13 @@
-import { Agent, type AgentMessage, type AgentTool, type StreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
+import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@earendil-works/pi-agent-core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import type { Logger } from "pino";
-import { toBeforeToolCall, type ToolGuard } from "../agent/index.js";
+import { thinkingLevel, toBeforeToolCall, type ToolGuard } from "../agent/index.js";
 import { ModelUnavailableError, isRequestError } from "../agent/llm.js";
 import type { Gateway } from "../agent/models.js";
 import type { Effort } from "../config/index.js";
 import { skillPackTools, type SkillPackIndex } from "../tools/skillpacks.js";
 import { compactToBudget } from "./budget.js";
+import { prefersChinese } from "./degrade.js";
 import { finalPrompt, systemPrompt, userPrompt } from "./prompt.js";
 import { resilientStream } from "./stream.js";
 import { RunAbort, RunError, type AgentRunner, type RunContext, type RunInput, type RunOutcome, type RunSource } from "./types.js";
@@ -22,6 +23,8 @@ export interface PiRunnerOptions {
   /** Checked after the built-in rule that only registered tools run. */
   guard?: ToolGuard;
   firstTokenTimeoutMs: number;
+  /** A streamed request whose output stalls this long is aborted (llm.timeoutMs). */
+  idleTimeoutMs?: number;
   maxRetries: number;
   extraBody?: Record<string, unknown>;
   temperature?: number;
@@ -35,8 +38,7 @@ export interface PiRunnerOptions {
 
 const OBSERVED_OUTPUT_CHARS = 4000;
 
-/** The configured effort as a pi thinking level; unset leaves the gateway's default. */
-const level = (e: Effort | undefined): ThinkingLevel | undefined => (e === undefined ? undefined : e === "none" ? "off" : e);
+const cutNote = (question: string) => (prefersChinese(question) ? "\n\n_（回答被中断，请重新提问）_" : "\n\n_(The answer was cut off; please ask again.)_");
 
 const textOf = (m: AssistantMessage | undefined): string =>
   (m?.content ?? []).filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text").map((c) => c.text).join("").trim();
@@ -76,9 +78,11 @@ export class PiAgentRunner implements AgentRunner {
     let phase: "investigate" | "final" = "investigate";
     let wrap: "steps" | "time" | "tokens" | undefined;
     let answered = false;
-    let streamed = false;
+    let streamed = "";
+    // Effort of the request being made; the stream wrapper adds that effort's effortBody.
+    let effortNow: Effort | undefined = step.effort;
 
-    const initialLevel = level(step.effort);
+    const initialLevel = thinkingLevel(step.effort);
     const agent = new Agent({
       initialState: {
         systemPrompt: systemPrompt({ botName: o.botName, index: o.index, entryPacks: input.packs ?? o.entries[input.source] ?? [] }),
@@ -88,10 +92,11 @@ export class PiAgentRunner implements AgentRunner {
       },
       streamFn: resilientStream(o.streamFn ?? o.gateway.models.streamSimple.bind(o.gateway.models), {
         firstTokenMs: o.firstTokenTimeoutMs,
+        ...(o.idleTimeoutMs && { idleMs: o.idleTimeoutMs }),
         maxRetries: o.maxRetries,
         ...(o.extraBody && { extraBody: o.extraBody }),
-        // Unset effort sends no per-effort fields, like the one-shot client.
-        ...(step.effort && step.effortBody && { effortBody: step.effortBody }),
+        ...(step.effortBody && { effortBody: step.effortBody }),
+        effort: () => effortNow,
         ...(o.temperature !== undefined && { temperature: o.temperature }),
         ...(o.sleep && { sleep: o.sleep }),
         onAttemptError: (error, attempt, retrying) => o.log?.warn({ runId: ctx.runId, model: step.model.id, attempt, retrying, error }, "agent llm request failed"),
@@ -133,7 +138,7 @@ export class PiAgentRunner implements AgentRunner {
           // Only the final turn streams: an investigation turn's text is either commentary before tool calls or a
           // draft the final turn rewrites, and which one is only known once the turn ends.
           if (phase === "final" && ev.assistantMessageEvent.type === "text_delta") {
-            streamed = true;
+            streamed += ev.assistantMessageEvent.delta;
             ctx.observer.delta?.(ev.assistantMessageEvent.delta);
           }
           break;
@@ -164,7 +169,8 @@ export class PiAgentRunner implements AgentRunner {
         throw new RunError(ended.message, "model_error", stats);
       }
 
-      const draft = textOf(last);
+      // A wrap-up interrupts a turn that was calling tools: its text is commentary, not a draft answer.
+      const draft = wrap ? "" : textOf(last);
       const final = wrap ?? (stats.toolCalls > 0 && step.finalEffort && step.finalEffort !== step.effort ? "final" : undefined);
       if (!final) {
         outcome = "success";
@@ -175,19 +181,28 @@ export class PiAgentRunner implements AgentRunner {
 
       phase = "final";
       agent.state.tools = [];
-      const finalLevel = level(final === "final" ? step.finalEffort : (step.finalEffort ?? step.effort));
+      effortNow = final === "final" ? step.finalEffort : (step.finalEffort ?? step.effort);
+      const finalLevel = thinkingLevel(effortNow);
       if (finalLevel) agent.state.thinkingLevel = finalLevel;
       await agent.prompt(finalPrompt(final));
       last = lastAssistant(agent.state.messages);
       const ended2 = this.check(last, ctx);
-      if (ended2.kind === "aborted") return this.stopped(ctx, stats, streamed ? undefined : draft);
+      if (ended2.kind !== "ok" && streamed) {
+        // Part of the answer already reached the asker: finish it with a note rather than replace it, so the
+        // deltas still add up to the answer.
+        if (ended2.kind === "error") ({ outcome, failure } = ended2);
+        const note = cutNote(input.question);
+        ctx.observer.delta?.(note);
+        throw new RunError(ended2.kind === "error" ? ended2.message : "aborted during the final answer", "model_error", { ...stats, answer: streamed + note });
+      }
+      if (ended2.kind === "aborted") return this.stopped(ctx, stats, draft);
       const answer = ended2.kind === "ok" ? textOf(last) : "";
       if (answer) {
         outcome = "success";
         return { state: wrap ? "budget_exhausted" : "done", answer, ...(wrap && { reason: `budget: ${wrap}` }), ...stats };
       }
       // The final turn failed or came back empty: the investigation's own answer is still an answer.
-      if (draft && !streamed) {
+      if (draft) {
         if (ended2.kind === "error") ({ outcome, failure } = ended2);
         else outcome = "success";
         ctx.observer.delta?.(draft);

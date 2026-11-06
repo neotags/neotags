@@ -35,6 +35,7 @@ export function createRunManager(
     ...(deps.tools && { tools: deps.tools }),
     ...(deps.guard && { guard: deps.guard }),
     firstTokenTimeoutMs: cfg.llm.failover.firstTokenTimeoutSec * 1000,
+    idleTimeoutMs: cfg.llm.timeoutMs,
     maxRetries: cfg.llm.maxRetries,
     extraBody: cfg.llm.extraBody,
     ...(cfg.llm.temperature !== null && { temperature: cfg.llm.temperature }),

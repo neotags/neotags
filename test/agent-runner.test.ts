@@ -218,6 +218,36 @@ describe("PiAgentRunner", () => {
     expect(deltas).toEqual(["draft answer"]);
   });
 
+  it("never answers with a tool turn's commentary when the wrap-up turn fails", async () => {
+    const commentary = { ...callTool("read_skill", { name: "o2-query-assistant" }) };
+    commentary.content = [{ type: "text", text: "Let me check the error rate next." }, ...commentary.content];
+    const { runner } = setup([commentary, fail("502 bad gateway"), fail("502 bad gateway")]);
+    await expect(runner.run(input, ctxFor({ maxSteps: 1 }).ctx)).rejects.toMatchObject({ kind: "model_error" });
+  });
+
+  it("finishes a final answer that stalls mid-stream with a note, keeping what was streamed", async () => {
+    const { runner } = setup([callTool("read_skill", { name: "o2-query-assistant" }), say("draft"), { stall: "The cause is" }], {
+      opts: { idleTimeoutMs: 20 },
+    });
+    const { ctx, deltas } = ctxFor();
+    const err = (await runner.run(input, ctx).catch((e: unknown) => e)) as RunError;
+    expect(err).toBeInstanceOf(RunError);
+    expect(err.message).toMatch(/stream stalled/);
+    expect(deltas.join("")).toBe(err.partial.answer);
+    expect(err.partial.answer).toMatch(/^The cause is\n\n_\(The answer was cut off/);
+  });
+
+  it("sends the final effort's body when only finalEffort is set", async () => {
+    const { runner, stream } = setup([callTool("read_skill", { name: "o2-query-assistant" }), say("draft"), say("final")], {
+      cfg: chainCfg("{ model: flash, finalEffort: high }"),
+    });
+    await runner.run(input, ctxFor().ctx);
+    const body = async (i: number) => stream.calls[i]!.options?.onPayload?.({}, {} as never);
+    expect(await body(0)).toBeUndefined(); // no effort: no per-effort fields
+    expect(await body(2)).toEqual({ thinking: { type: "enabled" } });
+    expect(stream.calls[2]!.options?.reasoning).toBe("high");
+  });
+
   it("adds extraBody, the effort's body and the temperature to each request", async () => {
     const { runner, stream } = setup([say("ok")], { opts: { extraBody: { a: 1 }, temperature: 0 } });
     await runner.run(input, ctxFor().ctx);

@@ -27,6 +27,8 @@ export interface RunManagerOptions {
   log?: Pick<Logger, "info" | "warn" | "error">;
   now?: () => number;
   newId?: () => string;
+  /** After an abort, how long the runner gets to return before the run is finished without it (default 10s). */
+  abortGraceMs?: number;
   /** The answer when the runner cannot give one; default: the context package. */
   degrade?: (input: RunInput, why: DegradeReason) => string;
 }
@@ -56,11 +58,15 @@ interface Run {
   startedAt?: number;
   ahead?: number;
   timer?: NodeJS.Timeout;
+  /** Finishes a run whose runner ignores the abort, so its slot and session lock are not held forever. */
+  backstop?: NodeJS.Timeout;
   resolve: (r: RunResult) => void;
   result: Promise<RunResult>;
 }
 
 const ZERO = { steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 } };
+/** After an abort, how long a runner gets to return before the run is finished without it. */
+const ABORT_GRACE_MS = 10_000;
 
 /**
  * Owns every agent run: the state machine (queued → running → done | failed | cancelled | budget_exhausted),
@@ -198,6 +204,17 @@ export class RunManager {
     const wallMs = this.o.wallClockSec[input.source] * 1000;
     const reserveMs = Math.min(this.o.finalReserveSec * 1000, wallMs / 2);
     run.timer = setTimeout(() => run.controller.abort(new RunAbort("deadline", "wall clock exceeded")), wallMs);
+    run.controller.signal.addEventListener(
+      "abort",
+      () => {
+        run.backstop = setTimeout(() => {
+          this.o.log?.warn({ runId: run.id }, "agent run ignored its abort; finishing it without the runner");
+          this.finish(run, this.fromError(run, new Error("the run did not stop after abort")));
+        }, this.o.abortGraceMs ?? ABORT_GRACE_MS);
+        run.backstop.unref();
+      },
+      { once: true },
+    );
     run.observer.started?.({ runId: run.id });
     const ctx = {
       runId: run.id,
@@ -222,7 +239,7 @@ export class RunManager {
   }
 
   private fromError(run: Run, err: unknown): Omit<RunResult, "id" | "sessionId" | "durationMs"> {
-    const partial = { ...ZERO, ...(err instanceof RunError ? err.partial : {}) };
+    const partial: typeof ZERO & RunError["partial"] = { ...ZERO, ...(err instanceof RunError ? err.partial : {}) };
     const why = run.controller.signal.reason;
     if (run.controller.signal.aborted && why instanceof RunAbort && why.kind !== "deadline") {
       const kind = why.kind === "shutdown" ? "interrupted" : "cancelled";
@@ -232,12 +249,16 @@ export class RunManager {
       run.controller.signal.aborted && why instanceof RunAbort ? "deadline" : err instanceof RunError ? err.kind : "error";
     const message = (err as Error)?.message ?? String(err);
     if (degradeKind === "error") this.o.log?.error({ err, runId: run.id }, "agent run crashed");
+    if (partial.answer) return { ...partial, answer: partial.answer, state: "failed", reason: message };
     const degrade = this.o.degrade ?? contextPackage;
     return { ...partial, state: "failed", answer: degrade(run.input, degradeKind), degraded: true, reason: message };
   }
 
   private finish(run: Run, r: Omit<RunResult, "id" | "sessionId" | "durationMs">): void {
+    // A run the backstop finished may still settle later; only the first outcome counts.
+    if (run.state !== "queued" && run.state !== "running") return;
     if (run.timer) clearTimeout(run.timer);
+    if (run.backstop) clearTimeout(run.backstop);
     const wasRunning = this.running.delete(run.id);
     if (wasRunning) this.busySessions.delete(run.input.sessionId);
     run.state = r.state;

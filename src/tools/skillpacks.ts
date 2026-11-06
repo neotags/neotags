@@ -104,13 +104,18 @@ export async function loadSkillPacks(o: SkillPackOptions): Promise<{ index: Skil
       warnings.push(`${rel}: resolves outside the skill pack dir`);
       return undefined;
     }
-    const st = await stat(real);
-    if (!st.isFile()) return undefined;
-    if (st.size > o.maxFileBytes) {
-      warnings.push(`${rel}: ${st.size} bytes is over the ${o.maxFileBytes}-byte limit`);
+    try {
+      const st = await stat(real);
+      if (!st.isFile()) return undefined;
+      if (st.size > o.maxFileBytes) {
+        warnings.push(`${rel}: ${st.size} bytes is over the ${o.maxFileBytes}-byte limit`);
+        return undefined;
+      }
+      return await readFile(real, "utf8");
+    } catch (err) {
+      warnings.push(`${rel}: ${(err as Error).message}`);
       return undefined;
     }
-    return readFile(real, "utf8");
   };
 
   // Every text file under <pack>/references/, recursively; hidden entries (ConfigMap ..data links) are skipped.

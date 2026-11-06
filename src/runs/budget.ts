@@ -21,21 +21,22 @@ export function messageChars(m: AgentMessage): number {
 export const STUB = "[Output dropped to fit the context budget. Run the query again, narrower, if you still need it.]";
 
 /**
- * Fit the transcript into `maxTokens` by replacing the oldest tool outputs with a one-line stub. The newest
- * `keepLast` tool results stay intact so the model always sees what it just asked for. Returns a new array;
+ * Fit the transcript into `maxTokens` by replacing the oldest tool outputs with a one-line stub. The results of
+ * the latest turn (every tool result after the last assistant message, parallel calls included) stay intact so
+ * the model always sees what it just asked for. Returns a new array;
  * the transcript itself is untouched. `fits` is false when even the stubbed transcript is over the budget.
  */
 export function compactToBudget(
   messages: AgentMessage[],
-  o: { maxTokens: number; charsPerToken: number; keepLast?: number },
+  o: { maxTokens: number; charsPerToken: number },
 ): { messages: AgentMessage[]; tokens: number; stubbed: number; fits: boolean } {
   const max = o.maxTokens * o.charsPerToken;
   let chars = messages.reduce((n, m) => n + messageChars(m), 0);
   const tokens = () => Math.ceil(chars / o.charsPerToken);
   if (chars <= max) return { messages, tokens: tokens(), stubbed: 0, fits: true };
 
-  const results = messages.flatMap((m, i) => ((m as { role?: string }).role === "toolResult" ? [i] : []));
-  const candidates = results.slice(0, Math.max(0, results.length - (o.keepLast ?? 1)));
+  const lastTurn = messages.findLastIndex((m) => (m as { role?: string }).role === "assistant");
+  const candidates = messages.flatMap((m, i) => ((m as { role?: string }).role === "toolResult" && i < lastTurn ? [i] : []));
   const out = [...messages];
   let stubbed = 0;
   for (const i of candidates) {

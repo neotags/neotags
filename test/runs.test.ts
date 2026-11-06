@@ -202,6 +202,29 @@ describe("RunManager", () => {
     expect(m.submit(q("s4", { user: "a@example.com" })).ok).toBe(true);
   });
 
+  it("finishes a run whose runner ignores the abort, freeing its slot and session", async () => {
+    let calls = 0;
+    const m = manager({ run: () => (calls++ === 0 ? new Promise<RunOutcome>(() => {}) : Promise.resolve(ok())) }, {
+      concurrency: 1,
+      wallClockSec: { o2: 0.02, slack: 1, job: 1 },
+      finalReserveSec: 0,
+      abortGraceMs: 10,
+    });
+    const stuck = submitted(m, q("s1"));
+    const next = submitted(m, q("s1"));
+    expect(await stuck.result).toMatchObject({ state: "failed", degraded: true });
+    expect((await next.result).state).toBe("done");
+  });
+
+  it("keeps an answer already streamed instead of replacing it with the context package", async () => {
+    const m = manager({
+      run: async () => {
+        throw new RunError("stream stalled", "model_error", { answer: "half an answer\n\n_(cut off)_" });
+      },
+    });
+    expect(await submitted(m, q("s1")).result).toMatchObject({ state: "failed", answer: "half an answer\n\n_(cut off)_", reason: "stream stalled" });
+  });
+
   it("survives an observer that throws", async () => {
     const m = manager({ run: async (_i, ctx) => (ctx.observer.delta?.("x"), ok()) });
     const bad = { started: () => { throw new Error("socket closed"); }, delta: () => { throw new Error("socket closed"); } };
@@ -229,21 +252,24 @@ describe("input budget", () => {
   const tool = (text: string) => ({ role: "toolResult" as const, toolCallId: "t", toolName: "x", content: [{ type: "text" as const, text }], isError: false, timestamp: 0 });
   const user = { role: "user" as const, content: "q", timestamp: 0 };
 
-  it("stubs the oldest tool outputs first and keeps the newest", () => {
-    const msgs = [user, tool("a".repeat(400)), tool("b".repeat(400)), tool("c".repeat(400))];
-    const r = compactToBudget(msgs, { maxTokens: 150, charsPerToken: 4 });
+  const turn = { role: "assistant", content: [], api: "x", provider: "x", model: "x", usage: {}, stopReason: "toolUse", timestamp: 0 } as never;
+  const textAt = (ms: unknown[], i: number) => ((ms[i] as { content: { text: string }[] }).content[0]!.text);
+
+  it("stubs the oldest tool outputs first and keeps every result of the latest turn", () => {
+    // turn 1: a, b; turn 2: c; turn 3 (parallel calls): d, e
+    const msgs = [user, turn, tool("a".repeat(400)), tool("b".repeat(400)), turn, tool("c".repeat(400)), turn, tool("d".repeat(400)), tool("e".repeat(400))];
+    const r = compactToBudget(msgs, { maxTokens: 300, charsPerToken: 4 });
     expect(r.fits).toBe(true);
-    expect(r.stubbed).toBe(2);
-    const texts = r.messages.map((m) => ((m as { content: unknown }).content as { text: string }[] | string));
-    expect((texts[1] as { text: string }[])[0]!.text).toBe(STUB);
-    expect((texts[3] as { text: string }[])[0]!.text).toBe("c".repeat(400));
-    expect((msgs[1] as ReturnType<typeof tool>).content[0]!.text).toBe("a".repeat(400)); // transcript untouched
+    expect(r.stubbed).toBe(3);
+    expect([2, 3, 5].map((i) => textAt(r.messages, i))).toEqual([STUB, STUB, STUB]);
+    expect([7, 8].map((i) => textAt(r.messages, i))).toEqual(["d".repeat(400), "e".repeat(400)]);
+    expect(textAt(msgs, 2)).toBe("a".repeat(400)); // transcript untouched
   });
 
   it("leaves a transcript under budget alone and reports one that cannot fit", () => {
     const msgs = [user, tool("x".repeat(100))];
     expect(compactToBudget(msgs, { maxTokens: 1000, charsPerToken: 4 })).toMatchObject({ messages: msgs, stubbed: 0, fits: true });
-    expect(compactToBudget([user, tool("x".repeat(4000))], { maxTokens: 100, charsPerToken: 4 }).fits).toBe(false);
+    expect(compactToBudget([user, turn, tool("x".repeat(4000))], { maxTokens: 100, charsPerToken: 4 }).fits).toBe(false);
   });
 });
 

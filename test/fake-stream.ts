@@ -14,7 +14,9 @@ import {
 export type Reply =
   | AssistantMessage
   | ((context: TranscriptContext, options: SimpleStreamOptions | undefined) => AssistantMessage | Promise<AssistantMessage>)
-  | "hang";
+  | "hang"
+  /** Streams this text, then stalls until aborted. */
+  | { stall: string };
 
 export const say = (text: string, usage = { input: 100, output: 10 }) => withUsage(fauxAssistantMessage(fauxText(text)), usage);
 export const callTool = (name: string, args: JsonObject, id?: string) =>
@@ -56,6 +58,15 @@ export function scripted(replies: Reply[]): StreamFn & { calls: { context: Trans
           options?.signal?.addEventListener("abort", () => r(), { once: true });
         });
         s.push({ type: "error", reason: "aborted", error: fauxAssistantMessage([], { stopReason: "aborted", errorMessage: "aborted" }) });
+        return;
+      }
+      if (typeof reply === "object" && "stall" in reply) {
+        const partial = { ...fauxAssistantMessage([]), content: [] as AssistantMessage["content"] };
+        s.push({ type: "start", partial });
+        s.push({ type: "text_start", contentIndex: 0, partial });
+        s.push({ type: "text_delta", contentIndex: 0, delta: reply.stall, partial });
+        await new Promise<void>((r) => options?.signal?.addEventListener("abort", () => r(), { once: true }));
+        s.push({ type: "error", reason: "aborted", error: fauxAssistantMessage(fauxText(reply.stall), { stopReason: "aborted", errorMessage: "aborted" }) });
         return;
       }
       const msg = typeof reply === "function" ? await reply(context, options) : reply;
