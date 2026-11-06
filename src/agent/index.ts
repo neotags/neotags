@@ -22,8 +22,14 @@ export interface AgentSpec {
 
 /** A tool-using agent on the configured gateway. Every tool call passes `guard` first. */
 export function createAgent(cfg: Config, spec: AgentSpec, gateway: Gateway = createGateway(cfg)): Agent {
+  const effort = gateway.policy.steps("agent")[0]?.effort;
   return new Agent({
-    initialState: { systemPrompt: spec.systemPrompt, model: gateway.model, tools: spec.tools },
+    initialState: {
+      systemPrompt: spec.systemPrompt,
+      model: gateway.model,
+      tools: spec.tools,
+      ...(effort && { thinkingLevel: effort === "none" ? "off" : effort }),
+    },
     streamFn: gateway.models.streamSimple.bind(gateway.models),
     beforeToolCall: toBeforeToolCall(spec.guard),
   });
