@@ -5,6 +5,7 @@ import type { LlmClient } from "../agent/llm.js";
 import { sharedFiles } from "../skills/kb-files/collect.js";
 import type { Skill, SkillAction, SkillContext } from "../skills/types.js";
 import type { Notifier, Task } from "../task.js";
+import { inSpan } from "../telemetry/spans.js";
 
 const decisionSchema = z.object({
   skill: z.string(),
@@ -98,7 +99,25 @@ export class Router {
     throw new Error(`router returned invalid output twice: ${lastError}`);
   }
 
+  /** One trace per task: the routing call and the skill's LLM calls are its children. */
   async handle(task: Task): Promise<void> {
+    const anchor = task.thread?.ts ?? task.triggerTs;
+    return inSpan(
+      `invoke_agent ${this.d.botName}`,
+      {
+        "gen_ai.operation.name": "invoke_agent",
+        "gen_ai.agent.name": this.d.botName,
+        "neotags.task.id": task.id,
+        "neotags.task.source": task.source,
+        "user.id": task.actor.id,
+        // A Slack thread is the conversation: follow-up mentions in it group into one session.
+        ...(anchor && { "session.id": `${task.reply.channel}:${anchor}` }),
+      },
+      (span) => this.route(task, (skill) => span.setAttribute("neotags.skill", skill)),
+    );
+  }
+
+  private async route(task: Task, routed: (skill: string) => void): Promise<void> {
     const say = (text: string) => this.d.notifier.reply(task.reply, text);
 
     if (!task.text.trim()) return say(`Hi <@${task.actor.id}>! ${this.help()}`);
@@ -111,11 +130,12 @@ export class Router {
     const decision = await this.decide(task, files);
     const skill = this.d.skills.find((s) => s.name === decision.skill);
     this.d.log.info({ taskId: task.id, routed: skill?.name ?? "none", files }, "routed");
+    routed(skill?.name ?? "none");
     if (!skill) {
       return say(decision.clarification?.trim() || `I'm not sure what you need. ${this.help()}`);
     }
     if (!ctx) return say("That skill is not available right now: its dependencies are not configured.");
-    await skill.run(task, ctx);
+    await inSpan(`skill ${skill.name}`, { "neotags.skill": skill.name }, () => skill.run(task, ctx));
   }
 
   /** Slack button click; `actionId` is `<skill>:<action>`. Returns the text to show, or undefined if unknown. */
@@ -125,6 +145,8 @@ export class Router {
     const ctx = this.d.context();
     if (!skill?.onAction || !ctx || !id) return undefined;
     const action: SkillAction = { id, value, actor, channel };
-    return skill.onAction(action, ctx);
+    return inSpan(`action ${actionId}`, { "neotags.skill": skill.name, "neotags.action": id, "user.id": actor.id }, () =>
+      skill.onAction!(action, ctx),
+    );
   }
 }

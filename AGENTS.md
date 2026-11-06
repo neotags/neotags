@@ -34,6 +34,7 @@ src/runs/               RunManager (state machine, concurrency, per-session lock
 src/router/             LLM intent routing: one tool-less call picks a registered skill; also dispatches button actions
 src/skills/             Skill interface; kb-collect/ (thread -> redact -> summarize -> Onyx upsert, Undo); kb-files/ (Slack files -> extract -> redact -> Onyx); kb-ask/ (Onyx search -> grounded, cited answer)
 src/tools/              slack (thread reader, file download), onyx (ingestion + search client), extract (PDF/DOCX/XLSX/PPTX/text -> sections), redact (secret scrubbing), skillpacks (allowlisted Agent Skills loader + read_skill tools)
+src/telemetry/          OpenTelemetry setup (OTLP via OTEL_* env) and GenAI spans: task -> skill -> one span per LLM call
 src/guardrails/         channel/user allowlist policy (enforced in code, not prompts)
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport
 test/                   vitest

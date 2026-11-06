@@ -1,5 +1,6 @@
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import type { ChainName, Config, Effort } from "../config/index.js";
+import { endChatSpan, startChatSpan } from "../telemetry/spans.js";
 import { createGateway, type ChainStep, type Gateway, type ModelPolicy } from "./models.js";
 
 export interface ChatMessage {
@@ -78,6 +79,8 @@ export interface LlmDeps {
   policy?: Pick<ModelPolicy, "pick"> & Partial<Pick<ModelPolicy, "steps">>;
   /** Chain for every call of this client unless the call names one (e.g. "gate" for the router). */
   chain?: ChainName;
+  /** Put prompts and replies on trace spans (telemetry.captureContent). */
+  captureContent?: boolean;
 }
 
 /** Request settings for one effort: pi-ai's reasoningEffort (it maps that per compat.thinkingFormat) and extra body fields. */
@@ -149,6 +152,19 @@ export class PiLlmClient implements LlmClient {
     try {
       for (let attempt = 0; attempt <= this.d.maxRetries; attempt++) {
         if (attempt > 0) await sleep(Math.min(500 * 2 ** (attempt - 1), 8000));
+        const span = startChatSpan({
+          model: step?.model.id ?? "unknown",
+          chain,
+          ...(step?.effort && { effort: step.effort }),
+          ...(opts.purpose && { purpose: opts.purpose }),
+          attempt,
+          ...(budget !== undefined && { maxTokens: budget }),
+          ...(temperature !== undefined && { temperature }),
+          ...(opts.json && { json: true }),
+          system,
+          messages: messages.filter((m) => m.role === "user"),
+          captureContent: this.d.captureContent ?? false,
+        });
         let msg: AssistantMessage;
         try {
           msg = await this.d.complete(context, {
@@ -163,10 +179,16 @@ export class PiLlmClient implements LlmClient {
           }, step);
         } catch (err) {
           last = (err as Error).message;
+          endChatSpan(span, { error: last });
           outcome = REQUEST_ERROR.test(last) ? "neutral" : "failure";
           if (TRANSIENT.test(last)) continue;
           throw new LlmError(`LLM request failed: ${last}`);
         }
+        const text = msg.content
+          .filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text")
+          .map((c) => c.text)
+          .join("");
+        endChatSpan(span, { msg, text, captureContent: this.d.captureContent ?? false });
         if (msg.stopReason === "error" || msg.stopReason === "aborted") {
           last = msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`;
           outcome = REQUEST_ERROR.test(last) ? "neutral" : "failure";
@@ -174,10 +196,6 @@ export class PiLlmClient implements LlmClient {
           throw new LlmError(`LLM request failed: ${last}`);
         }
         outcome = "success"; // the model answered, even if the answer turns out unusable below
-        const text = msg.content
-          .filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text")
-          .map((c) => c.text)
-          .join("");
         // A reasoning model spends the output budget thinking: the reply has no answer, or one cut off by the
         // limit. Retry once with more room (not counted against the transient-error retries).
         const cap = this.d.maxTokensCap;
@@ -222,6 +240,7 @@ export function createLlm(
   return new PiLlmClient({
     complete: (context, o, step) => gateway.models.complete(step!.model, context, o),
     policy: gateway.policy,
+    captureContent: cfg.telemetry.captureContent,
     ...(opts.role === "router" && { chain: "gate" as const }),
     timeoutMs: cfg.llm.timeoutMs,
     maxRetries: cfg.llm.maxRetries,

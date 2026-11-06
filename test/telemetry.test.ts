@@ -1,0 +1,113 @@
+import { pino } from "pino";
+import { InMemorySpanExporter, type ReadableSpan } from "@opentelemetry/sdk-trace";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import { PiLlmClient } from "../src/agent/llm.js";
+import { createGateway } from "../src/agent/models.js";
+import { loadConfig } from "../src/config/index.js";
+import { Router } from "../src/router/index.js";
+import type { Skill, SkillContext } from "../src/skills/types.js";
+import type { Task } from "../src/task.js";
+import { startTelemetry, tracingEnabled } from "../src/telemetry/index.js";
+
+// The global tracer provider can be set once per process; vitest runs each test file in its own.
+const exporter = new InMemorySpanExporter();
+const telemetry = startTelemetry({ exporter })!;
+const flushed = async (): Promise<ReadableSpan[]> => {
+  await telemetry.flush();
+  return exporter.getFinishedSpans();
+};
+
+const log = pino({ level: "silent" });
+const base = { SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y" };
+// Single-model setup: every chain runs on m1, without effort.
+const { policy } = createGateway(loadConfig({ ...base, LLM_MODEL: "m1" }));
+const msg = (over: object = {}) =>
+  ({
+    role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop", model: "m1",
+    usage: { input: 30, output: 7, cacheRead: 0, cacheWrite: 0, totalTokens: 37 }, ...over,
+  }) as never;
+
+describe("telemetry config", () => {
+  it("is on only when an OTLP endpoint is set and the SDK is not disabled", () => {
+    expect(tracingEnabled({})).toBe(false);
+    expect(tracingEnabled({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://o2.test/api/default" })).toBe(true);
+    expect(tracingEnabled({ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://lf.test/api/public/otel/v1/traces" })).toBe(true);
+    expect(tracingEnabled({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://o2.test", OTEL_SDK_DISABLED: "true" })).toBe(false);
+  });
+  it("captures no content by default; the file or the GenAI env var turns it on", () => {
+    expect(loadConfig(base).telemetry.captureContent).toBe(false);
+    expect(loadConfig({ ...base, NEOTAGS_CONFIG: "f" }, () => "telemetry:\n  captureContent: true\n").telemetry.captureContent).toBe(true);
+    expect(loadConfig({ ...base, OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "TRUE" }).telemetry.captureContent).toBe(true);
+    expect(
+      loadConfig({ ...base, NEOTAGS_CONFIG: "f", OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "false" }, () => "telemetry:\n  captureContent: true\n")
+        .telemetry.captureContent,
+    ).toBe(false);
+  });
+});
+
+describe("traces", () => {
+  beforeEach(() => exporter.reset());
+
+  it("puts the routing call and every skill LLM attempt under one task span, with usage and no content by default", async () => {
+    const complete = vi
+      .fn()
+      .mockResolvedValueOnce(msg({ content: [{ type: "text", text: '{"skill":"echo"}' }] }))
+      .mockResolvedValueOnce(msg({ stopReason: "error", errorMessage: "503 upstream" }))
+      .mockResolvedValueOnce(msg());
+    const llm = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 1, sleep: async () => {}, policy });
+    const skill: Skill = {
+      name: "echo",
+      description: "echo",
+      run: async (_task, ctx) => void (await ctx.llm.chat([{ role: "user", content: "secret thread" }], { purpose: "answer" })),
+    };
+    const task: Task = {
+      id: "T1", source: "slack", actor: { id: "U1" }, text: "hello",
+      reply: { kind: "slack", channel: "C1", threadTs: "100" }, thread: { ts: "100" },
+    };
+    const router = new Router({
+      botName: "moose", notifier: { reply: async () => {}, react: async () => {} }, skills: [skill], llm, log,
+      context: () => ({ llm }) as unknown as SkillContext,
+    });
+    await router.handle(task);
+
+    const spans = await flushed();
+    const byName = (n: string) => spans.filter((s) => s.name === n);
+    const [root] = byName("invoke_agent moose");
+    const [skillSpan] = byName("skill echo");
+    const chats = byName("chat m1");
+    expect(root!.attributes).toMatchObject({
+      "gen_ai.operation.name": "invoke_agent", "neotags.task.id": "T1", "neotags.skill": "echo",
+      "user.id": "U1", "session.id": "C1:100",
+    });
+    expect(chats).toHaveLength(3); // router + a failed attempt + its retry: each billed call is its own span
+    const traceId = root!.spanContext().traceId;
+    expect(spans.every((s) => s.spanContext().traceId === traceId)).toBe(true);
+    expect(skillSpan!.parentSpanContext?.spanId).toBe(root!.spanContext().spanId);
+
+    const [routing, failed, answer] = chats;
+    expect(routing!.parentSpanContext?.spanId).toBe(root!.spanContext().spanId);
+    expect(routing!.attributes).toMatchObject({ "neotags.llm.purpose": "router", "neotags.llm.chain": "gate", "gen_ai.output.type": "json" });
+    expect(failed!.status).toMatchObject({ code: 2, message: "503 upstream" });
+    expect(answer!.parentSpanContext?.spanId).toBe(skillSpan!.spanContext().spanId);
+    expect(answer!.attributes).toMatchObject({
+      "gen_ai.request.model": "m1", "gen_ai.response.model": "m1", "neotags.llm.purpose": "answer", "neotags.llm.chain": "summary", "neotags.llm.attempt": 1,
+      "gen_ai.usage.input_tokens": 30, "gen_ai.usage.output_tokens": 7, "llm.usage.total_tokens": 37,
+      "gen_ai.response.finish_reasons": ["stop"],
+    });
+    expect(Object.keys(answer!.attributes).some((k) => k.startsWith("gen_ai.prompt") || k.startsWith("gen_ai.completion"))).toBe(false);
+  });
+});
+
+describe("traces with content", () => {
+  it("records prompts and the reply when captureContent is on", async () => {
+    const llm = new PiLlmClient({ complete: vi.fn().mockResolvedValue(msg()), timeoutMs: 1000, maxRetries: 0, policy, captureContent: true });
+    exporter.reset();
+    await llm.chat([{ role: "system", content: "sys" }, { role: "user", content: "hi" }]);
+    const [span] = (await flushed()).filter((s) => s.name === "chat m1");
+    expect(span!.attributes).toMatchObject({
+      "gen_ai.prompt.0.role": "system", "gen_ai.prompt.0.content": "sys",
+      "gen_ai.prompt.1.role": "user", "gen_ai.prompt.1.content": "hi",
+      "gen_ai.completion.0.content": "ok",
+    });
+  });
+});

@@ -212,6 +212,20 @@
         170,
         64
       ]
+    },
+    {
+      "id": "traces",
+      "type": "external",
+      "label": "Trace backend",
+      "sublabel": "OpenObserve · Langfuse (OTLP)",
+      "pos": [
+        1055,
+        560
+      ],
+      "size": [
+        200,
+        64
+      ]
     }
   ],
   "boundaries": [
@@ -328,6 +342,15 @@
       "variant": "dashed",
       "fromSide": "right",
       "toSide": "left"
+    },
+    {
+      "id": "t1",
+      "from": "llmclient",
+      "to": "traces",
+      "label": "GenAI spans",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top"
     }
   ],
   "cards": [
@@ -360,7 +383,8 @@
         "Slack gateway, dedupe, graceful drain, allowlists",
         "LLM router with optional faster router model",
         "kb-collect: thread reader, redaction, summarizer, Onyx upsert + Undo",
-        "OpenAI-compatible gateway via pi-ai, verified live; Agent factory + tool guard ready"
+        "OpenAI-compatible gateway via pi-ai, verified live; Agent factory + tool guard ready",
+        "LLM traces over OTLP: one trace per task, one span per LLM call (model, tokens, latency)"
       ]
     },
     {

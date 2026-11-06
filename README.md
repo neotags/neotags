@@ -18,7 +18,7 @@ Create the Slack app from `deploy/slack-app-manifest.yaml`; the Events request U
 
 ## Status
 
-Implemented (unit-tested with fakes; not yet run against live Slack/Onyx/LLM): Slack Events gateway, LLM intent router, `kb-collect` (record a thread to Onyx with Undo), `kb-files` (index shared PDF/Office/text files), `kb-ask` (answer questions from the KB with citations), configurable OpenAI-compatible LLM gateway.
+Implemented (unit-tested with fakes; not yet run against live Slack/Onyx/LLM): Slack Events gateway, LLM intent router, `kb-collect` (record a thread to Onyx with Undo), `kb-files` (index shared PDF/Office/text files), `kb-ask` (answer questions from the KB with citations), configurable OpenAI-compatible LLM gateway, LLM traces over OTLP (OpenObserve / Langfuse).
 
 Try it: invite the bot to a public channel (private channels are off unless `slack.allowPrivateChannels: true`, which also needs the `groups:read` + `groups:history` Slack scopes and makes those entries visible to the whole KB) and, inside a thread, mention it: `@moose record the knowledge`. Needs `LLM_API_KEY`, `llm.model`, `onyx.baseUrl` and `ONYX_API_KEY`. Or DM the bot directly (the manifest enables the app's Messages tab): it answers questions there too — DMs are never recorded to the KB.
 
@@ -28,6 +28,28 @@ Try it: invite the bot to a public channel (private channels are off unless `sla
 - **Ask.** `@moose what does the Q3 report say about churn?` — or the same question in a DM with the bot — searches Onyx (`onyx.searchPath`, key needs `READ_SEARCH`), answers from the retrieved sections only, and cites them. The same entries are searchable in the Onyx UI.
 - Switch a skill off with `skills.disabled: [kb-ask]` (or env `NEOTAGS_DISABLED_SKILLS=kb-ask`). It is then not offered by the router, not in the help text, and its buttons stop working. Without `kb-ask`, a question gets the help text.
 - Not supported yet: images and scanned PDFs (no OCR), legacy `.doc`/`.xls`/`.ppt`, password-protected files.
+
+### LLM traces (OpenObserve / Langfuse)
+
+Each request becomes one OpenTelemetry trace: `invoke_agent <bot>` (task id, Slack user, `session.id` = channel + thread) → `skill <name>` → one `chat <model>` span per gateway call, retries and budget widening included, so every billed call shows up. Chat spans carry the GenAI attributes both backends read: `gen_ai.request.model`, `gen_ai.usage.input_tokens` / `output_tokens`, `gen_ai.response.finish_reasons`, plus `neotags.llm.purpose` (router, notes, summary, fileSummary, answer), `neotags.llm.chain` and `neotags.llm.effort` (the `llm.chains` entry that served the call, so failover to the next model is visible) and `neotags.llm.attempt`. Latency is the span duration.
+
+Tracing is off unless an OTLP/HTTP endpoint is set with the standard env vars (protobuf; header values URL-encoded, so the space after `Basic` is `%20`):
+
+```sh
+# OpenObserve: Data Sources → Custom → Traces → OpenTelemetry shows the URL and the Basic token
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://o2.example.com/api/<org>/v1/traces
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic%20<token>,stream-name=neotags"
+
+# Langfuse: Basic auth is base64("<public key>:<secret key>")
+OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://langfuse.example.com/api/public/otel/v1/traces
+OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic%20<base64>"
+
+OTEL_SERVICE_NAME=neotags   # default
+```
+
+- **Quality.** Prompts and replies are left off spans by default. `telemetry.captureContent: true` (or `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`) adds them as `gen_ai.prompt.N.*` / `gen_ai.completion.0.*`, the shape OpenObserve and Langfuse show as a generation's input and output and run evaluations on. They are already redacted, but they are Slack threads and files: anyone who can read the traces can read them.
+- **Cost.** The gateway's prices are unknown to neotags, so it sends tokens and the backend prices them: in OpenObserve enable model pricing (`ZO_MODEL_PRICING_ENABLED`), in Langfuse define the model's price. Self-hosted model names need a custom price entry in either.
+- In Kubernetes, put `OTEL_EXPORTER_OTLP_HEADERS` in `neotags-secrets` and the endpoint in `extraEnv`.
 
 ## Secret scanning
 
