@@ -1,4 +1,16 @@
-import { context, diag, INVALID_SPAN_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Context, type Span } from "@opentelemetry/api";
+import {
+  context,
+  createContextKey,
+  diag,
+  INVALID_SPAN_CONTEXT,
+  ROOT_CONTEXT,
+  SpanKind,
+  SpanStatusCode,
+  trace,
+  type Attributes,
+  type Context,
+  type Span,
+} from "@opentelemetry/api";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { messageText, thinkingChars } from "../agent/message.js";
 import { redact } from "../tools/redact.js";
@@ -6,6 +18,17 @@ import { redact } from "../tools/redact.js";
 // A proxy until startTelemetry registers a provider; a no-op when tracing is off.
 const tracer = trace.getTracer("neotags");
 const NOOP_SPAN = trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
+
+/**
+ * The conversation of the task or run in progress. OpenObserve's session list sums tokens over the spans that carry
+ * `gen_ai.conversation.id`, so every chat and tool span repeats it, not only the root.
+ */
+const CONVERSATION = createContextKey("neotags.conversation");
+const conversationOf = (ctx: Context = context.active()) => ctx.getValue(CONVERSATION) as string | undefined;
+const conversationAttrs = (ctx?: Context): Attributes => {
+  const id = conversationOf(ctx);
+  return id ? { "gen_ai.conversation.id": id } : {};
+};
 
 let reported = false;
 /**
@@ -24,13 +47,22 @@ export function guarded<T>(fn: () => T, fallback: T): T {
   }
 }
 
-/** Run `fn` in an active span (so LLM calls inside it become children); errors mark the span failed and rethrow. */
-export async function inSpan<T>(name: string, attributes: Attributes, fn: (span: Span) => Promise<T>): Promise<T> {
-  return tracer.startActiveSpan(name, { attributes }, async (span) => {
+/**
+ * Run `fn` in an active span (so LLM calls inside it become children); errors mark the span failed and rethrow.
+ * `conversation` (the root's `gen_ai.conversation.id`) is passed on to the spans inside.
+ */
+export async function inSpan<T>(
+  name: string,
+  attributes: Attributes,
+  fn: (span: Span) => Promise<T>,
+  conversation?: string,
+): Promise<T> {
+  const ctx = conversation ? context.active().setValue(CONVERSATION, conversation) : context.active();
+  return tracer.startActiveSpan(name, { attributes }, ctx, async (span) => {
     try {
       return await fn(span);
     } catch (err) {
-      fail(span, err as Error);
+      guarded(() => fail(span, err instanceof Error ? err : String(err)), undefined);
       throw err;
     } finally {
       span.end();
@@ -38,9 +70,10 @@ export async function inSpan<T>(name: string, attributes: Attributes, fn: (span:
   });
 }
 
+/** Error text is redacted like content: gateway and tool errors can echo a token or a credentialed URL. */
 function fail(span: Span, err: Error | string, type?: string) {
-  const message = typeof err === "string" ? err : err.message;
-  if (typeof err !== "string") span.recordException(err);
+  const message = recorded(typeof err === "string" ? err : err.message);
+  if (typeof err !== "string") span.recordException({ name: err.name, message, ...(err.stack && { stack: recorded(err.stack) }) });
   span.setAttribute("error.type", type ?? (typeof err === "string" ? "llm_error" : err.name));
   span.setStatus({ code: SpanStatusCode.ERROR, message });
 }
@@ -73,7 +106,8 @@ export interface ChatRequest {
   temperature?: number;
   json?: boolean;
   system?: string;
-  messages: { role: string; content: string }[];
+  /** A function is only called when content is recorded, inside the tracing guard (an agent transcript is walked). */
+  messages: { role: string; content: string }[] | (() => { role: string; content: string }[]);
   /** Record prompts and replies. Off by default: they carry (redacted) Slack content. */
   captureContent: boolean;
 }
@@ -105,9 +139,11 @@ function chatSpan(req: ChatRequest): Span {
     ...(req.maxTokens !== undefined && { "gen_ai.request.max_tokens": req.maxTokens }),
     ...(req.temperature !== undefined && { "gen_ai.request.temperature": req.temperature }),
     ...(req.json && { "gen_ai.output.type": "json" }),
+    ...conversationAttrs(),
   };
   if (req.captureContent) {
-    const prompt = [...(req.system ? [{ role: "system", content: req.system }] : []), ...req.messages];
+    const messages = typeof req.messages === "function" ? req.messages() : req.messages;
+    const prompt = [...(req.system ? [{ role: "system", content: req.system }] : []), ...messages];
     prompt.forEach((m, i) => {
       attributes[`gen_ai.prompt.${i}.role`] = m.role;
       attributes[`gen_ai.prompt.${i}.content`] = recorded(m.content);
@@ -155,9 +191,10 @@ function closeChatSpan(span: Span, outcome: ChatOutcome) {
   if (msg.stopReason === "error" || msg.stopReason === "aborted") fail(span, msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`);
 }
 
-/** Run `fn` with `span` as the active span, so the spans started inside it are its children. */
-export function withSpan<T>(span: Span, fn: () => T): T {
-  return context.with(trace.setSpan(context.active(), span), fn);
+/** Run `fn` with `span` as the active span, so the spans started inside it are its children (and share its conversation). */
+export function withSpan<T>(span: Span, fn: () => T, conversation?: string): T {
+  const ctx = trace.setSpan(context.active(), span);
+  return context.with(conversation ? ctx.setValue(CONVERSATION, conversation) : ctx, fn);
 }
 
 export interface AgentRunSpan {
@@ -178,19 +215,24 @@ export interface AgentRunSpan {
 export function startRunSpan(run: AgentRunSpan): Span {
   return guarded(
     () =>
-      tracer.startSpan(`invoke_agent ${run.agent}`, {
-        attributes: {
-          "gen_ai.operation.name": "invoke_agent",
-          "gen_ai.agent.name": run.agent,
-          ...(run.botName && { "neotags.bot.name": run.botName }),
-          "neotags.run.id": run.runId,
-          "gen_ai.conversation.id": run.sessionId,
-          // Langfuse groups sessions by session.id; OpenObserve reads either.
-          "session.id": run.sessionId,
-          ...(run.user && { "user.id": run.user }),
-          ...(run.queuedMs !== undefined && { "neotags.run.queued_ms": run.queuedMs }),
+      tracer.startSpan(
+        `invoke_agent ${run.agent}`,
+        {
+          attributes: {
+            "gen_ai.operation.name": "invoke_agent",
+            "gen_ai.agent.name": run.agent,
+            ...(run.botName && { "neotags.bot.name": run.botName }),
+            "neotags.run.id": run.runId,
+            "gen_ai.conversation.id": run.sessionId,
+            // Langfuse groups sessions by session.id; OpenObserve reads either.
+            "session.id": run.sessionId,
+            ...(run.user && { "user.id": run.user }),
+            ...(run.queuedMs !== undefined && { "neotags.run.queued_ms": run.queuedMs }),
+          },
         },
-      }),
+        // Always a root: a queued run is started from whatever finished before it, in that work's context.
+        ROOT_CONTEXT,
+      ),
     NOOP_SPAN,
   );
 }
@@ -258,6 +300,7 @@ export class ToolSpans {
         "gen_ai.tool.name": call.name,
         "gen_ai.tool.call.id": call.id,
         "gen_ai.tool.type": "function",
+        ...conversationAttrs(this.o.parent),
       };
       if (this.o.captureContent) attributes["gen_ai.tool.call.arguments"] = recorded(JSON.stringify(call.args ?? null));
       const span = tracer.startSpan(`execute_tool ${call.name}`, { kind: SpanKind.INTERNAL, attributes }, this.o.parent ?? context.active());
@@ -280,7 +323,8 @@ export class ToolSpans {
         if (this.o.captureContent) t.span.setAttribute("gen_ai.tool.call.result", recorded(call.output));
         if (t.denied !== undefined) fail(t.span, t.denied, "tool_denied");
         // The error text is tool output: content, recorded only when content is.
-        else if (call.isError) fail(t.span, (this.o.captureContent && recorded(call.output.slice(0, 500))) || "tool failed", "tool_error");
+        // Redacted before it is cut: a cut through a secret (a PEM block) would no longer match its pattern.
+        else if (call.isError) fail(t.span, (this.o.captureContent && recorded(call.output).slice(0, 500)) || "tool failed", "tool_error");
       } finally {
         t.span.end();
       }

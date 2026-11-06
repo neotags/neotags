@@ -120,6 +120,7 @@ export class Router {
         ...(session && { "gen_ai.conversation.id": session, "session.id": session }),
       },
       (span) => this.route(task, (skill) => span.setAttribute("neotags.skill", skill)),
+      session || undefined,
     );
   }
 

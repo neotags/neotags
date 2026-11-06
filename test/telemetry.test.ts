@@ -111,6 +111,7 @@ describe("traces", () => {
       "neotags.task.id": "T1", "neotags.skill": "echo", "user.id": "U1", "gen_ai.conversation.id": "C1:100", "session.id": "C1:100",
     });
     expect(chats).toHaveLength(3); // router + a failed attempt + its retry: each billed call is its own span
+    expect(chats.every((s) => s.attributes["gen_ai.conversation.id"] === "C1:100")).toBe(true);
     const traceId = root!.spanContext().traceId;
     expect(spans.every((s) => s.spanContext().traceId === traceId)).toBe(true);
     expect(skillSpan!.parentSpanContext?.spanId).toBe(root!.spanContext().spanId);

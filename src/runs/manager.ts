@@ -243,7 +243,7 @@ export class RunManager {
     };
     // Defer so a runner that throws synchronously still goes through the same path.
     void Promise.resolve()
-      .then(() => withSpan(run.span!, () => this.o.runner.run(input, ctx)))
+      .then(() => withSpan(run.span!, () => this.o.runner.run(input, ctx), input.sessionId))
       .then(
         (outcome) => this.finish(run, this.fromOutcome(run, outcome)),
         (err: unknown) => this.finish(run, this.fromError(run, err)),

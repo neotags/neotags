@@ -1,7 +1,7 @@
 import { Agent, type AgentTool, type BeforeToolCallResult, type StreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Config, Effort } from "../config/index.js";
 import type { Decision } from "../guardrails/policy.js";
-import { endChatSpan, guarded, startChatSpan, ToolSpans } from "../telemetry/spans.js";
+import { endChatSpan, guarded, startChatSpan, ToolSpans, type ChatRequest } from "../telemetry/spans.js";
 import { promptMessages } from "./message.js";
 import { createGateway, type Gateway } from "./models.js";
 
@@ -42,39 +42,48 @@ export interface AgentSpec {
   guard: ToolGuard;
 }
 
+/** The chat span request of one agent model turn: the createAgent loop and the RunManager's runner build it alike. */
+export function agentChatRequest(
+  model: { id: string },
+  context: Parameters<StreamFn>[1],
+  options: Parameters<StreamFn>[2],
+  o: { captureContent: boolean; effort?: string; phase?: string; attempt?: number },
+): ChatRequest {
+  return {
+    model: model.id,
+    chain: "agent",
+    ...(o.effort && { effort: o.effort }),
+    purpose: "agent",
+    ...(o.phase && { phase: o.phase }),
+    ...(o.attempt !== undefined && { attempt: o.attempt }),
+    ...(options?.maxTokens !== undefined && { maxTokens: options.maxTokens }),
+    ...(options?.temperature !== undefined && { temperature: options.temperature }),
+    // The system prompt is the transcript's first message. Walked only when recorded: it grows every turn.
+    messages: () => promptMessages(context.messages),
+    captureContent: o.captureContent,
+  };
+}
+
 /** Each model turn of an agent loop becomes a chat span, like a PiLlmClient call; tool calls show in its reply. */
 export function tracedStreamFn(inner: StreamFn, opts: { captureContent: boolean; effort?: string }): StreamFn {
   return async (model, context, options) => {
-    // The request is built inside the guard too: messageText walks the transcript.
-    const span = guarded(() => startChatSpan({
-      model: model.id,
-      chain: "agent",
-      ...(opts.effort && { effort: opts.effort }),
-      purpose: "agent",
-      ...(options?.maxTokens !== undefined && { maxTokens: options.maxTokens }),
-      ...(options?.temperature !== undefined && { temperature: options.temperature }),
-      // Only walked when recorded: the transcript grows every turn.
-      messages: opts.captureContent ? promptMessages(context.messages) : [],
-      captureContent: opts.captureContent,
-    }), undefined);
+    const span = startChatSpan(agentChatRequest(model, context, options, opts));
     let stream: Awaited<ReturnType<StreamFn>>;
     try {
       stream = await inner(model, context, options);
     } catch (err) {
-      if (span) endChatSpan(span, { error: (err as Error).message });
+      endChatSpan(span, { error: (err as Error).message });
       throw err;
     }
     // Not awaited: the agent loop consumes the stream. Both handlers are guarded, so neither can reject.
-    if (span) {
-      guarded(
-        () =>
-          stream.result().then(
-            (msg) => endChatSpan(span, { msg, captureContent: opts.captureContent }),
-            (err: unknown) => endChatSpan(span, { error: String((err as Error)?.message ?? err) }),
-          ),
-        undefined,
-      );
-    }
+    guarded(
+      () =>
+        stream.result().then(
+          (msg) => endChatSpan(span, { msg, captureContent: opts.captureContent }),
+          (err: unknown) => endChatSpan(span, { error: String((err as Error)?.message ?? err) }),
+        ),
+      undefined,
+    );
     return stream;
   };
 }

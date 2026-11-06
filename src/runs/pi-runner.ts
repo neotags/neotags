@@ -2,8 +2,7 @@ import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@earend
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { context as otelContext } from "@opentelemetry/api";
 import type { Logger } from "pino";
-import { thinkingLevel, toBeforeToolCall, toolOutput, type ToolGuard } from "../agent/index.js";
-import { promptMessages } from "../agent/message.js";
+import { agentChatRequest, thinkingLevel, toBeforeToolCall, toolOutput, traceToolCalls, type ToolGuard } from "../agent/index.js";
 import { ModelUnavailableError, isRequestError } from "../agent/llm.js";
 import type { Gateway } from "../agent/models.js";
 import type { Effort } from "../config/index.js";
@@ -111,19 +110,7 @@ export class PiAgentRunner implements AgentRunner {
         onAttemptError: (error, attempt, retrying) => o.log?.warn({ runId: ctx.runId, model: step.model.id, attempt, retrying, error }, "agent llm request failed"),
         // One chat span per gateway request: retries and the tool-less final turn each get their own.
         onAttempt: (attempt, request, options) => {
-          const span = startChatSpan({
-            model: step.model.id,
-            chain: "agent",
-            ...(effortNow && { effort: effortNow }),
-            purpose: "agent",
-            phase,
-            attempt,
-            ...(options?.maxTokens !== undefined && { maxTokens: options.maxTokens }),
-            ...(options?.temperature !== undefined && { temperature: options.temperature }),
-            // The system prompt is the transcript's first message. Only walked when recorded: it grows every turn.
-            messages: captureContent ? promptMessages(request.messages) : [],
-            captureContent,
-          });
+          const span = startChatSpan(agentChatRequest(step.model, request, options, { captureContent, ...(effortNow && { effort: effortNow }), phase, attempt }));
           return (msg) => endChatSpan(span, { msg, captureContent });
         },
       }),
@@ -142,16 +129,15 @@ export class PiAgentRunner implements AgentRunner {
       },
     });
 
+    traceToolCalls(agent, toolSpans);
     agent.subscribe((ev) => {
       switch (ev.type) {
         case "tool_execution_start":
           stats.toolCalls++;
-          toolSpans.start({ id: ev.toolCallId, name: ev.toolName, args: ev.args });
           ctx.observer.toolStart?.({ id: ev.toolCallId, name: ev.toolName, args: ev.args });
           break;
         case "tool_execution_end": {
           const output = toolOutput(ev.result);
-          toolSpans.end({ id: ev.toolCallId, isError: ev.isError, output });
           ctx.observer.toolEnd?.({
             id: ev.toolCallId,
             name: ev.toolName,

@@ -10,7 +10,7 @@ import { RunManager } from "../src/runs/manager.js";
 import { PiAgentRunner, type PiRunnerOptions } from "../src/runs/pi-runner.js";
 import type { RunInput } from "../src/runs/types.js";
 import { startTelemetry } from "../src/telemetry/index.js";
-import { MAX_CONTENT_CHARS, recorded, ToolSpans } from "../src/telemetry/spans.js";
+import { endChatSpan, inSpan, MAX_CONTENT_CHARS, recorded, startChatSpan, ToolSpans } from "../src/telemetry/spans.js";
 import { SkillPackIndex } from "../src/tools/skillpacks.js";
 import { callTool, fail, say, scripted, type Reply } from "./fake-stream.js";
 
@@ -154,6 +154,8 @@ describe("agent run traces", () => {
     // Every span is in the run's trace and carries an operation name (O2's LLM views filter on it).
     expect(spans.every((s) => s.spanContext().traceId === root.spanContext().traceId)).toBe(true);
     expect(spans.every((s) => typeof s.attributes["gen_ai.operation.name"] === "string")).toBe(true);
+    // OpenObserve's session list sums tokens over the spans carrying the conversation, so all of them do.
+    expect(spans.every((s) => s.attributes["gen_ai.conversation.id"] === "sess-1")).toBe(true);
     expect(spans.flatMap(contentKeys)).toEqual([]);
   });
 
@@ -219,6 +221,51 @@ describe("agent run traces", () => {
     expect(root.status.code).not.toBe(SpanStatusCode.ERROR);
     // The aborted request is closed too, not left open.
     expect(spans.filter((s) => s.name.startsWith("chat"))).toHaveLength(1);
+  });
+});
+
+describe("trace hygiene", () => {
+  beforeEach(async () => {
+    await telemetry.flush();
+    exporter.reset();
+  });
+
+  it("starts every run as a root, even when submitted or scheduled inside another span", async () => {
+    const { manager } = setup([say("a"), say("b")], { runner: {} });
+    const [a, b] = await inSpan("http request", {}, async () => [manager.submit({ ...input, sessionId: "s-a" }), manager.submit({ ...input, sessionId: "s-a" })]);
+    if (!a!.ok || !b!.ok) throw new Error("not submitted");
+    await Promise.all([a!.run.result, b!.run.result]);
+    const roots = (await flushed()).filter((s) => s.name === "invoke_agent o2");
+    expect(roots).toHaveLength(2);
+    expect(roots.every((s) => s.parentSpanContext === undefined)).toBe(true);
+  });
+
+  it("redacts error text on span status and exception events", async () => {
+    const span = startChatSpan({ model: "m1", messages: [], captureContent: false });
+    endChatSpan(span, { error: "connect failed: https://svc:hunter2-very-secret@gw.example.com/v1" });
+    await inSpan("skill x", {}, async () => {
+      throw new Error(`boom ${BEARER}`);
+    }).catch(() => {});
+    const out = await flushed();
+    const text = JSON.stringify(out.map((s) => [s.status, s.events]));
+    expect(text).not.toContain("hunter2-very-secret");
+    expect(text).not.toContain(BEARER);
+    expect(text).toContain("[REDACTED]");
+  });
+
+  it("does not let an unreadable transcript escape the tracing guard", async () => {
+    const span = startChatSpan({ model: "m1", messages: () => { throw new Error("bad message"); }, captureContent: true });
+    expect(() => endChatSpan(span, { error: "x" })).not.toThrow();
+  });
+
+  it("redacts a tool error before cutting it, so a secret across the cut is still caught", async () => {
+    const spans = new ToolSpans({ captureContent: true });
+    spans.start({ id: "t", name: "x", args: {} });
+    const pem = `-----BEGIN RSA PRIVATE KEY-----\n${"A".repeat(600)}\n-----END RSA PRIVATE KEY-----`;
+    spans.end({ id: "t", isError: true, output: `${"e".repeat(400)} ${pem}` });
+    const [span] = await flushed();
+    expect(span!.status.message).not.toContain("BEGIN RSA PRIVATE KEY");
+    expect(span!.status.message).toContain("[REDACTED]");
   });
 });
 
