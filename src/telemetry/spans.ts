@@ -1,8 +1,26 @@
-import { SpanKind, SpanStatusCode, trace, type Attributes, type Span } from "@opentelemetry/api";
+import { diag, INVALID_SPAN_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Span } from "@opentelemetry/api";
 import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
 
 // A proxy until startTelemetry registers a provider; a no-op when tracing is off.
 const tracer = trace.getTracer("neotags");
+const NOOP_SPAN = trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
+
+let reported = false;
+/**
+ * Tracing runs inline with the traced work and must never fail it: a bug here (e.g. a reply shaped unlike pi-ai's
+ * types) costs the span, not the LLM call or, in a promise callback, the process. Reported once, as an SDK warning.
+ */
+export function guarded<T>(fn: () => T, fallback: T): T {
+  try {
+    return fn();
+  } catch (err) {
+    if (!reported) {
+      reported = true;
+      diag.warn("neotags tracing failed; spans may be missing or incomplete", err);
+    }
+    return fallback;
+  }
+}
 
 /** Run `fn` in an active span (so LLM calls inside it become children); errors mark the span failed and rethrow. */
 export async function inSpan<T>(name: string, attributes: Attributes, fn: (span: Span) => Promise<T>): Promise<T> {
@@ -51,6 +69,10 @@ const FINISH: Partial<Record<AssistantMessage["stopReason"], string>> = { toolUs
  * OpenLLMetry emits; OpenObserve and Langfuse both turn such spans into LLM generations with tokens and latency.
  */
 export function startChatSpan(req: ChatRequest): Span {
+  return guarded(() => chatSpan(req), NOOP_SPAN);
+}
+
+function chatSpan(req: ChatRequest): Span {
   const attributes: Attributes = {
     "gen_ai.operation.name": "chat",
     // The wire API, not the vendor: the gateway is OpenAI-compatible whatever model sits behind it.
@@ -75,12 +97,20 @@ export function startChatSpan(req: ChatRequest): Span {
 }
 
 /** Close a chat span with the gateway's reply, or with the error when the request itself failed. */
-export function endChatSpan(span: Span, outcome: { msg: AssistantMessage; text: string; captureContent: boolean } | { error: string }) {
-  if ("error" in outcome) {
-    fail(span, outcome.error);
-    span.end();
-    return;
-  }
+export function endChatSpan(span: Span, outcome: ChatOutcome) {
+  guarded(() => {
+    try {
+      closeChatSpan(span, outcome);
+    } finally {
+      span.end();
+    }
+  }, undefined);
+}
+
+type ChatOutcome = { msg: AssistantMessage; text: string; captureContent: boolean } | { error: string };
+
+function closeChatSpan(span: Span, outcome: ChatOutcome) {
+  if ("error" in outcome) return fail(span, outcome.error);
   const { msg, text } = outcome;
   const finish = msg.rawStopReason ?? FINISH[msg.stopReason] ?? msg.stopReason;
   const thinking = msg.content.reduce((n, c) => n + (c.type === "thinking" ? c.thinking.length : 0), 0);
@@ -102,7 +132,6 @@ export function endChatSpan(span: Span, outcome: { msg: AssistantMessage; text: 
     });
   }
   if (msg.stopReason === "error" || msg.stopReason === "aborted") fail(span, msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`);
-  span.end();
 }
 
 /** Span text of a pi message: its text parts, tool calls as `name(args)`. Images and thinking are left out. */

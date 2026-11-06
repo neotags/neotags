@@ -4,6 +4,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { diag } from "@opentelemetry/api";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import { tracedStreamFn } from "../src/agent/index.js";
+import { endChatSpan, startChatSpan } from "../src/telemetry/spans.js";
 import { PiLlmClient } from "../src/agent/llm.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
@@ -197,5 +198,35 @@ describe("agent traces", () => {
       "gen_ai.usage.input_tokens": 30,
     });
     expect(span!.attributes["neotags.llm.attempt"]).toBeUndefined();
+  });
+});
+
+describe("tracing never fails the traced work", () => {
+  beforeEach(() => exporter.reset());
+
+  it("survives malformed requests and replies, reporting the bug once", async () => {
+    appLog.warn.mockClear();
+    const span = startChatSpan({ model: "m1", messages: null as never, captureContent: true });
+    expect(() => endChatSpan(span, { msg: {} as never, text: "", captureContent: true })).not.toThrow();
+    const ok = startChatSpan({ model: "m1", messages: [], captureContent: false });
+    expect(() => endChatSpan(ok, { msg: { content: null } as never, text: "", captureContent: false })).not.toThrow();
+    // The span whose reply could not be read is still ended, so it is exported rather than leaked.
+    expect((await flushed()).filter((s) => s.name === "chat m1")).toHaveLength(1);
+    const reports = appLog.warn.mock.calls.filter((c) => /neotags tracing failed/.test(String(c[1])));
+    expect(reports).toHaveLength(1);
+  });
+
+  it("lets a PiLlmClient call succeed when its reply cannot be traced", async () => {
+    // A thinking block without text: only the span reads it (to count thinking characters).
+    const odd = msg({ content: [{ type: "text", text: "ok" }, { type: "thinking", thinking: null }] });
+    const llm = new PiLlmClient({ complete: vi.fn().mockResolvedValue(odd), timeoutMs: 1000, maxRetries: 0, policy });
+    await expect(llm.chat([{ role: "user", content: "hi" }])).resolves.toMatchObject({ text: "ok" });
+  });
+
+  it("does not leave an unhandled rejection when an agent reply cannot be traced", async () => {
+    const inner = vi.fn(async () => ({ result: async () => ({ content: null }) }) as never);
+    const s = await tracedStreamFn(inner, { captureContent: true })({ id: "m1" } as never, { messages: [{ role: "user", content: 1 }] } as never);
+    await s.result();
+    await new Promise((r) => setTimeout(r, 0)); // vitest fails the run on an unhandled rejection
   });
 });

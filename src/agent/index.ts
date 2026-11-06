@@ -1,7 +1,7 @@
 import { Agent, type AgentTool, type BeforeToolCallResult, type StreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Config, Effort } from "../config/index.js";
 import type { Decision } from "../guardrails/policy.js";
-import { endChatSpan, messageText, startChatSpan } from "../telemetry/spans.js";
+import { endChatSpan, guarded, messageText, startChatSpan } from "../telemetry/spans.js";
 import { createGateway, type Gateway } from "./models.js";
 
 /** The configured effort as a pi thinking level; unset leaves the gateway's default. */
@@ -27,7 +27,8 @@ export interface AgentSpec {
 /** Each model turn of an agent loop becomes a chat span, like a PiLlmClient call; tool calls show in its reply. */
 export function tracedStreamFn(inner: StreamFn, opts: { captureContent: boolean; effort?: string }): StreamFn {
   return async (model, context, options) => {
-    const span = startChatSpan({
+    // The request is built inside the guard too: messageText walks the transcript.
+    const span = guarded(() => startChatSpan({
       model: model.id,
       chain: "agent",
       ...(opts.effort && { effort: opts.effort }),
@@ -36,18 +37,21 @@ export function tracedStreamFn(inner: StreamFn, opts: { captureContent: boolean;
       ...(options?.temperature !== undefined && { temperature: options.temperature }),
       messages: context.messages.map((m) => ({ role: m.role === "toolResult" ? "tool" : m.role, content: messageText(m) })),
       captureContent: opts.captureContent,
-    });
+    }), undefined);
     let stream: Awaited<ReturnType<StreamFn>>;
     try {
       stream = await inner(model, context, options);
     } catch (err) {
-      endChatSpan(span, { error: (err as Error).message });
+      if (span) endChatSpan(span, { error: (err as Error).message });
       throw err;
     }
-    stream.result().then(
-      (msg) => endChatSpan(span, { msg, text: messageText(msg), captureContent: opts.captureContent }),
-      (err: unknown) => endChatSpan(span, { error: (err as Error).message }),
-    );
+    // Not awaited: the agent loop consumes the stream. Both handlers are guarded, so neither can reject.
+    if (span) {
+      stream.result().then(
+        (msg) => guarded(() => endChatSpan(span, { msg, text: messageText(msg), captureContent: opts.captureContent }), undefined),
+        (err: unknown) => endChatSpan(span, { error: String((err as Error)?.message ?? err) }),
+      );
+    }
     return stream;
   };
 }
