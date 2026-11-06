@@ -1,6 +1,6 @@
 import { pino } from "pino";
 import { InMemorySpanExporter, type ReadableSpan } from "@opentelemetry/sdk-trace";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { diag } from "@opentelemetry/api";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import { tracedStreamFn } from "../src/agent/index.js";
@@ -11,7 +11,8 @@ import { loadConfig } from "../src/config/index.js";
 import { Router } from "../src/router/index.js";
 import type { Skill, SkillContext } from "../src/skills/types.js";
 import type { Task } from "../src/task.js";
-import { ReportingExporter, startTelemetry, tracingEnabled } from "../src/telemetry/index.js";
+import { messageText, thinkingChars } from "../src/agent/message.js";
+import { ReportingExporter, startTelemetry, telemetryResource, tracingEnabled } from "../src/telemetry/index.js";
 
 // The global tracer provider can be set once per process; vitest runs each test file in its own.
 const exporter = new InMemorySpanExporter();
@@ -47,6 +48,30 @@ describe("telemetry config", () => {
       loadConfig({ ...base, NEOTAGS_CONFIG: "f", OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT: "false" }, () => "telemetry:\n  captureContent: true\n")
         .telemetry.captureContent,
     ).toBe(false);
+  });
+});
+
+describe("telemetry resource", () => {
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("names the service neotags unless OTEL_SERVICE_NAME is set, and adds OTEL_RESOURCE_ATTRIBUTES", () => {
+    vi.stubEnv("OTEL_SERVICE_NAME", "");
+    vi.stubEnv("OTEL_RESOURCE_ATTRIBUTES", "");
+    expect(telemetryResource().attributes["service.name"]).toBe("neotags");
+    vi.stubEnv("OTEL_SERVICE_NAME", "neotags-staging");
+    vi.stubEnv("OTEL_RESOURCE_ATTRIBUTES", "deployment.environment=prod,team=sre");
+    expect(telemetryResource().attributes).toMatchObject({
+      "service.name": "neotags-staging", "deployment.environment": "prod", team: "sre",
+    });
+  });
+});
+
+describe("message helpers", () => {
+  it("counts thinking characters and renders text and tool calls", () => {
+    const m = { content: [{ type: "thinking", thinking: "hmm" }, { type: "text", text: "a" }, { type: "toolCall", name: "q", arguments: { x: 1 } }] } as never;
+    expect(thinkingChars(m)).toBe(3);
+    expect(messageText(m)).toBe('a\nq({"x":1})');
+    expect(messageText({ content: "plain" })).toBe("plain");
   });
 });
 

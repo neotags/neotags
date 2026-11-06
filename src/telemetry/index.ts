@@ -2,7 +2,7 @@ import { context, diag, DiagLogLevel, trace } from "@opentelemetry/api";
 import { AsyncLocalStorageContextManager } from "@opentelemetry/context-async-hooks";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import { OTLPTraceExporter } from "@opentelemetry/exporter-trace-otlp-proto";
-import { resourceFromAttributes } from "@opentelemetry/resources";
+import { detectResources, envDetector, resourceFromAttributes, type Resource } from "@opentelemetry/resources";
 import { BatchSpanProcessor, TracerProvider, type ReadableSpan, type SpanExporter } from "@opentelemetry/sdk-trace";
 import type { Logger } from "pino";
 
@@ -101,6 +101,14 @@ function routeDiagnostics(log: Log) {
   );
 }
 
+/**
+ * `service.name` neotags, overridden by OTEL_SERVICE_NAME; OTEL_RESOURCE_ATTRIBUTES adds the rest, e.g.
+ * `deployment.environment=prod` to tell environments apart in OpenObserve or Langfuse.
+ */
+export function telemetryResource(): Resource {
+  return resourceFromAttributes({ "service.name": "neotags" }).merge(detectResources({ detectors: [envDetector] }));
+}
+
 export function startTelemetry(
   opts: { env?: NodeJS.ProcessEnv; exporter?: SpanExporter; log?: Log } = {},
 ): Telemetry | undefined {
@@ -109,7 +117,7 @@ export function startTelemetry(
   if (opts.log) routeDiagnostics(opts.log);
   const exporter = opts.exporter ?? new OTLPTraceExporter();
   const provider = new TracerProvider({
-    resource: resourceFromAttributes({ "service.name": env.OTEL_SERVICE_NAME || "neotags" }),
+    resource: telemetryResource(),
     spanProcessors: [new BatchSpanProcessor({ exporter: opts.log ? new ReportingExporter(exporter, opts.log) : exporter })],
   });
   // Without a context manager every span is a root: the router's task span would not parent the LLM calls.

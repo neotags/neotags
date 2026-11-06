@@ -1,5 +1,6 @@
 import { diag, INVALID_SPAN_CONTEXT, SpanKind, SpanStatusCode, trace, type Attributes, type Span } from "@opentelemetry/api";
-import type { AssistantMessage, Message } from "@earendil-works/pi-ai";
+import type { AssistantMessage } from "@earendil-works/pi-ai";
+import { messageText, thinkingChars } from "../agent/message.js";
 
 // A proxy until startTelemetry registers a provider; a no-op when tracing is off.
 const tracer = trace.getTracer("neotags");
@@ -117,7 +118,7 @@ function closeChatSpan(span: Span, outcome: ChatOutcome) {
   if ("error" in outcome) return fail(span, outcome.error);
   const { msg } = outcome;
   const finish = msg.rawStopReason ?? FINISH[msg.stopReason] ?? msg.stopReason;
-  const thinking = msg.content.reduce((n, c) => n + (c.type === "thinking" ? c.thinking.length : 0), 0);
+  const thinking = thinkingChars(msg);
   span.setAttributes({
     "gen_ai.response.model": msg.responseModel ?? msg.model,
     ...(msg.responseId && { "gen_ai.response.id": msg.responseId }),
@@ -136,13 +137,4 @@ function closeChatSpan(span: Span, outcome: ChatOutcome) {
     });
   }
   if (msg.stopReason === "error" || msg.stopReason === "aborted") fail(span, msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`);
-}
-
-/** Span text of a pi message: its text parts, tool calls as `name(args)`. Images and thinking are left out. */
-export function messageText(m: Pick<Message, "content">): string {
-  if (typeof m.content === "string") return m.content;
-  return (m.content as { type: string; text?: string; name?: string; arguments?: unknown }[])
-    .map((c) => (c.type === "text" ? c.text : c.type === "toolCall" ? `${c.name}(${JSON.stringify(c.arguments)})` : undefined))
-    .filter(Boolean)
-    .join("\n");
 }

@@ -1,7 +1,8 @@
 import { Agent, type AgentTool, type BeforeToolCallResult, type StreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Config, Effort } from "../config/index.js";
 import type { Decision } from "../guardrails/policy.js";
-import { endChatSpan, guarded, messageText, startChatSpan } from "../telemetry/spans.js";
+import { endChatSpan, guarded, startChatSpan } from "../telemetry/spans.js";
+import { messageText } from "./message.js";
 import { createGateway, type Gateway } from "./models.js";
 
 /** The configured effort as a pi thinking level; unset leaves the gateway's default. */

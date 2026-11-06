@@ -1,6 +1,7 @@
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import type { ChainName, Config, Effort } from "../config/index.js";
 import { endChatSpan, startChatSpan } from "../telemetry/spans.js";
+import { thinkingChars } from "./message.js";
 import { createGateway, type ChainStep, type Gateway, type ModelPolicy } from "./models.js";
 
 export interface ChatMessage {
@@ -208,7 +209,7 @@ export class PiLlmClient implements LlmClient {
           continue;
         }
         if (!text) {
-          const thinking = msg.content.reduce((n, c) => n + (c.type === "thinking" ? c.thinking.length : 0), 0);
+          const thinking = thinkingChars(msg);
           throw new LlmError(
             `LLM returned no text content (stopReason=${msg.stopReason}, output tokens=${msg.usage.output}, thinking chars=${thinking}, maxTokens=${budget ?? "default"})`,
           );

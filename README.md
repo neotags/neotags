@@ -45,6 +45,7 @@ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT=https://langfuse.example.com/api/public/otel/
 OTEL_EXPORTER_OTLP_HEADERS="Authorization=Basic%20<base64>"
 
 OTEL_SERVICE_NAME=neotags   # default
+OTEL_RESOURCE_ATTRIBUTES=deployment.environment=prod   # optional: more resource attributes, e.g. to tell environments apart
 ```
 
 - **Quality.** Prompts and replies are left off spans by default. `telemetry.captureContent: true` (or `OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true`) adds them as `gen_ai.prompt.N.*` / `gen_ai.completion.0.*`, the shape OpenObserve and Langfuse show as a generation's input and output and run evaluations on. They are already redacted, but they are Slack threads and files: anyone who can read the traces can read them.
