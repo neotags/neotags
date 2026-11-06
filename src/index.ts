@@ -27,6 +27,10 @@ if (llmConfigured(cfg.llm)) {
     CHAINS.map((c) => [c, gateway.policy.steps(c).map((s) => (s.effort ? `${s.model.id}@${s.effort}` : s.model.id))]),
   );
   log.info({ chains }, "llm configured");
+  if (cfg.llm.chains && (cfg.llm.model || cfg.llm.routerModel)) {
+    log.warn("llm.model / llm.routerModel (or LLM_MODEL / LLM_ROUTER_MODEL) are ignored because llm.chains is set");
+  }
+  if (!cfg.llm.chains && Object.keys(cfg.llm.models).length > 0) log.warn("llm.models is ignored without llm.chains");
 } else log.warn("no LLM configured (llm.model or llm.chains); requests cannot be routed until it is");
 
 let onyx: OnyxClient | undefined;

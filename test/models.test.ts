@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { CircuitBreaker, type BreakerState } from "../src/agent/breaker.js";
-import { ModelUnavailableError, createLlm, effortRequest } from "../src/agent/llm.js";
+import { ModelUnavailableError, PiLlmClient, createLlm, effortRequest, mergeBody } from "../src/agent/llm.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 
@@ -12,7 +12,7 @@ const cfgFor = (yaml: string, env: Record<string, string> = {}) => loadConfig({ 
 
 const chains = (body: string) => `llm:\n  baseUrl: http://gw.test/v1\n${body}`;
 const flash = `  models:
-    flash: { id: flash-model, reasoning: true }
+    flash: { id: flash-model, reasoning: true, thinkingLevelMap: { max: max } }
   chains:
     agent: [{ model: flash, effort: high, finalEffort: max }]
     job: [{ model: flash, effort: high }]
@@ -65,6 +65,9 @@ describe("model chains config", () => {
     expect(() => cfgFor(chains(flash.replace(/ {4}job:.*\n/, "")))).toThrow(/job/);
     expect(() => cfgFor(chains(flash.replace("reasoning: true", "reasoning: false")))).toThrow(/not a reasoning model/);
     expect(() => cfgFor(chains(flash.replace("effort: low", "effort: extreme")))).toThrow();
+    // agent runs stream through pi-ai, which lowers an unmapped "max"
+    expect(() => cfgFor(chains(flash.replace(", thinkingLevelMap: { max: max }", "")))).toThrow(/needs thinkingLevelMap.max/);
+    expect(() => cfgFor(chains(flash.replace(", thinkingLevelMap: { max: max }", "").replace(", finalEffort: max", "")))).not.toThrow();
     // effort "none" is fine on any model
     const plain = flash.replace("reasoning: true", "reasoning: false").replace(/effort: \w+(, finalEffort: \w+)?/g, "effort: none");
     expect(() => cfgFor(chains(plain))).not.toThrow();
@@ -94,63 +97,161 @@ describe("CircuitBreaker", () => {
     let t = 0;
     const states: BreakerState[] = [];
     const b = new CircuitBreaker({ failures: 5, windowMs: 60_000, cooldownMs: 120_000, now: () => t, onChange: (s) => states.push(s) });
-    return { b, states, tick: (ms: number) => (t += ms) };
+    const fail = (n: number) => {
+      for (let i = 0; i < n; i++) b.acquire()!.failure("boom");
+    };
+    return { b, states, fail, tick: (ms: number) => (t += ms) };
   };
 
-  it("opens after 5 failures within the window and fails fast while open", () => {
-    const { b, states } = make();
-    for (let i = 0; i < 4; i++) b.failure();
-    expect(b.tryAcquire()).toBe(true);
-    b.failure();
+  it("opens after 5 failed calls within the window and fails fast while open", () => {
+    const { b, states, fail } = make();
+    fail(4);
+    expect(b.state).toBe("closed");
+    fail(1);
     expect(b.state).toBe("open");
-    expect(b.tryAcquire()).toBe(false);
+    expect(b.acquire()).toBeUndefined();
+    expect(b.lastError).toBe("boom");
     expect(states).toEqual(["open"]);
   });
 
-  it("does not count failures older than the window", () => {
-    const { b, tick } = make();
-    for (let i = 0; i < 4; i++) b.failure();
+  it("does not count failures older than the window, nor released calls", () => {
+    const { b, fail, tick } = make();
+    fail(4);
     tick(60_000);
-    b.failure();
+    fail(1);
+    for (let i = 0; i < 10; i++) b.acquire()!.release();
     expect(b.state).toBe("closed");
   });
 
-  it("lets one probe through after the cooldown; success closes", () => {
-    const { b, states, tick } = make();
-    for (let i = 0; i < 5; i++) b.failure();
+  it("lets one probe through after the cooldown; its success closes", () => {
+    const { b, states, fail, tick } = make();
+    fail(5);
     tick(119_999);
-    expect(b.tryAcquire()).toBe(false);
+    expect(b.acquire()).toBeUndefined();
     tick(1);
-    expect(b.tryAcquire()).toBe(true); // the probe
-    expect(b.tryAcquire()).toBe(false); // everyone else waits for it
-    b.success();
+    const probe = b.acquire()!;
+    expect(b.acquire()).toBeUndefined(); // everyone else waits for the probe
+    probe.success();
     expect(b.state).toBe("closed");
-    expect(b.tryAcquire()).toBe(true);
+    expect(b.acquire()).toBeDefined();
     expect(states).toEqual(["open", "half-open", "closed"]);
   });
 
   it("reopens for another cooldown when the probe fails; a released probe frees the slot", () => {
-    const { b, tick } = make();
-    for (let i = 0; i < 5; i++) b.failure();
+    const { b, fail, tick } = make();
+    fail(5);
     tick(120_000);
-    expect(b.tryAcquire()).toBe(true);
-    b.release();
-    expect(b.tryAcquire()).toBe(true);
-    b.failure();
+    b.acquire()!.release();
+    b.acquire()!.failure();
     expect(b.state).toBe("open");
     tick(119_000);
-    expect(b.tryAcquire()).toBe(false);
+    expect(b.acquire()).toBeUndefined();
     tick(1_000);
     expect(b.state).toBe("half-open");
   });
 
-  it("ignores failures reported while already open", () => {
-    const { b, tick } = make();
-    for (let i = 0; i < 5; i++) b.failure();
-    tick(60_000);
-    b.failure(); // a call that started before the breaker opened
-    tick(60_000);
+  it("only the probe decides while half-open: calls from before the breaker opened change nothing", () => {
+    const { b, fail, tick } = make();
+    const early = [b.acquire()!, b.acquire()!];
+    fail(5);
+    tick(120_000);
+    const probe = b.acquire()!;
+    early[0]!.failure(); // timed out long after it started
+    early[1]!.success();
     expect(b.state).toBe("half-open");
+    expect(b.acquire()).toBeUndefined(); // still one probe at a time
+    probe.success();
+    expect(b.state).toBe("closed");
+  });
+
+  it("takes only the first outcome of a lease", () => {
+    const { b, fail, tick } = make();
+    fail(5);
+    tick(120_000);
+    const probe = b.acquire()!;
+    probe.success();
+    probe.failure();
+    expect(b.state).toBe("closed");
+  });
+});
+
+describe("mergeBody", () => {
+  it("merges nested objects and replaces everything else", () => {
+    expect(mergeBody({ a: 1, k: { x: 1, y: 1 }, l: [1] }, undefined, { k: { y: 2, z: 2 }, l: [2], b: 2 })).toEqual({ a: 1, k: { x: 1, y: 2, z: 2 }, l: [2], b: 2 });
+  });
+});
+
+describe("PiLlmClient with a model policy", () => {
+  const ok = { role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop", usage: { input: 1, output: 1 } } as never;
+  const err = (errorMessage: string) => ({ role: "assistant", content: [], stopReason: "error", errorMessage, usage: { input: 0, output: 0 } }) as never;
+  const setup = (failures = 5, maxRetries = 2) => {
+    const cfg = cfgFor(`llm:
+  failover: { breaker: { failures: ${failures} } }
+`, { LLM_MODEL: "m" });
+    const { policy } = createGateway(cfg);
+    const breaker = policy.steps("summary")[0]!.breaker;
+    const client = (complete: () => Promise<never>) => new PiLlmClient({ complete, policy, timeoutMs: 1000, maxRetries, sleep: async () => {} });
+    return { breaker, client };
+  };
+  const hi = [{ role: "user" as const, content: "hi" }];
+
+  it("counts a failed call once, however many retries it made", async () => {
+    const { breaker, client } = setup();
+    const llm = client(async () => err("503 service unavailable"));
+    for (let i = 0; i < 4; i++) await expect(llm.chat(hi)).rejects.toThrow(/after 3 attempts/);
+    expect(breaker.state).toBe("closed"); // 12 attempts, 4 calls
+    await expect(llm.chat(hi)).rejects.toThrow(/after 3 attempts/);
+    expect(breaker.state).toBe("open");
+  });
+
+  it("counts a call that recovered on retry as a success", async () => {
+    const { breaker, client } = setup(1);
+    let n = 0;
+    const llm = client(async () => (n++ % 2 === 0 ? err("502 bad gateway") : ok));
+    for (let i = 0; i < 3; i++) await llm.chat(hi);
+    expect(breaker.state).toBe("closed");
+  });
+
+  it("does not count rejections of the request's own content, but does count other 400s", async () => {
+    const { breaker, client } = setup(2, 0);
+    for (const m of ["400 This model's maximum context length is 131072 tokens", "400 prompt is too long", "400 content filter triggered"]) {
+      await expect(client(async () => err(m)).chat(hi)).rejects.toThrow(m);
+    }
+    expect(breaker.state).toBe("closed");
+    const unknownModel = client(async () => err("400 Invalid model name passed in model=nope"));
+    await expect(unknownModel.chat(hi)).rejects.toThrow(/Invalid model name/);
+    await expect(unknownModel.chat(hi)).rejects.toThrow(/Invalid model name/);
+    expect(breaker.state).toBe("open");
+  });
+
+  it("says why the model is unavailable", async () => {
+    const { client } = setup(1, 0);
+    const llm = client(async () => err("401 invalid api key"));
+    await expect(llm.chat(hi)).rejects.toThrow(/401/);
+    const e = await llm.chat(hi).catch((x: unknown) => x);
+    expect(e).toBeInstanceOf(ModelUnavailableError);
+    expect((e as Error).message).toMatch(/chain "summary".*last error: 401 invalid api key/);
+  });
+
+  it("deep-merges per-effort fields over llm.extraBody and the payload", async () => {
+    const cfg = cfgFor(`llm:
+  extraBody: { chat_template_kwargs: { foo: 1 } }
+  models:
+    m: { id: m, effortBody: { none: { chat_template_kwargs: { enable_thinking: false } } } }
+  chains:
+    agent: [{ model: m, effort: none }]
+    job: [{ model: m, effort: none }]
+    gate: [{ model: m, effort: none }]
+    summary: [{ model: m, effort: none }]
+`);
+    const { policy } = createGateway(cfg);
+    let payload: unknown;
+    const complete = async (_c: never, o: { onPayload: (p: unknown) => unknown }) => {
+      payload = o.onPayload({ model: "m", chat_template_kwargs: { from_pi: true } });
+      return ok;
+    };
+    await new PiLlmClient({ complete: complete as never, policy, extraBody: cfg.llm.extraBody, timeoutMs: 1000, maxRetries: 0 }).chat(hi);
+    expect(payload).toEqual({ model: "m", chat_template_kwargs: { from_pi: true, foo: 1, enable_thinking: false } });
   });
 });
 
@@ -186,7 +287,7 @@ describe("chains against a fake gateway", () => {
 
   it("sends the effort the way the model's compat asks for (deepseek thinking switch / OpenAI reasoning_effort)", async () => {
     const gw = await fakeGateway();
-    const models = `    ds: { id: ds-model, reasoning: true, compat: { thinkingFormat: deepseek, supportsReasoningEffort: true }, effortBody: { none: { extra_off: true } } }
+    const models = `    ds: { id: ds-model, reasoning: true, compat: { thinkingFormat: deepseek, supportsReasoningEffort: true }, thinkingLevelMap: { max: max }, effortBody: { none: { extra_off: true } } }
     oa: { id: oa-model, reasoning: true, compat: { supportsReasoningEffort: true } }
 `;
     const chainsYaml = `    agent: [{ model: ds, effort: max }]

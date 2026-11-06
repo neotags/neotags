@@ -35,7 +35,7 @@ export interface RouterDeps {
   botName: string;
   notifier: Notifier;
   skills: Skill[];
-  /** Absent when no LLM is configured (llm.model); the router then explains how to fix that. */
+  /** Absent when no LLM is configured (llm.chains or llm.model); the router then explains how to fix that. */
   llm?: LlmClient;
   /** Builds the per-task skill context (Slack reader, Onyx, ...). */
   context: () => SkillContext | undefined;
@@ -103,7 +103,7 @@ export class Router {
 
     if (!task.text.trim()) return say(`Hi <@${task.actor.id}>! ${this.help()}`);
     if (!this.d.llm) {
-      return say("I need an LLM to understand requests, and none is configured (set `llm.model` / `LLM_MODEL`).");
+      return say("I need an LLM to understand requests, and none is configured (set `llm.chains` with `llm.models`, or `llm.model` / `LLM_MODEL`).");
     }
 
     const ctx = this.d.context();

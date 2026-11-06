@@ -160,6 +160,11 @@ const fileSchema = z.object({
           if (thinks && !(model.reasoning ?? llm.reasoning)) {
             ctx.addIssue({ code: "custom", path, message: `model "${entry.model}" is not a reasoning model; only effort "none" applies` });
           }
+          // Agent runs stream through pi-ai, which lowers a level the model does not map; "max" must be mapped.
+          const max = [entry.effort, entry.finalEffort].includes("max");
+          if (name === "agent" && max && typeof model.thinkingLevelMap?.max !== "string") {
+            ctx.addIssue({ code: "custom", path, message: `model "${entry.model}" needs thinkingLevelMap.max for effort "max" in the agent chain` });
+          }
         });
       }
     })

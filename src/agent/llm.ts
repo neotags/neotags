@@ -53,8 +53,8 @@ export class LlmError extends Error {
 
 /** Every model of the chain has its breaker open: fail fast so the caller can degrade instead of waiting on timeouts. */
 export class ModelUnavailableError extends LlmError {
-  constructor(public readonly chain: ChainName) {
-    super(`model unavailable: every model of chain "${chain}" is failing (circuit breaker open)`);
+  constructor(public readonly chain: ChainName, lastError?: string) {
+    super(`model unavailable: every model of chain "${chain}" is failing (circuit breaker open)${lastError ? `; last error: ${lastError}` : ""}`);
     this.name = "ModelUnavailableError";
   }
 }
@@ -74,8 +74,8 @@ export interface LlmDeps {
   outputTokens?: Partial<Record<Purpose, number>>;
   /** Default sampling temperature (llm.temperature); undefined sends none, leaving the gateway's default. */
   temperature?: number;
-  /** Picks the model and effort per attempt and tracks failures; without it every call goes to `complete` as is. */
-  policy?: Pick<ModelPolicy, "pick">;
+  /** Picks the model and effort per call and tracks failures; without it every call goes to `complete` as is. */
+  policy?: Pick<ModelPolicy, "pick"> & Partial<Pick<ModelPolicy, "steps">>;
   /** Chain for every call of this client unless the call names one (e.g. "gate" for the router). */
   chain?: ChainName;
 }
@@ -93,6 +93,23 @@ export function effortRequest(step: Pick<ChainStep, "effort" | "effortBody"> | u
 
 // pi-ai reports failures as stopReason "error" rather than throwing; retry the transient ones.
 const TRANSIENT = /\b(408|409|425|429|500|502|503|504)\b|timed? ?out|econn|socket|unavailable|upstream|overloaded|rate limit/i;
+// Rejections of this request's content, not of the model: they must not open the breaker for everyone else.
+// Every other error counts, 400 included, since some gateways answer an unknown model name with a 400.
+const REQUEST_ERROR = /context[ _-]?(length|window)|maximum context|too long|too many tokens|content[ _-]?(filter|policy|management)|response_format/i;
+
+const isPlainObject = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
+
+/** Merge request-body fields: nested objects (e.g. chat_template_kwargs) are merged, everything else replaced. */
+export function mergeBody(...parts: (Record<string, unknown> | undefined)[]): Record<string, unknown> {
+  const out: Record<string, unknown> = {};
+  for (const part of parts) {
+    for (const [k, v] of Object.entries(part ?? {})) {
+      const prev = out[k];
+      out[k] = isPlainObject(prev) && isPlainObject(v) ? mergeBody(prev, v) : v;
+    }
+  }
+  return out;
+}
 
 export class PiLlmClient implements LlmClient {
   constructor(private d: LlmDeps) {}
@@ -110,73 +127,81 @@ export class PiLlmClient implements LlmClient {
     const chain = opts.chain ?? this.d.chain ?? (opts.purpose ? PURPOSE_CHAIN[opts.purpose] : "summary");
     let budget = opts.maxTokens ?? (opts.purpose ? this.d.outputTokens?.[opts.purpose] : undefined);
     const temperature = opts.temperature ?? this.d.temperature;
+    // One model per call, so the breaker counts failed calls, not retries; a later call moves on to the next
+    // model of the chain once this one's breaker opens.
+    const picked = this.d.policy?.pick(chain);
+    if (this.d.policy && !picked) {
+      const lastError = this.d.policy.steps?.(chain).map((s) => s.breaker.lastError).find(Boolean);
+      throw new ModelUnavailableError(chain, lastError);
+    }
+    const step = picked?.step;
+    const { reasoningEffort, body } = effortRequest(step);
+    const extra = mergeBody(this.d.extraBody, body);
+    const hasExtra = Object.keys(extra).length > 0;
+    let outcome: "success" | "failure" | "neutral" = "failure";
     let widened = false;
     let last = "LLM request failed";
-    for (let attempt = 0; attempt <= this.d.maxRetries; attempt++) {
-      if (attempt > 0) await sleep(Math.min(500 * 2 ** (attempt - 1), 8000));
-      // Picked per attempt: a retry moves on to the next model of the chain once this one's breaker opens.
-      const step = this.d.policy?.pick(chain);
-      if (this.d.policy && !step) throw new ModelUnavailableError(chain);
-      const { reasoningEffort, body } = effortRequest(step);
-      const merged = { ...this.d.extraBody, ...body };
-      const extra = Object.keys(merged).length > 0 ? merged : undefined;
-      let msg: AssistantMessage;
-      try {
-        msg = await this.d.complete(context, {
-          signal: AbortSignal.timeout(this.d.timeoutMs),
-          ...(temperature !== undefined && { temperature }),
-          ...(budget !== undefined && { maxTokens: budget }),
-          ...(reasoningEffort && { reasoningEffort }),
-          ...((opts.json || extra) && {
-            onPayload: (p: unknown) => ({
-              ...(p as object),
-              ...(opts.json && { response_format: { type: "json_object" } }),
-              ...extra,
+    try {
+      for (let attempt = 0; attempt <= this.d.maxRetries; attempt++) {
+        if (attempt > 0) await sleep(Math.min(500 * 2 ** (attempt - 1), 8000));
+        let msg: AssistantMessage;
+        try {
+          msg = await this.d.complete(context, {
+            signal: AbortSignal.timeout(this.d.timeoutMs),
+            ...(temperature !== undefined && { temperature }),
+            ...(budget !== undefined && { maxTokens: budget }),
+            ...(reasoningEffort && { reasoningEffort }),
+            ...((opts.json || hasExtra) && {
+              onPayload: (p: unknown) =>
+                mergeBody(p as Record<string, unknown>, opts.json ? { response_format: { type: "json_object" } } : undefined, extra),
             }),
-          }),
-        }, step);
-      } catch (err) {
-        step?.breaker.failure();
-        last = (err as Error).message;
-        if (TRANSIENT.test(last)) continue;
-        throw new LlmError(`LLM request failed: ${last}`);
+          }, step);
+        } catch (err) {
+          last = (err as Error).message;
+          outcome = REQUEST_ERROR.test(last) ? "neutral" : "failure";
+          if (TRANSIENT.test(last)) continue;
+          throw new LlmError(`LLM request failed: ${last}`);
+        }
+        if (msg.stopReason === "error" || msg.stopReason === "aborted") {
+          last = msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`;
+          outcome = REQUEST_ERROR.test(last) ? "neutral" : "failure";
+          if (TRANSIENT.test(last)) continue;
+          throw new LlmError(`LLM request failed: ${last}`);
+        }
+        outcome = "success"; // the model answered, even if the answer turns out unusable below
+        const text = msg.content
+          .filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text")
+          .map((c) => c.text)
+          .join("");
+        // A reasoning model spends the output budget thinking: the reply has no answer, or one cut off by the
+        // limit. Retry once with more room (not counted against the transient-error retries).
+        const cap = this.d.maxTokensCap;
+        if ((!text || msg.stopReason === "length") && !widened && budget !== undefined && cap !== undefined && budget < cap) {
+          widened = true;
+          budget = Math.min(Math.max(budget * 4, 1024), cap);
+          attempt--;
+          last = "output budget too small";
+          continue;
+        }
+        if (!text) {
+          const thinking = msg.content.reduce((n, c) => n + (c.type === "thinking" ? c.thinking.length : 0), 0);
+          throw new LlmError(
+            `LLM returned no text content (stopReason=${msg.stopReason}, output tokens=${msg.usage.output}, thinking chars=${thinking}, maxTokens=${budget ?? "default"})`,
+          );
+        }
+        return {
+          text,
+          usage: { promptTokens: msg.usage.input, completionTokens: msg.usage.output },
+          ...(step && { model: step.model.id }),
+          ...(step?.effort && { effort: step.effort }),
+        };
       }
-      // Permanent errors count too: a wrong model name must open the breaker like an outage does.
-      if (msg.stopReason === "error" || msg.stopReason === "aborted") {
-        step?.breaker.failure();
-        last = msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`;
-        if (TRANSIENT.test(last)) continue;
-        throw new LlmError(`LLM request failed: ${last}`);
-      }
-      step?.breaker.success();
-      const text = msg.content
-        .filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text")
-        .map((c) => c.text)
-        .join("");
-      // A reasoning model spends the output budget thinking: the reply has no answer, or one cut off by the
-      // limit. Retry once with more room (not counted against the transient-error retries).
-      const cap = this.d.maxTokensCap;
-      if ((!text || msg.stopReason === "length") && !widened && budget !== undefined && cap !== undefined && budget < cap) {
-        widened = true;
-        budget = Math.min(Math.max(budget * 4, 1024), cap);
-        attempt--;
-        last = "output budget too small";
-        continue;
-      }
-      if (!text) {
-        const thinking = msg.content.reduce((n, c) => n + (c.type === "thinking" ? c.thinking.length : 0), 0);
-        throw new LlmError(
-          `LLM returned no text content (stopReason=${msg.stopReason}, output tokens=${msg.usage.output}, thinking chars=${thinking}, maxTokens=${budget ?? "default"})`,
-        );
-      }
-      return {
-        text,
-        usage: { promptTokens: msg.usage.input, completionTokens: msg.usage.output },
-        ...(step && { model: step.model.id }),
-        ...(step?.effort && { effort: step.effort }),
-      };
+      throw new LlmError(`LLM request failed after ${this.d.maxRetries + 1} attempts: ${last}`);
+    } finally {
+      if (outcome === "success") picked?.lease.success();
+      else if (outcome === "failure") picked?.lease.failure(last);
+      else picked?.lease.release();
     }
-    throw new LlmError(`LLM request failed after ${this.d.maxRetries + 1} attempts: ${last}`);
   }
 }
 

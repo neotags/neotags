@@ -6,7 +6,7 @@ import {
 } from "@earendil-works/pi-ai";
 import { openAICompletionsApi } from "@earendil-works/pi-ai/api/openai-completions.lazy";
 import { CHAINS, type ChainName, type Config, type Effort } from "../config/index.js";
-import { CircuitBreaker, type BreakerState } from "./breaker.js";
+import { CircuitBreaker, type BreakerState, type Lease } from "./breaker.js";
 
 export const GATEWAY_PROVIDER = "gateway";
 const KEYLESS_PLACEHOLDER = "not-needed";
@@ -30,11 +30,15 @@ export class ModelPolicy {
   constructor(private chains: Record<ChainName, ChainStep[]>) {}
 
   /**
-   * Undefined when every model of the chain is unavailable; the caller degrades. A returned step holds a call
-   * slot on its breaker: report the outcome with `breaker.success()`, `failure()` or `release()`.
+   * Undefined when every model of the chain is unavailable; the caller degrades. The lease is the call's slot
+   * on the model's breaker: report the call's outcome on it once, with `success()`, `failure()` or `release()`.
    */
-  pick(chain: ChainName): ChainStep | undefined {
-    return this.chains[chain].find((s) => s.breaker.tryAcquire());
+  pick(chain: ChainName): { step: ChainStep; lease: Lease } | undefined {
+    for (const step of this.chains[chain]) {
+      const lease = step.breaker.acquire();
+      if (lease) return { step, lease };
+    }
+    return undefined;
   }
 
   /** The chain as configured, without touching breakers. */
