@@ -1,0 +1,6 @@
+data: {"type":"title","title":"Error increase in app_logs"}
+
+data: {"type":"message_delta","content":"Looking at the error rate"}
+
+data: {"type":"cancelled"}
+

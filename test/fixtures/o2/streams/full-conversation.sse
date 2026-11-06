@@ -1,0 +1,26 @@
+: ping
+
+data: {"type":"title","title":"Error increase in app_logs"}
+
+data: {"type":"message_delta","content":"Checking the schema of app_logs first."}
+
+data: {"type":"tool_call","tool":"StreamSchema","call_id":"call_01","message":"Reading the app_logs schema","context":{"stream_name":"app_logs","type":"logs"}}
+
+data: {"type":"tool_result","tool":"StreamSchema","call_id":"call_01","success":true,"message":"12 fields","summary":{"count":12}}
+
+data: {"type":"tool_call","tool":"SearchSQL","call_id":"call_02","message":"Counting errors by namespace","context":{"stream_name":"app_logs","type":"logs","request_body":{"query":{"sql":"SELECT namespace, count(*) AS errors FROM \"app_logs\" WHERE level = 'error' GROUP BY namespace ORDER BY errors DESC LIMIT 20","start_time":1793869200000000,"end_time":1793872800000000,"size":20}}}}
+
+: ping
+
+data: {"type":"tool_result","tool":"SearchSQL","call_id":"call_02","success":true,"message":"Query returned 3 rows","summary":{"count":3,"took":85},"call_args":{"stream_name":"app_logs","stream_type":"logs","request_body":{"query":{"sql":"SELECT namespace, count(*) AS errors FROM \"app_logs\" WHERE level = 'error' GROUP BY namespace ORDER BY errors DESC LIMIT 20","start_time":1793869200000000,"end_time":1793872800000000,"size":20}}}}
+
+data: {"type":"message_delta","content":"\n\nErrors rose mainly in "}
+
+data: {"type":"message_delta","content":"`payments`: 41 of the 57 errors "}
+
+data: {"type":"message_delta","content":"in the last hour."}
+
+data: {"type":"navigation_action","resource_type":"logs","action":"load_query","label":"Open the query in Logs","target":{"query":"SELECT namespace, count(*) AS errors FROM \"app_logs\" WHERE level = 'error' GROUP BY namespace ORDER BY errors DESC LIMIT 20","sql_mode":true,"stream":["app_logs"],"from":1793869200000000,"to":1793872800000000}}
+
+data: {"type":"complete","trace_id":"4bf92f3577b34da6a3ce929d0e0e4736"}
+

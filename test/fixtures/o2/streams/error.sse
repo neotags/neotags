@@ -1,0 +1,10 @@
+data: {"type":"title","title":"Error increase in app_logs"}
+
+data: {"type":"tool_call","tool":"SearchSQL","call_id":"call_03","message":"Counting errors by namespace","context":{"stream_name":"app_logs","type":"logs","request_body":{"query":{"sql":"SELECT namespce, count(*) FROM \"app_logs\" GROUP BY namespce LIMIT 20","start_time":1793869200000000,"end_time":1793872800000000,"size":20}}}}
+
+data: {"type":"tool_result","tool":"SearchSQL","call_id":"call_03","success":false,"message":"Unknown field: namespce","error_type":"invalid_query","suggestion":"Check the field name with StreamSchema."}
+
+data: {"type":"message_delta","content":"The first query used a wrong field name; retrying."}
+
+data: {"type":"error","error":"The investigation reached its step limit before finishing.","error_type":"budget_exhausted","suggestion":"Narrow the time range or ask about one namespace."}
+

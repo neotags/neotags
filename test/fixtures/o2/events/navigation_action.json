@@ -1,0 +1,1 @@
+{"type":"navigation_action","resource_type":"logs","action":"load_query","label":"Open the query in Logs","target":{"query":"SELECT namespace, count(*) AS errors FROM \"app_logs\" WHERE level = 'error' GROUP BY namespace ORDER BY errors DESC LIMIT 20","sql_mode":true,"stream":["app_logs"],"from":1793869200000000,"to":1793872800000000}}
