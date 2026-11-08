@@ -3,6 +3,7 @@ import type { Logger } from "pino";
 import type { ToolGuard } from "../agent/index.js";
 import type { Gateway } from "../agent/models.js";
 import type { Config } from "../config/index.js";
+import type { McpHub } from "../mcp/index.js";
 import { SkillPackIndex, loadSkillPacks } from "../tools/skillpacks.js";
 import { RunManager } from "./manager.js";
 import { PiAgentRunner } from "./pi-runner.js";
@@ -24,16 +25,33 @@ export async function loadConfiguredSkillPacks(cfg: Config, log: Pick<Logger, "i
 /** The run manager with the pi-agent-core runner, from config. Entries (O2 gateway, Slack) submit to it. */
 export function createRunManager(
   cfg: Config,
-  deps: { gateway: Gateway; index: SkillPackIndex; log: Logger; tools?: AgentTool<any>[]; guard?: ToolGuard },
+  deps: {
+    gateway: Gateway;
+    index: SkillPackIndex;
+    log: Logger;
+    /** MCP tools behind its tool guard (`startMcp`). */
+    mcp?: Pick<McpHub, "tools" | "unavailable" | "guard">;
+    tools?: AgentTool<any>[];
+    guard?: ToolGuard;
+  },
 ): RunManager {
   const a = cfg.agent;
+  const { mcp } = deps;
+  const tools = mcp ? () => [...mcp.tools(), ...(deps.tools ?? [])] : deps.tools;
+  const guard: ToolGuard | undefined = mcp
+    ? async (call) => {
+        const d = mcp.guard.check(call);
+        return d.ok && deps.guard ? deps.guard(call) : d;
+      }
+    : deps.guard;
   const runner = new PiAgentRunner({
     gateway: deps.gateway,
     index: deps.index,
     botName: cfg.bot.name,
     entries: a.entries,
-    ...(deps.tools && { tools: deps.tools }),
-    ...(deps.guard && { guard: deps.guard }),
+    ...(tools && { tools }),
+    ...(guard && { guard }),
+    ...(mcp && { unavailable: () => mcp.unavailable() }),
     firstTokenTimeoutMs: cfg.llm.failover.firstTokenTimeoutSec * 1000,
     idleTimeoutMs: cfg.llm.timeoutMs,
     maxRetries: cfg.llm.maxRetries,

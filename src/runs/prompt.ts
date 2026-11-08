@@ -8,10 +8,10 @@ const neutralize = (s: string) => s.replace(TAGS, (m) => m.replace("<", "‹"));
 const clean = (s: string) => neutralize(redact(s).text);
 
 /**
- * System prompt of a run. It depends only on the bot name, the loaded packs and the entry packs, never on the
- * question or the time, so it is the same prefix on every request (prefix caching on the gateway).
+ * System prompt of a run. It depends only on the bot name, the loaded packs, the entry packs and which data sources
+ * are down, never on the question or the time, so it is the same prefix on every request (prefix caching on the gateway).
  */
-export function systemPrompt(o: { botName: string; index: SkillPackIndex; entryPacks: string[] }): string {
+export function systemPrompt(o: { botName: string; index: SkillPackIndex; entryPacks: string[]; unavailable?: string[] }): string {
   const parts = [
     `You are ${o.botName}, a read-only SRE assistant. You investigate and explain; you never change anything, and you say so when asked to.`,
     [
@@ -46,6 +46,12 @@ export function systemPrompt(o: { botName: string; index: SkillPackIndex; entryP
     ].join(" "),
     "Language: answer in the language of the question.",
   );
+  // Last, so that a server going down or coming back changes only the end of the cached prefix.
+  if (o.unavailable?.length) {
+    parts.push(
+      `Unavailable data sources right now: ${o.unavailable.join(", ")}. Their tools fail. When the question needs one, say it could not be checked; never guess its data.`,
+    );
+  }
   return parts.join("\n\n");
 }
 

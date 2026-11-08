@@ -204,6 +204,57 @@ const fileSchema = z.object({
         .prefault({}),
       // On shutdown, how long running runs may finish; keep below terminationGracePeriodSeconds.
       drainSec: z.number().positive().default(640),
+      // One MCP tool output, after redaction; longer output is cut and the model is told to narrow the query.
+      toolOutputChars: z.number().int().positive().default(16_000),
+      // Enforced by the tool guard on SearchSQL and PrometheusRangeQuery calls, direct or through tools_call.
+      queryLimits: z
+        .object({
+          // A query without a time range gets the last `defaultRangeSec`; one longer than `maxRangeSec` is refused.
+          defaultRangeSec: z.number().int().positive().default(3600),
+          maxRangeSec: z.number().int().positive().default(86_400),
+          // SQL without a LIMIT gets `sqlDefaultLimit`; a LIMIT above `sqlMaxLimit` is refused.
+          sqlDefaultLimit: z.number().int().positive().default(100),
+          sqlMaxLimit: z.number().int().positive().default(1000),
+          // PromQL range queries: points per series (range / step) at most.
+          promMaxPoints: z.number().int().positive().default(1000),
+        })
+        .prefault({}),
+    })
+    .prefault({}),
+  // MCP servers (Streamable HTTP) whose allowlisted tools the agent gets, named <server>__<tool>.
+  mcp: z
+    .object({
+      servers: z
+        .array(
+          z.object({
+            // Prefix of the tool names; no underscores, so the first "__" in a tool name ends the server name.
+            name: z.string().regex(/^[a-z0-9][a-z0-9-]*$/, "lowercase letters, digits and dashes"),
+            url: z.string().url(),
+            // Request headers whose values come from env vars, e.g. { Authorization: O2_MCP_AUTH }. Never the value itself.
+            headersFromEnv: z.record(z.string().min(1), z.string().min(1)).default({}),
+            // Only these tools (names as the server lists them) are offered to the model.
+            allowTools: z.array(z.string().min(1)).min(1),
+            // O2 tools_call: the inner tool must be listed here; without it every tools_call is refused.
+            innerAllow: z.array(z.string().min(1)).optional(),
+            // Per tool, the values a parameter may take, e.g. { alerting_manage_rules: { operation: [list, get] } }.
+            // Also applies to the inner tool of a tools_call.
+            argAllow: z.record(z.string().min(1), z.record(z.string().min(1), z.array(z.string()).min(1))).default({}),
+          }),
+        )
+        .default([])
+        .superRefine((servers, ctx) => {
+          const seen = new Set<string>();
+          servers.forEach((s, i) => {
+            if (seen.has(s.name)) ctx.addIssue({ code: "custom", path: [i, "name"], message: `duplicate MCP server "${s.name}"` });
+            seen.add(s.name);
+          });
+        }),
+      // Arguments of one call, as JSON.
+      maxArgChars: z.number().int().positive().default(16_000),
+      connectTimeoutSec: z.number().positive().default(10),
+      callTimeoutSec: z.number().positive().default(60),
+      // A server that is down is retried in the background, backing off up to this.
+      reconnectMaxSec: z.number().positive().default(300),
     })
     .prefault({}),
   // Skill packs (Agent Skills: <pack>/SKILL.md + references/) mounted read-only. Only these files are loaded.

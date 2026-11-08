@@ -20,8 +20,10 @@ export interface PiRunnerOptions {
   botName: string;
   /** Skill packs in the system prompt per entry (agent.entries). */
   entries: Partial<Record<RunSource, string[]>>;
-  /** More tools (MCP, O07) next to read_skill / read_skill_ref. */
-  tools?: AgentTool<any>[];
+  /** More tools (MCP) next to read_skill / read_skill_ref; a function is read at the start of every run. */
+  tools?: AgentTool<any>[] | (() => AgentTool<any>[]);
+  /** Data sources (MCP servers) that are down at the start of a run; the system prompt names them. */
+  unavailable?: () => string[];
   /** Checked after the built-in rule that only registered tools run. */
   guard?: ToolGuard;
   firstTokenTimeoutMs: number;
@@ -70,7 +72,8 @@ export class PiAgentRunner implements AgentRunner {
     const { step, lease } = picked;
     const stats = { steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 }, model: step.model.id, ...(step.effort && { effort: step.effort }) };
 
-    const tools = [...skillPackTools(o.index), ...(o.tools ?? [])];
+    const extra = typeof o.tools === "function" ? o.tools() : (o.tools ?? []);
+    const tools = [...skillPackTools(o.index), ...extra];
     const names = new Set(tools.map((t) => t.name));
     const guard: ToolGuard = async (call) => {
       if (!names.has(call.name)) return { ok: false, reason: `unknown tool ${call.name}` };
@@ -93,7 +96,12 @@ export class PiAgentRunner implements AgentRunner {
     const initialLevel = thinkingLevel(step.effort);
     const agent = new Agent({
       initialState: {
-        systemPrompt: systemPrompt({ botName: o.botName, index: o.index, entryPacks: input.packs ?? o.entries[input.source] ?? [] }),
+        systemPrompt: systemPrompt({
+          botName: o.botName,
+          index: o.index,
+          entryPacks: input.packs ?? o.entries[input.source] ?? [],
+          unavailable: o.unavailable?.() ?? [],
+        }),
         model: step.model,
         tools,
         ...(initialLevel && { thinkingLevel: initialLevel }),
