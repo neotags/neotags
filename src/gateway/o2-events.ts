@@ -144,24 +144,20 @@ export function callMessage(t: PanelTool, lang: AnswerLang, other?: string): str
   return other ? `${m[lang]} (${lang === "zh" ? `org ${other}` : `in org ${other}`})` : m[lang];
 }
 
-/** Rows and milliseconds of an O2 search result, from what the run saw of it (the output may be cut). */
+/**
+ * Rows returned and milliseconds of an O2 search result. Only from a whole JSON result: guessing from a cut one could
+ * read a field of a hit as the total.
+ */
 export function resultSummary(output: string): { count?: number; took?: number } | undefined {
-  let count: number | undefined;
-  let took: number | undefined;
+  let v: unknown;
   try {
-    const v: unknown = JSON.parse(output);
-    if (isObj(v)) {
-      if (Array.isArray(v.hits)) count = v.hits.length;
-      else if (typeof v.total === "number") count = v.total;
-      if (typeof v.took === "number") took = v.took;
-    }
+    v = JSON.parse(output);
   } catch {
-    // Cut or not JSON: the leading fields are still there.
-    const t = /"took"\s*:\s*(\d+)/.exec(output);
-    const n = /"total"\s*:\s*(\d+)/.exec(output);
-    if (t) took = Number(t[1]);
-    if (n) count = Number(n[1]);
+    return undefined;
   }
+  if (!isObj(v)) return undefined;
+  const count = Array.isArray(v.hits) ? v.hits.length : undefined;
+  const took = typeof v.took === "number" ? v.took : undefined;
   if (count === undefined && took === undefined) return undefined;
   return { ...(count !== undefined && { count }), ...(took !== undefined && { took }) };
 }

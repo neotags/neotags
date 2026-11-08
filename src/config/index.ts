@@ -9,6 +9,8 @@ export type ChainName = (typeof CHAINS)[number];
 /** Where an agent run comes from; budgets and default skill packs are set per source. */
 export const RUN_SOURCES = ["o2", "slack", "job"] as const;
 export type RunSource = (typeof RUN_SOURCES)[number];
+/** An O2 org identifier (the `{org}` of its API paths). */
+export const O2_ORG_ID = /^[A-Za-z0-9_-]{1,64}$/;
 
 const effortSchema = z.enum(EFFORTS);
 
@@ -291,13 +293,13 @@ const fileSchema = z.object({
       port: z.number().int().min(1).max(65535).default(3001),
       // O2 org identifier -> MCP server that queries it, e.g. { default: o2, <org id>: o2prod }. Decides the run's
       // default org, and which queries get the panel's "View in Logs" button (only the current org's).
-      orgs: z.record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "an O2 org identifier"), z.string().min(1)).default({}),
+      orgs: z.record(z.string().regex(O2_ORG_ID, "an O2 org identifier"), z.string().min(1)).default({}),
       // Request body (the turn's history and page context); larger is refused.
       maxBodyKb: z.number().int().positive().default(4096),
       // Earlier turns kept for the model, newest first; older ones are dropped.
       maxHistoryChars: z.number().int().positive().default(48_000),
       // Runs waiting for a slot (all entries); beyond it a turn is refused with 429 turn_limit instead of queued.
-      maxQueued: z.number().int().nonnegative().default(8),
+      maxQueued: z.number().int().positive().default(8),
     })
     .prefault({}),
   // LLM traces over OTLP (OpenObserve, Langfuse, an OTel collector). The exporter is configured with the standard
@@ -313,8 +315,13 @@ const fileSchema = z.object({
   logLevel: z.string().default("info"),
 }).superRefine((cfg, ctx) => {
   const servers = new Set(cfg.mcp.servers.map((s) => s.name));
+  // One server per org: "current org" is decided by the server a query went through.
+  const taken = new Map<string, string>();
   for (const [org, server] of Object.entries(cfg.o2Gateway.orgs)) {
     if (!servers.has(server)) ctx.addIssue({ code: "custom", path: ["o2Gateway", "orgs", org], message: `MCP server "${server}" is not in mcp.servers` });
+    const other = taken.get(server);
+    if (other !== undefined) ctx.addIssue({ code: "custom", path: ["o2Gateway", "orgs", org], message: `MCP server "${server}" already queries org ${other}` });
+    taken.set(server, org);
   }
   for (const [entry, packs] of Object.entries(cfg.agent.entries)) {
     (packs ?? []).forEach((p, i) => {

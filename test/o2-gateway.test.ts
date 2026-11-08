@@ -9,7 +9,7 @@ import { EXECUTED_ARGS } from "../src/agent/executed.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 import { boundedContext, boundedHistory, createO2Gateway, orgNotes, type O2Gateway } from "../src/gateway/o2.js";
-import { cap, title } from "../src/gateway/o2-events.js";
+import { cap, resultSummary, title } from "../src/gateway/o2-events.js";
 import { answerLang } from "../src/lang.js";
 import { RunManager, type RunManagerOptions } from "../src/runs/manager.js";
 import { PiAgentRunner } from "../src/runs/pi-runner.js";
@@ -556,8 +556,18 @@ describe("O2 request mapping", () => {
     expect(boundedHistory(null, 100)).toEqual([]);
   });
 
-  it("replaces oversized page-context values", () => {
+  it("replaces oversized page-context values and caps the whole context", () => {
     expect(boundedContext({ a: "x".repeat(5000), b: 1 })).toEqual({ a: "[omitted: 5000 characters]", b: 1 });
+    const many = Object.fromEntries(Array.from({ length: 1000 }, (_, i) => [`k${i}`, "x".repeat(3999)]));
+    const out = boundedContext(many);
+    expect(JSON.stringify(out).length).toBeLessThan(40_000);
+    expect(out._omitted).toBe("the rest of the page context did not fit");
+  });
+
+  it("counts rows only from a whole result", () => {
+    expect(resultSummary(searchResult)).toEqual({ count: 3, took: 85 });
+    expect(resultSummary(`{"took":5,"hits":[{"total":3},`)).toBeUndefined();
+    expect(resultSummary("a,b\n1,2")).toBeUndefined();
   });
 
   it("names the current org's tools, or says none queries it", () => {
@@ -567,6 +577,8 @@ describe("O2 request mapping", () => {
       notes: [`The user is in O2 org ${PROD}; query it with the o2prod__ tools unless the data is in another org.`, "Other O2 orgs: default (o2__ tools)."],
     });
     expect(orgNotes("unknown", orgs).server).toBeUndefined();
+    // Not a configured org, however Object.prototype names it.
+    for (const id of ["constructor", "toString", "__proto__", "hasOwnProperty"]) expect(orgNotes(id, orgs).server).toBeUndefined();
     expect(orgNotes("unknown", orgs).notes[0]).toBe("The user is in O2 org unknown, which no data source here queries.");
   });
 
@@ -605,6 +617,9 @@ describe("config", () => {
   it("needs O2_AGENT_API_KEY when the O2 gateway is on, and org servers that exist", () => {
     expect(() => loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", NEOTAGS_CONFIG: "f" }, () => "o2Gateway: { enabled: true }")).toThrow(/O2_AGENT_API_KEY/);
     expect(() => loadConfig({ ...base, NEOTAGS_CONFIG: "f" }, () => "o2Gateway: { orgs: { default: nope } }")).toThrow(/not in mcp.servers/);
+    const twoOrgsOneServer = `mcp:\n  servers: [{ name: o2, url: "http://o2.test/mcp", allowTools: [SearchSQL] }]\no2Gateway: { orgs: { default: o2, other: o2 } }`;
+    expect(() => loadConfig({ ...base, NEOTAGS_CONFIG: "f" }, () => twoOrgsOneServer)).toThrow(/already queries org default/);
+    expect(() => loadConfig({ ...base, NEOTAGS_CONFIG: "f" }, () => "o2Gateway: { maxQueued: 0 }")).toThrow();
     expect(loadConfig(base).o2Gateway).toMatchObject({ enabled: false, port: 3001 });
   });
 });

@@ -2,7 +2,7 @@ import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { Logger } from "pino";
 import { z } from "zod";
-import type { Config } from "../config/index.js";
+import { O2_ORG_ID, type Config } from "../config/index.js";
 import { answerLang } from "../lang.js";
 import type { HistoryTurn, RunInput, RunManager } from "../runs/index.js";
 import { O2Turn } from "./o2-stream.js";
@@ -29,10 +29,11 @@ const QueryRequest = z.object({
 
 const SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TRACEPARENT = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/;
-const ORG = /^[A-Za-z0-9_-]{1,64}$/;
 const EMAIL = /^[^\s@]{1,128}@[^\s@]{1,128}$/;
 /** One value of the page context larger than this is replaced by a note: the context is a starting point, not data. */
 const CONTEXT_VALUE_CHARS = 4000;
+/** All of the page context; values past it are dropped, so a page cannot fill the prompt. */
+const CONTEXT_CHARS = 32_000;
 const FEEDBACK_BODY_BYTES = 64 * 1024;
 
 class HttpError extends Error {
@@ -117,9 +118,16 @@ export function boundedHistory(raw: { role: string; content: unknown }[] | null 
 /** The page context with oversized values (a pasted log, a huge field list) replaced by a note. */
 export function boundedContext(ctx: Record<string, unknown> | null | undefined): Record<string, unknown> {
   const out: Record<string, unknown> = {};
+  let total = 0;
   for (const [k, v] of Object.entries(ctx ?? {})) {
     const size = typeof v === "string" ? v.length : (JSON.stringify(v) ?? "").length;
-    out[k] = size > CONTEXT_VALUE_CHARS ? `[omitted: ${size} characters]` : v;
+    const value = size > CONTEXT_VALUE_CHARS ? `[omitted: ${size} characters]` : v;
+    total += k.length + (value === v ? size : 32);
+    if (total > CONTEXT_CHARS) {
+      out["_omitted"] = "the rest of the page context did not fit";
+      break;
+    }
+    out[k] = value;
   }
   return out;
 }
@@ -129,7 +137,8 @@ export function boundedContext(ctx: Record<string, unknown> | null | undefined):
  * configured org. The org id is checked against the identifier format before it goes anywhere near the prompt.
  */
 export function orgNotes(org: string | undefined, orgs: Record<string, string>): { notes: string[]; server?: string } {
-  const server = org ? orgs[org] : undefined;
+  // Own keys only: an org id such as "constructor" must not find Object.prototype.
+  const server = org && Object.hasOwn(orgs, org) ? orgs[org] : undefined;
   const others = Object.entries(orgs).filter(([id]) => id !== org);
   const notes: string[] = [];
   if (org && server) notes.push(`The user is in O2 org ${org}; query it with the ${server}__ tools unless the data is in another org.`);
@@ -160,7 +169,7 @@ export function createO2Gateway(o: O2GatewayOptions) {
     const traceparent = header(req, "traceparent")?.trim().toLowerCase();
     const trace = traceparent ? TRACEPARENT.exec(traceparent) : null;
     const context = boundedContext(body.context);
-    const orgId = typeof context.org_id === "string" && ORG.test(context.org_id) ? context.org_id : undefined;
+    const orgId = typeof context.org_id === "string" && O2_ORG_ID.test(context.org_id) ? context.org_id : undefined;
     const { notes, server } = orgNotes(orgId, cfg.orgs);
     const history = boundedHistory(body.history, cfg.maxHistoryChars);
     const lang = answerLang(question);
@@ -264,6 +273,8 @@ export function createO2Gateway(o: O2GatewayOptions) {
         server.once("error", reject);
         server.listen(port, host, () => {
           server.off("error", reject);
+          // After startup a server error (EMFILE on accept, ...) is logged; unhandled it would take the process down.
+          server.on("error", (err) => log.error({ err }, "o2 gateway server error"));
           resolve();
         });
       }),
