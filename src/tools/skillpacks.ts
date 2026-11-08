@@ -5,15 +5,34 @@ import { Type } from "@earendil-works/pi-ai";
 import { parse } from "yaml";
 import { z } from "zod";
 
-// What a pack may run in the execution sandbox (§13 of the design). Parsed here, enforced by the tool guard.
+// Headers the executor never injects a credential into.
+const HOP_HEADERS = new Set(["host", "content-length", "transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade", "proxy-authorization", "proxy-connection"]);
+
+// What a pack may run in the execution sandbox (§13 of the design). Parsed here, enforced by the tool guard. The
+// rules are the executor's (executor/executor/policy.py), so a declaration it would refuse fails here, at load time.
 const sandboxSchema = z.object({
   net: z.array(z.string().min(1)).default([]),
-  tools: z.array(z.string().min(1)).default([]),
+  // Bare command names: the executor looks them up on its PATH.
+  tools: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/, "a bare command name")).default([]),
   credentials: z
-    .array(z.object({ name: z.string().min(1), hosts: z.array(z.string().min(1)).min(1), header: z.string().min(1) }))
+    .array(
+      z.object({
+        name: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/, "an upper-case env var name"),
+        hosts: z.array(z.string().min(1)).min(1),
+        header: z
+          .string()
+          .regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/, "a header name")
+          .refine((h) => !HOP_HEADERS.has(h.toLowerCase()), "not a header a credential may go into"),
+      }),
+    )
     .default([]),
   limits: z
-    .object({ cpu: z.union([z.number(), z.string()]).optional(), mem: z.string().optional(), timeoutSec: z.number().positive().optional() })
+    .object({
+      // Average cores over the timeout (a number, not "500m").
+      cpu: z.number().positive().optional(),
+      mem: z.union([z.number().int().positive(), z.string().regex(/^\d+(Mi|Gi)$/, "like 512Mi")]).optional(),
+      timeoutSec: z.number().positive().optional(),
+    })
     .optional(),
 });
 export type SandboxSpec = z.infer<typeof sandboxSchema>;

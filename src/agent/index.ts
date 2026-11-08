@@ -11,7 +11,8 @@ import { createGateway, type Gateway } from "./models.js";
 export const thinkingLevel = (e: Effort | undefined): ThinkingLevel | undefined => (e === undefined ? undefined : e === "none" ? "off" : e);
 
 /** Decides, in code, whether a tool call may run. The model cannot bypass or override it. */
-export type ToolGuard = (call: { name: string; args: unknown }) => Decision | Promise<Decision>;
+/** `packs`: the skill packs of the run making the call (agent runs only), for checks scoped to them. */
+export type ToolGuard = (call: { name: string; args: unknown; packs?: readonly string[] }) => Decision | Promise<Decision>;
 
 /** Adapt a guardrail decision to pi's `beforeToolCall` hook; a denial is reported back to the model. */
 export function toBeforeToolCall(guard: ToolGuard, onDenied?: (toolCallId: string, reason: string) => void) {

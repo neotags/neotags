@@ -25,7 +25,7 @@ export function splitToolName(name: string): { server: string; tool: string } | 
 }
 
 type Obj = Record<string, unknown>;
-const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+export const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 const deny = (reason: string): Decision => ({ ok: false, reason });
 const OK: Decision = { ok: true };
 

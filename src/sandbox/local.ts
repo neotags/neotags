@@ -1,4 +1,5 @@
 import { request } from "node:http";
+import { isObj } from "../guardrails/tools.js";
 import type { SandboxSpec } from "../tools/skillpacks.js";
 import { SandboxError, type ExecEntry, type ExecResult, type Sandbox } from "./types.js";
 
@@ -59,17 +60,30 @@ export class LocalSandbox implements Sandbox {
     const err = isObj(body) && isObj(body.error) ? body.error : {};
     const code = typeof err.code === "string" ? err.code : `http_${status}`;
     const message = typeof err.message === "string" ? err.message : `the executor answered HTTP ${status}`;
-    // 503 is the self-check refusing every execution (sandbox_unavailable).
-    if (status === 503) return new SandboxError("unavailable", code, `the execution sandbox is unavailable: ${message}`);
+    // 503 is the self-check refusing every execution (sandbox_unavailable); 502 and 504 cannot have run anything.
+    if (status === 502 || status === 503 || status === 504) return new SandboxError("unavailable", code, `the execution sandbox is unavailable: ${message}`);
     if (status === 200) return new SandboxError("refused", "invalid_response", "the executor's answer is not an execution result");
+    if (body === undefined) return new SandboxError("refused", code, `the executor answered HTTP ${status} without JSON`);
     return new SandboxError("refused", code, message);
   }
 
   private call(method: string, path: string, body: unknown, waitMs: number, signal?: AbortSignal): Promise<{ status: number; body: unknown }> {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     return new Promise((resolve, reject) => {
-      const unavailable = (detail: string) => reject(new SandboxError("unavailable", "executor_unreachable", `the execution sandbox is unavailable: ${detail}`));
-      if (signal?.aborted) return reject(new SandboxError("refused", "aborted", "the execution was cancelled"));
+      const aborted = () => new SandboxError("refused", "aborted", "the execution was cancelled");
+      // The first outcome wins; later errors from tearing the request down are ignored.
+      let settled = false;
+      let deadline: NodeJS.Timeout | undefined;
+      const done = (err: SandboxError | undefined, value?: { status: number; body: unknown }) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(deadline);
+        if (err) reject(err);
+        else resolve(value!);
+      };
+      const unavailable = (detail: string) =>
+        done(signal?.aborted ? aborted() : new SandboxError("unavailable", "executor_unreachable", `the execution sandbox is unavailable: ${detail}`));
+      if (signal?.aborted) return reject(aborted());
       const req = request(
         {
           socketPath: this.o.socketPath,
@@ -84,32 +98,32 @@ export class LocalSandbox implements Sandbox {
           res.on("data", (c: Buffer) => {
             size += c.length;
             if (size > this.maxResponseBytes) {
+              done(new SandboxError("refused", "response_too_large", `the executor's answer is over ${this.maxResponseBytes} bytes`));
               req.destroy();
-              reject(new SandboxError("refused", "response_too_large", `the executor's answer is over ${this.maxResponseBytes} bytes`));
               return;
             }
             chunks.push(c);
           });
           res.on("error", (e) => unavailable(e.message));
           res.on("end", () => {
+            const status = res.statusCode ?? 0;
             let parsed: unknown;
             try {
               parsed = JSON.parse(Buffer.concat(chunks).toString("utf8"));
             } catch {
-              return reject(new SandboxError("refused", "invalid_response", `the executor answered HTTP ${res.statusCode} without JSON`));
+              // Not JSON: the status still says what happened (a 503 without a body is still unavailable).
+              parsed = undefined;
             }
-            resolve({ status: res.statusCode ?? 0, body: parsed });
+            done(undefined, { status, body: parsed });
           });
         },
       );
-      req.setTimeout(waitMs, () => {
-        req.destroy();
+      // A deadline for the whole call: an idle timeout would be reset by every byte of a slow answer.
+      deadline = setTimeout(() => {
         unavailable(`no answer from the executor within ${Math.round(waitMs / 1000)}s`);
-      });
-      req.on("error", (e: NodeJS.ErrnoException) => {
-        if (signal?.aborted) return reject(new SandboxError("refused", "aborted", "the execution was cancelled"));
-        unavailable(DOWN.has(e.code ?? "") ? `${e.code} on ${this.o.socketPath}` : e.message);
-      });
+        req.destroy();
+      }, waitMs);
+      req.on("error", (e: NodeJS.ErrnoException) => unavailable(DOWN.has(e.code ?? "") ? `${e.code} on ${this.o.socketPath}` : e.message));
       req.end(payload);
     });
   }
@@ -123,9 +137,6 @@ export class DisabledSandbox implements Sandbox {
     throw new SandboxError("denied", "execution_disabled", "command execution is disabled (sandbox.backend is none)");
   }
 }
-
-type Obj = Record<string, unknown>;
-const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 
 function isResult(v: unknown): v is ExecResult {
   return isObj(v) && typeof v.exitCode === "number" && typeof v.stdout === "string" && typeof v.stderr === "string";

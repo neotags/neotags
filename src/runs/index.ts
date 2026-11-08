@@ -34,18 +34,24 @@ export function createRunManager(
     mcp?: Pick<McpHub, "tools" | "unavailable" | "guard">;
     tools?: AgentTool<any>[];
     guard?: ToolGuard;
-    /** Command execution behind the sandbox tool guard; `run_skill_command` is offered only when it can run something. */
+    /** Command execution behind the sandbox tool guard; a run gets `run_skill_command` only when one of its packs can run something. */
     executor?: SkillExecutor;
   },
 ): RunManager {
   const a = cfg.agent;
   const { mcp, executor } = deps;
-  const exec = executor?.offered ? executor : undefined;
-  const extra = [...(deps.tools ?? []), ...(exec ? [skillExecTool(exec, deps.index, a.toolOutputChars)] : [])];
-  const tools = mcp ? () => [...mcp.tools(), ...extra] : extra.length ? extra : undefined;
+  const exec = executor?.enabled ? executor : undefined;
+  // Built per run: the exec tool lists and allows only that run's skill packs.
+  const tools =
+    mcp || exec
+      ? ({ packs }: { packs: readonly string[] }) => {
+          const run = exec && skillExecTool(exec, packs, a.toolOutputChars);
+          return [...(mcp?.tools() ?? []), ...(deps.tools ?? []), ...(run ? [run] : [])];
+        }
+      : deps.tools;
   const checks: ToolGuard[] = [
-    ...(mcp ? [(call: { name: string; args: unknown }) => mcp.guard.check(call)] : []),
-    ...(exec ? [(call: { name: string; args: unknown }) => (call.name === EXEC_TOOL ? exec.check(call.args) : { ok: true as const })] : []),
+    ...(mcp ? [(call: Parameters<ToolGuard>[0]) => mcp.guard.check(call)] : []),
+    ...(exec ? [(call: Parameters<ToolGuard>[0]) => (call.name === EXEC_TOOL ? exec.check(call.args, call.packs ?? []) : { ok: true as const })] : []),
     ...(deps.guard ? [deps.guard] : []),
   ];
   const guard: ToolGuard | undefined = checks.length

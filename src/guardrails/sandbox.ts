@@ -1,6 +1,7 @@
 import path from "node:path";
 import type { SandboxSpec, SkillPackIndex } from "../tools/skillpacks.js";
 import type { Decision } from "./policy.js";
+import { isObj } from "./tools.js";
 
 export interface ExecCall {
   pack: string;
@@ -19,15 +20,16 @@ const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
 const MAX_ARGV = 256;
 
 const deny = (reason: string): ExecDecision => ({ ok: false, reason });
-const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 
 /**
  * Tool guard for command execution (§13 of the design), enforced in code before anything reaches the executor:
- * the pack must be loaded and declare `sandbox`, `argv[0]` must be one of its `tools`, and env and file names must
- * not escape the declaration. The constraints sent to the executor are the pack's declaration, never the caller's,
- * so a prompt-injected call cannot widen the network, credentials or limits.
+ * the pack must be one of `packs` (the run's own skill packs, when the caller is a run), be loaded and declare
+ * `sandbox`; `argv[0]` must be one of its `tools`; env and file names must not escape the declaration. The
+ * constraints sent to the executor are the pack's declaration, never the caller's, so a prompt-injected call cannot
+ * widen the network, credentials or limits, nor borrow them from a pack the run was not given.
  */
-export function checkExec(index: SkillPackIndex, call: ExecCall): ExecDecision {
+export function checkExec(index: SkillPackIndex, call: ExecCall, packs?: readonly string[]): ExecDecision {
+  if (packs && !packs.includes(call.pack)) return deny(`skill pack "${call.pack}" is not one of this run's (${packs.join(", ") || "none"})`);
   const pack = index.get(call.pack);
   if (!pack) return deny(`unknown skill pack "${call.pack}"`);
   const spec = pack.sandbox;

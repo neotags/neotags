@@ -47,12 +47,12 @@ neotags never runs a command in its own process. Skill-pack commands run in the 
 
 Every execution passes the sandbox guard first (`src/guardrails/sandbox.ts`), in code:
 
-- Only a skill pack whose `SKILL.md` front matter declares `sandbox` can run anything, and only the commands in its `tools` (`argv[0]`, a bare name, no shell).
+- Only a skill pack whose `SKILL.md` front matter declares `sandbox` can run anything, and only the commands in its `tools` (`argv[0]`, a bare name, no shell). A run can only use its own skill packs (`agent.entries`), so it cannot borrow another pack's hosts or credentials. A declaration the executor would refuse (a path as a tool, `cpu: 500m`, a bad credential name or header) is dropped when the pack loads.
 - The constraints sent to the executor (`net`, `credentials`, `limits`) are the pack's declaration, never the caller's, so a prompt-injected call cannot widen them. The executor checks the request again.
 - Env names that would bypass the proxy or shadow a credential placeholder, and file paths outside the work directory, are refused.
 - If the executor is unreachable or its self-check failed (`503 sandbox_unavailable`), the execution fails; there is no fallback that runs it some other way.
 
-Each execution, refused or not, writes one `sandbox_exec` audit log line with the pack, tool, declared hosts and credential names, the outcome, exit code and duration, never arguments, input or output. Agent runs get the `run_skill_command` tool only when the backend is `local` and a loaded pack declares tools; its output is redacted and cut at `agent.toolOutputChars`. Like the MCP client, it is not wired to an entry yet: the O2 gateway will create it (`createSkillExecutor`) and pass it to `createRunManager`.
+Each execution, refused or not, writes one `sandbox_exec` audit log line with the pack, tool, declared hosts and credential names, the outcome, exit code and duration, never arguments, input or output. A run gets the `run_skill_command` tool only when the backend is `local` and one of its packs declares tools. A non-zero exit is returned as an answer (`[exit code 1]`); only a timeout or a signal is a tool error. Its output is redacted and cut at `agent.toolOutputChars`. Like the MCP client, it is not wired to an entry yet: the O2 gateway will create it (`createSkillExecutor`) and pass it to `createRunManager`.
 
 ### LLM traces (OpenObserve / Langfuse)
 

@@ -32,6 +32,7 @@ const index = new SkillPackIndex(
   new Map([
     ["runner", pack("runner", spec)],
     ["reader", pack("reader")],
+    ["mailer", pack("mailer", { ...spec, net: ["mail.example.com"], credentials: [] })],
   ]),
 );
 
@@ -151,16 +152,30 @@ describe("SkillExecutor", () => {
     expect(cfg.sandbox).toEqual({ backend: "none", socket: "/run/executor/exec.sock" });
     const { lines, log } = memLog();
     const ex = createSkillExecutor(cfg, index, log);
-    expect(ex.offered).toBe(false);
+    expect(ex.enabled).toBe(false);
+    expect(ex.runnable()).toEqual([]);
+    expect(skillExecTool(ex, ["runner"], 100)).toBeUndefined();
     await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "denied", code: "execution_disabled" });
     expect(lines[0]!.obj).toMatchObject({ backend: "none", outcome: "denied", code: "execution_disabled" });
     await expect(new DisabledSandbox().exec()).rejects.toBeInstanceOf(SandboxError);
   });
 
-  it("offers the tool only with a backend and a pack that declares tools", () => {
-    expect(new SkillExecutor({ sandbox: new Recorder(), index, log: memLog().log }).offered).toBe(true);
-    const readers = new SkillPackIndex(new Map([["reader", pack("reader")]]));
-    expect(new SkillExecutor({ sandbox: new Recorder(), index: readers, log: memLog().log }).offered).toBe(false);
+  it("offers the tool only for a run whose packs declare tools, and lists only those", () => {
+    const ex = new SkillExecutor({ sandbox: new Recorder(), index, log: memLog().log });
+    expect(skillExecTool(ex, ["reader"], 100)).toBeUndefined();
+    expect(skillExecTool(ex, [], 100)).toBeUndefined();
+    const tool = skillExecTool(ex, ["reader", "runner"], 100)!;
+    expect(tool.description).toContain("runner (example-cli)");
+    expect(tool.description).not.toContain("reader");
+  });
+
+  it("refuses a pack the run was not given, even one that declares a sandbox", async () => {
+    const backend = new Recorder();
+    const ex = new SkillExecutor({ sandbox: backend, index, log: memLog().log });
+    expect(checkExec(index, { pack: "runner", argv: ["example-cli"] }, ["reader"])).toEqual({ ok: false, reason: expect.stringContaining("not one of this run's") });
+    expect(ex.check({ pack: "runner", argv: ["example-cli"] }, ["reader"]).ok).toBe(false);
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] }, { packs: ["reader"] })).rejects.toMatchObject({ kind: "denied" });
+    expect(backend.calls).toEqual([]);
   });
 });
 
@@ -188,6 +203,7 @@ describe("LocalSandbox (executor over a unix socket)", () => {
       egressDenied: ["evil.example.net:443"],
       injected: ["API_TOKEN"],
     });
+    expect(lines[0]!.obj.limits).toEqual(spec.limits);
     const logged = JSON.stringify(lines);
     for (const s of ["items", "secret-input", "supersecretvalue123"]) expect(logged).not.toContain(s);
   });
@@ -211,6 +227,60 @@ describe("LocalSandbox (executor over a unix socket)", () => {
       code: "sandbox_unavailable",
       message: expect.stringContaining("no user namespaces"),
     });
+  });
+
+  it("classifies by status when the answer is not JSON: a bare 503 is still unavailable", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "nt-exec-"));
+    const socketPath = path.join(dir, "exec.sock");
+    const server = createServer((_req, res) => res.writeHead(503).end("starting"));
+    await new Promise<void>((r) => server.listen(socketPath, r));
+    cleanup.push(async () => {
+      await new Promise((r) => server.close(r));
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath }), index, log: memLog().log });
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unavailable" });
+  });
+
+  it("a cancelled execution is reported as cancelled, not as an unreachable executor", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "nt-exec-"));
+    const socketPath = path.join(dir, "exec.sock");
+    const server = createServer((_req, res) => res.writeHead(200, { "content-type": "application/json" }).write("{"));
+    await new Promise<void>((r) => server.listen(socketPath, r));
+    cleanup.push(async () => {
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const { lines, log } = memLog();
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath }), index, log });
+    const ac = new AbortController();
+    const p = ex.exec({ pack: "runner", argv: ["example-cli"] }, { signal: ac.signal });
+    setTimeout(() => ac.abort(), 50);
+    await expect(p).rejects.toMatchObject({ code: "aborted" });
+    expect(lines[0]!.obj).toMatchObject({ outcome: "refused", code: "aborted" });
+  });
+
+  it("the wait is a deadline: a slow trickle of bytes does not extend it", async () => {
+    const dir = mkdtempSync(path.join(tmpdir(), "nt-exec-"));
+    const socketPath = path.join(dir, "exec.sock");
+    const timers: NodeJS.Timeout[] = [];
+    const server = createServer((_req, res) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      timers.push(setInterval(() => res.write(" "), 20));
+    });
+    await new Promise<void>((r) => server.listen(socketPath, r));
+    cleanup.push(async () => {
+      timers.forEach(clearInterval);
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const quick = new SkillPackIndex(new Map([["runner", pack("runner", { ...spec, limits: { timeoutSec: 0.1 } })]]));
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath, graceMs: 100 }), index: quick, log: memLog().log });
+    const started = Date.now();
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unavailable", message: expect.stringContaining("no answer") });
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it("passes the executor's own refusals on, and treats a non-result answer as a refusal", async () => {
@@ -247,16 +317,19 @@ describe("LocalSandbox (executor over a unix socket)", () => {
 });
 
 describe("run_skill_command in an agent run", () => {
-  async function run(ex: SkillExecutor, args: Record<string, unknown>) {
+  async function run(ex: SkillExecutor, args: Record<string, unknown>, packs = ["runner", "reader"]) {
     const cfg = loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", LLM_MODEL: "m" });
     const stream = scripted([callTool(EXEC_TOOL, args as never), say("done")]);
     const runner = new PiAgentRunner({
       gateway: createGateway(cfg),
       index,
       botName: "moose",
-      entries: {},
-      tools: [skillExecTool(ex, index, 200)],
-      guard: (call) => (call.name === EXEC_TOOL ? ex.check(call.args) : { ok: true }),
+      entries: { o2: packs },
+      tools: ({ packs }) => {
+        const t = skillExecTool(ex, packs, 200);
+        return t ? [t] : [];
+      },
+      guard: (call) => (call.name === EXEC_TOOL ? ex.check(call.args, call.packs ?? []) : { ok: true }),
       firstTokenTimeoutMs: 1000,
       maxRetries: 0,
       charsPerToken: 4,
@@ -288,6 +361,23 @@ describe("run_skill_command in an agent run", () => {
     const { seen } = await run(ex, { pack: "reader", argv: ["example-cli"] });
     expect(f.bodies).toEqual([]);
     expect(seen).toContain("Not allowed: skill pack reader declares no sandbox");
+  });
+
+  it("a non-zero exit is an answer, not a tool error", async () => {
+    const f = await fakeExecutor((b) => ({ status: 200, body: { ...okResult((b as { id: string }).id), exitCode: 1, stdout: "" } }));
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath }), index, log: memLog().log });
+    const tool = skillExecTool(ex, ["runner"], 200)!;
+    const r = await tool.execute("c1", { pack: "runner", argv: ["example-cli", "search", "nothing"] });
+    expect(r.isError).toBeUndefined();
+    expect((r.content[0] as { text: string }).text).toContain("[exit code 1]");
+  });
+
+  it("a run cannot use a pack it was not given", async () => {
+    const f = await fakeExecutor((b) => ({ status: 200, body: okResult((b as { id: string }).id) }));
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath }), index, log: memLog().log });
+    const { seen } = await run(ex, { pack: "mailer", argv: ["example-cli"] }, ["runner"]);
+    expect(f.bodies).toEqual([]);
+    expect(seen).toContain('Not allowed: skill pack "mailer" is not one of this run\'s (runner)');
   });
 
   it("tells the model when the sandbox is unavailable", async () => {
