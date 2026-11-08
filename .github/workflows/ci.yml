@@ -51,6 +51,14 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
+  # Trivy and the sandbox tests for executor/ on amd64 and arm64; no push.
+  # Pull requests only: on main, build-executor-image.yml runs the same checks
+  # before it pushes.
+  executor:
+    name: executor
+    if: github.event_name == 'pull_request'
+    uses: ./.github/workflows/executor-check.yml
+
   secrets:
     name: gitleaks
     runs-on: ubuntu-latest

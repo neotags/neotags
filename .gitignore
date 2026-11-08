@@ -4,3 +4,5 @@ dist
 *.log
 config/neotags.yaml
 .claude/
+__pycache__/
+*.pyc

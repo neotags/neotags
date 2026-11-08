@@ -21,7 +21,7 @@ make hooks             # once per clone: enable gitleaks pre-commit
 make secrets           # gitleaks scan of history
 ```
 
-Before finishing a change: typecheck, test, build (and `helm lint` if `deploy/` changed) must pass.
+Before finishing a change: typecheck, test, build (and `helm lint` if `deploy/` changed) must pass. If `executor/` changed, also run `cd executor && python3 -m unittest discover -s tests -t .`; the sandbox tests need the test image (executor/README.md, "Build and test").
 
 ## Layout
 
@@ -39,7 +39,8 @@ src/guardrails/         channel/user allowlist policy (enforced in code, not pro
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport
 test/                   vitest
 deploy/helm/neotags/    Helm chart; deploy/slack-app-manifest.yaml
-.github/workflows/      ci.yml, build-image.yml (GHCR, multi-arch)
+executor/               executor sidecar image (Python stdlib + bubblewrap): sandboxed /v1/exec over a unix socket, own unittest suite; see executor/README.md
+.github/workflows/      ci.yml, build-image.yml (GHCR, multi-arch); executor-check.yml (reusable: Trivy + sandbox tests per arch), build-executor-image.yml (GHCR neotags-executor)
 ```
 
 Planned (don't pre-build): triage/review skills (pi `Agent` + tools through the tool guard), scheduled/alert-driven posts.

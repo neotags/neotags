@@ -26,3 +26,8 @@ updates:
       # stay on the Node LTS line
       - dependency-name: node
         update-types: ["version-update:semver-major"]
+
+  # executor base image (debian:bookworm-slim, pinned by digest)
+  - package-ecosystem: docker
+    directory: /executor
+    schedule: { interval: weekly }
