@@ -283,6 +283,21 @@ const fileSchema = z.object({
       socket: z.string().min(1).default("/run/executor/exec.sock"),
     })
     .prefault({}),
+  // The OpenObserve AI assistant entry (docs/design/002-o2-gateway-contract.md): O2 forwards each chat turn here and
+  // pipes the SSE answer to the panel. Its own port, for in-cluster callers only; the key is O2_AGENT_API_KEY.
+  o2Gateway: z
+    .object({
+      enabled: z.boolean().default(false),
+      port: z.number().int().min(1).max(65535).default(3001),
+      // O2 org identifier -> MCP server that queries it, e.g. { default: o2, <org id>: o2prod }. Decides the run's
+      // default org, and which queries get the panel's "View in Logs" button (only the current org's).
+      orgs: z.record(z.string().regex(/^[A-Za-z0-9_-]{1,64}$/, "an O2 org identifier"), z.string().min(1)).default({}),
+      // Request body (the turn's history and page context); larger is refused.
+      maxBodyKb: z.number().int().positive().default(4096),
+      // Earlier turns kept for the model, newest first; older ones are dropped.
+      maxHistoryChars: z.number().int().positive().default(48_000),
+    })
+    .prefault({}),
   // LLM traces over OTLP (OpenObserve, Langfuse, an OTel collector). The exporter is configured with the standard
   // OTEL_EXPORTER_OTLP_* env vars; tracing is off unless an endpoint is set.
   telemetry: z
@@ -295,6 +310,10 @@ const fileSchema = z.object({
     .prefault({}),
   logLevel: z.string().default("info"),
 }).superRefine((cfg, ctx) => {
+  const servers = new Set(cfg.mcp.servers.map((s) => s.name));
+  for (const [org, server] of Object.entries(cfg.o2Gateway.orgs)) {
+    if (!servers.has(server)) ctx.addIssue({ code: "custom", path: ["o2Gateway", "orgs", org], message: `MCP server "${server}" is not in mcp.servers` });
+  }
   for (const [entry, packs] of Object.entries(cfg.agent.entries)) {
     (packs ?? []).forEach((p, i) => {
       if (!cfg.skillPacks.packs.includes(p)) {
@@ -310,6 +329,8 @@ export interface Secrets {
   onyxApiKey?: string;
   /** Bearer key for the LLM gateway; optional for gateways that need none. */
   llmApiKey?: string;
+  /** Shared secret O2 sends as x-o2-agent-key; required when o2Gateway is enabled. */
+  o2AgentKey?: string;
 }
 
 export type Config = z.infer<typeof fileSchema> & { secrets: Secrets };
@@ -373,6 +394,7 @@ export function loadConfig(
       slackSigningSecret: required(env, "SLACK_SIGNING_SECRET"),
       onyxApiKey: env.ONYX_API_KEY,
       llmApiKey: env.LLM_API_KEY || undefined,
+      o2AgentKey: file.o2Gateway.enabled ? required(env, "O2_AGENT_API_KEY") : undefined,
     },
   };
 }

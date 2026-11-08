@@ -9,7 +9,7 @@ import type { Effort } from "../config/index.js";
 import { endChatSpan, startChatSpan, ToolSpans } from "../telemetry/spans.js";
 import { skillPackTools, type SkillPackIndex } from "../tools/skillpacks.js";
 import { compactToBudget } from "./budget.js";
-import { prefersChinese } from "./degrade.js";
+import { answerLang } from "../lang.js";
 import { finalPrompt, systemPrompt, userPrompt } from "./prompt.js";
 import { resilientStream } from "./stream.js";
 import { RunAbort, RunError, type AgentRunner, type RunContext, type RunInput, type RunOutcome, type RunSource } from "./types.js";
@@ -44,7 +44,7 @@ export interface PiRunnerOptions {
 
 const OBSERVED_OUTPUT_CHARS = 4000;
 
-const cutNote = (question: string) => (prefersChinese(question) ? "\n\n_（回答被中断，请重新提问）_" : "\n\n_(The answer was cut off; please ask again.)_");
+const cutNote = (question: string) => (answerLang(question) === "zh" ? "\n\n_（回答被中断，请重新提问）_" : "\n\n_(The answer was cut off; please ask again.)_");
 
 const textOf = (m: AssistantMessage | undefined): string =>
   (m?.content ?? []).filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text").map((c) => c.text).join("").trim();
@@ -74,7 +74,7 @@ export class PiAgentRunner implements AgentRunner {
 
     const packs = input.packs ?? o.entries[input.source] ?? [];
     const extra = typeof o.tools === "function" ? o.tools({ packs }) : (o.tools ?? []);
-    const tools = [...skillPackTools(o.index), ...extra];
+    const tools = [...skillPackTools(o.index), ...extra, ...(input.tools ?? [])];
     const names = new Set(tools.map((t) => t.name));
     const guard: ToolGuard = async (call) => {
       if (!names.has(call.name)) return { ok: false, reason: `unknown tool ${call.name}` };

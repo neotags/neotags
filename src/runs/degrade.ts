@@ -1,12 +1,9 @@
+import { answerLang } from "../lang.js";
 import { redact } from "../tools/redact.js";
 import type { RunInput } from "./types.js";
 
-const CJK = /[㐀-鿿豈-﫿]/;
 const MAX_VALUE_CHARS = 500;
 const MAX_FIELDS = 12;
-
-/** Whether to answer in Chinese: the asker wrote any CJK. Code cannot ask the model, so this stays crude. */
-export const prefersChinese = (text: string): boolean => CJK.test(text);
 
 function show(v: unknown): string {
   const s = typeof v === "string" ? v : JSON.stringify(v);
@@ -29,8 +26,9 @@ const REASONS: Record<DegradeReason, { zh: string; en: string }> = {
  * the AI is unavailable. Written by code from the request alone, so it works with the gateway down.
  */
 export function contextPackage(input: RunInput, why: DegradeReason): string {
-  const reason = REASONS[why][prefersChinese(input.question) ? "zh" : "en"];
-  const zh = prefersChinese(input.question);
+  const lang = answerLang(input.question);
+  const reason = REASONS[why][lang];
+  const zh = lang === "zh";
   const lines = [zh ? "⚠️ *AI 暂时不可用*，下面是这次提问的上下文，可以先手动查看。" : "⚠️ *AI is temporarily unavailable.* Here is the context of your question to check by hand."];
   const fields = Object.entries(input.context ?? {}).filter(([, v]) => v !== null && v !== undefined && v !== "");
   if (fields.length > 0) {
@@ -49,7 +47,7 @@ export function contextPackage(input: RunInput, why: DegradeReason): string {
 
 /** Short notices for runs that never started or were stopped. */
 export function notice(kind: "shutting_down" | "interrupted" | "cancelled", question: string): string {
-  const zh = prefersChinese(question);
+  const zh = answerLang(question) === "zh";
   switch (kind) {
     case "shutting_down":
       return zh ? "服务正在更新，请稍后重新提问。" : "The service is restarting; please ask again in a moment.";

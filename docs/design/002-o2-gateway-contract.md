@@ -1,6 +1,6 @@
 # neotags — Design 002: OpenObserve assistant gateway contract
 
-Status: **v2** · Date: 2026-11-06 (v2: upstream o2-ai paths and error body, no turn-id header, user email optional)
+Status: **v3** · Date: 2026-11-07 (v2: upstream o2-ai paths and error body, no turn-id header, user email optional; v3: the gateway's choices, §6)
 
 The OpenObserve (O2) enterprise AI assistant panel can be pointed at an external agent. O2 forwards each chat turn to `POST {O2_AGENT_URL}/o2_agent/{agent}/query/stream` and pipes the agent's `text/event-stream` response **byte for byte** to the browser, so this document is the contract between the neotags O2 gateway (`src/gateway/o2.ts`) and the O2 web panel.
 
@@ -21,7 +21,7 @@ Headers (lower-case on the wire):
 | `x-o2-agent-key` | yes | Shared secret between O2 and neotags; compare in constant time. |
 | `x-o2-user-email` | optional | The asking user, derived by the O2 client from the user's credentials. It is absent when they cannot be parsed. Audit and rate limiting only, never an authorization input. Rate-limit by session id when it is absent. |
 | `x-o2-assistant-session-id` | yes in practice | UUID (lower-case, validated by O2). One chat panel conversation. The panel always sends one. |
-| `traceparent` | optional | W3C trace context; parent the `invoke_agent` span on it. |
+| `traceparent` | optional | W3C trace context; parent the `invoke_agent` span on it when it is sampled, else link it (§6). |
 | `user-agent` | optional | Browser user agent. |
 
 There is no turn id. With persistence off, O2 neither forwards `x-o2-assistant-turn-id` nor fills `turn_id`, so neotags generates its own run id.
@@ -62,7 +62,7 @@ Only when the turn cannot start. JSON body in o2-ai's shape, `{"detail": {"code"
 
 | Status | `code` | When |
 |---|---|---|
-| 400 | `bad_request` | Body is not a `QueryRequest`, or `query` is empty. |
+| 400 | `bad_request` | Body is not a `QueryRequest`, `query` is empty, or `x-o2-assistant-session-id` is not a UUID. |
 | 401 | `unauthorized` | `x-o2-agent-key` missing or wrong. |
 | 404 | `agent_not_found` | `{agent}` is not `o2`. |
 | 429 | `turn_limit` | Per-user rate limit or concurrency cap. Add `Retry-After`. The panel then puts the prompt back in the input box and shows its turn-limit notice. |
@@ -145,3 +145,28 @@ Example of each: `test/fixtures/o2/events/`. Full streams: `test/fixtures/o2/str
 - `POST /o2_agent/feedback`: body as sent by the panel, `{feedback_type: "thumbs_up"|"thumbs_down", query_index, trace_id?}`, with the session id in `x-o2-assistant-session-id`. Recorded as one log event; responds `200 {}`.
 
 Both require `x-o2-agent-key` and use the §2 error body. Upstream does not pin these two paths; they sit under the same `/o2_agent` prefix.
+
+## 6. How neotags fills the contract
+
+Choices the contract left to the gateway (`src/gateway/o2.ts`, `o2-stream.ts`, `o2-events.ts`):
+
+- **Title.** Written by code from the question (redacted, at most 60 characters), so it is also the first byte. No LLM call.
+- **Text.** Only the final answer streams: an investigation turn's text is either commentary before tool calls or a draft the final turn rewrites. So `message_delta` usually follows the last `tool_result`.
+- **Tool cards.** Every tool call gets a card except `open_query_in_o2`. O2 tools by inner name; others by their own name (`read_skill_ref`, `run_skill_command`, `search_indexed_documents`). `message` is written by code in the answer language. A call to another org than the user's says so on the card.
+- **Current org.** `o2Gateway.orgs` maps an org identifier to the MCP server that queries it. `context.org_id` (checked against the identifier format) picks the user's org; the run is told it in code, outside the untrusted page context.
+- **Evidence.** `call_args` carries the SearchSQL that **ran** (after the tool guard's time range and `LIMIT`), and only for a successful call through the current org's server.
+- **Navigation.** The model asks for it with the tool `open_query_in_o2` (no arguments). Code opens the last SearchSQL that succeeded against the current org, exactly as it ran. The tool refuses when there is none, for another org, and for stream types other than logs and traces. The event is sent once, after the last text, right before `complete`, and only when the run ends `done`.
+- **Ends.** By the run's outcome:
+
+  | Run | Stream ends with |
+  |---|---|
+  | done | (`navigation_action`), `complete` |
+  | failed, degraded (no model) | the context package as `message_delta`, then `complete` |
+  | failed after part of the answer streamed | `error`, `error_type` = `model_error` \| `deadline` \| `error` |
+  | budget_exhausted | the answer, then `error`, `error_type: budget_exhausted` |
+  | cancelled (cancel endpoint) | `cancelled` |
+  | interrupted (shutdown drain) | `error`, `error_type: interrupted` |
+  | client disconnected | nothing: the run is cancelled |
+
+- **Trace id.** `complete.trace_id` is the `invoke_agent` span's trace id. A sampled `traceparent` makes the span its child (same trace id); an unsampled one would make the default sampler drop every span of the run, so it becomes a span link on a new root. With tracing off, the caller's trace id, else a random one.
+- **Limits.** History keeps the newest turns within `o2Gateway.maxHistoryChars`; a page-context value over 4000 characters is replaced by a note; the body is capped at `o2Gateway.maxBodyKb`.

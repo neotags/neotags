@@ -240,6 +240,31 @@ describe("trace hygiene", () => {
     expect(roots.every((s) => s.parentSpanContext === undefined)).toBe(true);
   });
 
+  const O2_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+  const O2_SPAN = "00f067aa0ba902b7";
+
+  it("parents a run on the caller's sampled traceparent and reports the trace id", async () => {
+    const { result, root, chats } = await run([say("a"), say("b")], { input: { ...input, traceparent: `00-${O2_TRACE}-${O2_SPAN}-01` } });
+    expect(root.spanContext().traceId).toBe(O2_TRACE);
+    expect(root.parentSpanContext?.spanId).toBe(O2_SPAN);
+    expect(chats[0]!.spanContext().traceId).toBe(O2_TRACE);
+    expect(result.traceId).toBe(O2_TRACE);
+  });
+
+  it("links an unsampled traceparent instead, so the run is still recorded", async () => {
+    const { result, root } = await run([say("a"), say("b")], { input: { ...input, traceparent: `00-${O2_TRACE}-${O2_SPAN}-00` } });
+    expect(root.parentSpanContext).toBeUndefined();
+    expect(root.spanContext().traceId).not.toBe(O2_TRACE);
+    expect(root.links.map((l) => l.context.traceId)).toEqual([O2_TRACE]);
+    expect(result.traceId).toBe(root.spanContext().traceId);
+  });
+
+  it("ignores a malformed traceparent", async () => {
+    const { root } = await run([say("a"), say("b")], { input: { ...input, traceparent: "00-zz-1-01" } });
+    expect(root.parentSpanContext).toBeUndefined();
+    expect(root.links).toEqual([]);
+  });
+
   it("redacts error text on span status and exception events", async () => {
     const span = startChatSpan({ model: "m1", messages: [], captureContent: false });
     endChatSpan(span, { error: "connect failed: https://svc:hunter2-very-secret@gw.example.com/v1" });

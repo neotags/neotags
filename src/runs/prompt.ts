@@ -1,3 +1,4 @@
+import { LANGUAGE_RULE } from "../lang.js";
 import { redact } from "../tools/redact.js";
 import type { SkillPackIndex } from "../tools/skillpacks.js";
 import type { RunInput } from "./types.js";
@@ -44,7 +45,7 @@ export function systemPrompt(o: { botName: string; index: SkillPackIndex; entryP
       "reproduces it when you have one; *Suggestions* (actions for a human; you do not execute them); *Unconfirmed*: what you could not",
       "verify. Anything without evidence goes under Unconfirmed. Short questions get short answers without the headings.",
     ].join(" "),
-    "Language: answer in the language of the question.",
+    LANGUAGE_RULE,
   );
   // Last, so that a server going down or coming back changes only the end of the cached prefix.
   if (o.unavailable?.length) {
@@ -55,7 +56,7 @@ export function systemPrompt(o: { botName: string; index: SkillPackIndex; entryP
   return parts.join("\n\n");
 }
 
-/** The user message: earlier turns, page context and the question, each in its own tag. */
+/** The user message: earlier turns, page context and the question, each in its own tag; the entry's notes outside them. */
 export function userPrompt(input: RunInput, now: Date): string {
   const parts: string[] = [];
   if (input.history?.length) {
@@ -64,6 +65,8 @@ export function userPrompt(input: RunInput, now: Date): string {
   }
   const ctx = Object.fromEntries(Object.entries(input.context ?? {}).filter(([, v]) => v !== null && v !== undefined));
   if (Object.keys(ctx).length > 0) parts.push(`<page_context>\n${clean(JSON.stringify(ctx, null, 2))}\n</page_context>`);
+  // Written by the entry's code, so outside the untrusted tags; still neutralized, as values in them come from a request.
+  if (input.notes?.length) parts.push(input.notes.map(neutralize).join("\n"));
   parts.push(`<question>\n${clean(input.question)}\n</question>`, `Current time: ${now.toISOString()}`);
   return parts.join("\n\n");
 }
