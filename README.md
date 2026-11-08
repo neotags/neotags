@@ -29,6 +29,18 @@ Try it: invite the bot to a public channel (private channels are off unless `sla
 - Switch a skill off with `skills.disabled: [kb-ask]` (or env `NEOTAGS_DISABLED_SKILLS=kb-ask`). It is then not offered by the router, not in the help text, and its buttons stop working. Without `kb-ask`, a question gets the help text.
 - Not supported yet: images and scanned PDFs (no OCR), legacy `.doc`/`.xls`/`.ppt`, password-protected files.
 
+### MCP tools (agent runs)
+
+Agent runs get the tools of the MCP servers in `mcp.servers` (Streamable HTTP), named `<server>__<tool>`, for example `o2__SearchSQL`. Each server lists `allowTools`; nothing else is offered to the model. Header values come from env vars (`headersFromEnv: { Authorization: O2_MCP_AUTH }`), never from the file. A server that is down does not stop startup: it is retried in the background, and the system prompt names it until it is back. A call that loses its connection (a restarted server, an expired session) reconnects once and retries. Like the RunManager, the MCP client is not wired to an entry yet: the O2 gateway will start it (`startMcp`) and pass it to `createRunManager`.
+
+Every call passes the tool guard first (`src/guardrails/tools.ts`), in code:
+
+- `tools_call` (O2) runs only an inner tool listed in `innerAllow`; without `innerAllow` it is always refused.
+- `argAllow` limits a parameter to listed values, for tools that mix reads and writes, such as `{ alerting_manage_rules: { operation: [list, get] } }`.
+- Arguments are capped at `mcp.maxArgChars`.
+- `SearchSQL` and `PrometheusRangeQuery`, direct or through `tools_call`: a missing time range becomes the last hour, SQL without a `LIMIT` gets one, and a range query without a step gets about 60 points. A range over 24 hours, a `LIMIT` over 1000 or a step that gives over 1000 points per series is refused with the reason (`agent.queryLimits`). Comments are removed from the SQL that runs, and backtick identifiers and backslash-escaped quotes are refused: those are where the guard and O2's parser could read a different `LIMIT`. The `LIMIT` check catches the model's mistakes; the hard bounds are the time range and the output budget.
+- Output is redacted, then cut at `agent.toolOutputChars` with a note that asks the model to narrow the query.
+
 ### LLM traces (OpenObserve / Langfuse)
 
 Each request becomes one OpenTelemetry trace, rooted at an `invoke_agent <entry>` span. `gen_ai.agent.name` is the entry (`slack`, `o2`, `job`), so entries can be told apart in one stream; the configured bot name is `neotags.bot.name`. `gen_ai.conversation.id` (and `session.id`, which Langfuse groups by) is the conversation: the Slack channel and thread, or the O2 assistant session. Every chat and tool span repeats `gen_ai.conversation.id`: OpenObserve's session list sums tokens over the spans that carry it. Every span carries `gen_ai.operation.name` (`invoke_agent`, `chat`, `execute_tool`), which OpenObserve's LLM views filter on.
