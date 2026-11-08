@@ -53,21 +53,34 @@ export class SkillExecutor {
   async exec(entry: ExecEntry, opts: { signal?: AbortSignal; packs?: readonly string[] } = {}): Promise<ExecResult> {
     const { signal, packs } = opts;
     const id = (entry.id ?? `neotags-${randomUUID()}`).replace(ID_CHARS, "_").slice(0, 128);
-    const tool = Array.isArray(entry.argv) && typeof entry.argv[0] === "string" ? entry.argv[0].slice(0, 64) : undefined;
-    const audit = { audit: "sandbox_exec", id, backend: this.o.sandbox.backend, pack: entry.pack, tool };
+    const audit = { audit: "sandbox_exec", id, backend: this.o.sandbox.backend };
     const d = checkExec(this.o.index, entry, packs);
     if (!d.ok) {
-      // The rule, not the reason: a reason can quote the caller's file paths, env names or arguments.
-      this.o.log.warn({ ...audit, outcome: "denied", rule: d.rule }, "sandbox exec denied");
+      // The rule, not the reason: a reason can quote the caller's file paths, env names or arguments. Likewise the
+      // pack is logged only when it is a loaded pack's name, and the tool not at all: it was not checked.
+      const pack = this.o.index.get(entry.pack) ? entry.pack : undefined;
+      this.o.log.warn({ ...audit, ...(pack && { pack }), outcome: "denied", rule: d.rule }, "sandbox exec denied");
       throw new SandboxError("denied", "not_allowed", d.reason);
     }
+    Object.assign(audit, { pack: entry.pack, tool: entry.argv[0] });
     const c = d.constraints;
     const declared = { net: c.net, credentials: c.credentials.map((x) => x.name), ...(c.limits && { limits: c.limits }) };
     const started = Date.now();
+    let r: ExecResult;
     try {
       // Only the checked fields go on: anything else the caller put on the entry is dropped.
       const { pack, argv, env, stdin, files } = entry;
-      const r = await this.o.sandbox.exec({ id, pack, argv, ...(env && { env }), ...(stdin !== undefined && { stdin }), ...(files && { files }) }, c, signal);
+      r = await this.o.sandbox.exec({ id, pack, argv, ...(env && { env }), ...(stdin !== undefined && { stdin }), ...(files && { files }) }, c, signal);
+    } catch (err) {
+      // Not one of the backend's own errors: it failed somewhere unexpected, possibly after the command ran.
+      const e = err instanceof SandboxError ? err : new SandboxError("unknown", "error", `${(err as Error).message}; the command may have run`);
+      // An executor refusal can echo the request (file paths, env names), so only its code is kept; the other
+      // messages are this client's own.
+      const reason = e.kind === "refused" ? undefined : e.message;
+      this.o.log.warn({ ...audit, ...declared, outcome: e.kind, code: e.code, ...(reason && { reason }), durationMs: Date.now() - started }, "sandbox exec failed");
+      throw e;
+    }
+    {
       const denied = r.egress?.filter((e) => e.decision !== "allow").map((e) => `${e.host}${e.port ? `:${e.port}` : ""}`) ?? [];
       const injected = [...new Set(r.egress?.flatMap((e) => e.injected ?? []) ?? [])];
       this.o.log.info(
@@ -85,13 +98,6 @@ export class SkillExecutor {
         "sandbox exec",
       );
       return r;
-    } catch (err) {
-      const e = err instanceof SandboxError ? err : new SandboxError("refused", "error", (err as Error).message);
-      // An executor refusal can echo the request (file paths, env names), so only its code is kept; the other
-      // messages are this client's own.
-      const reason = e.kind === "refused" ? undefined : e.message;
-      this.o.log.warn({ ...audit, ...declared, outcome: e.kind, code: e.code, ...(reason && { reason }), durationMs: Date.now() - started }, "sandbox exec failed");
-      throw e;
     }
   }
 }

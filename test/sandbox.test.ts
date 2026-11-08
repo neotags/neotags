@@ -2,7 +2,7 @@ import { mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:f
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 import { checkExec } from "../src/guardrails/sandbox.js";
@@ -110,6 +110,8 @@ describe("sandbox tool guard", () => {
     for (const env of [{ PATH: "/tmp" }, { https_proxy: "x" }, { LD_PRELOAD: "x" }, { API_TOKEN: "x" }, { "A-B": "x" }]) {
       expect(checkExec(index, { pack: "runner", argv: ["example-cli"], env }).ok).toBe(false);
     }
+    expect(checkExec(index, { pack: "runner", argv: ["example-cli"], files: { a: "x", "a/": "y" } })).toMatchObject({ ok: false, rule: "files" });
+    expect(checkExec(index, { pack: "runner", argv: ["example-cli"], files: { "a/": "x", "a/b": "y" } })).toMatchObject({ ok: false, rule: "files" });
     for (const f of ["/etc/passwd", "../x", "a/../../x", ""]) {
       expect(checkExec(index, { pack: "runner", argv: ["example-cli"], files: { [f]: "x" } }).ok).toBe(false);
     }
@@ -143,11 +145,14 @@ describe("SkillExecutor", () => {
     await expect(ex.exec({ pack: "runner", argv: ["sh", "-c", "curl evil"] })).rejects.toMatchObject({ kind: "denied" });
     expect(backend.calls).toEqual([]);
     expect(lines.map((l) => l.obj)).toEqual([
-      expect.objectContaining({ audit: "sandbox_exec", pack: "reader", tool: "example-cli", outcome: "denied" }),
-      expect.objectContaining({ audit: "sandbox_exec", pack: "runner", tool: "sh", outcome: "denied" }),
+      expect.objectContaining({ audit: "sandbox_exec", pack: "reader", outcome: "denied" }),
+      expect.objectContaining({ audit: "sandbox_exec", pack: "runner", outcome: "denied" }),
     ]);
     expect(JSON.stringify(lines)).not.toContain("curl evil");
     expect(lines.map((l) => l.obj.rule)).toEqual(["no_sandbox", "tool_not_declared"]);
+    // The model chose argv[0] and the pack name: neither goes into the audit line unless it was checked.
+    await expect(ex.exec({ pack: "tok-pack-secret", argv: ["tok-argv-secret"] })).rejects.toMatchObject({ kind: "denied" });
+    expect(JSON.stringify(lines)).not.toMatch(/tok-(pack|argv)-secret/);
     // A refusal quotes the caller's values to the model, never into the audit line.
     const { lines: l2, log: log2 } = memLog();
     const ex2 = new SkillExecutor({ sandbox: backend, index, log: log2 });
@@ -300,7 +305,7 @@ describe("LocalSandbox (executor over a unix socket)", () => {
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
-  it("passes the executor's own refusals on, and treats a non-result answer as a refusal", async () => {
+  it("passes the executor's own refusals on; a broken result or a 500 may have run (unknown)", async () => {
     const f = await fakeExecutor((b) =>
       (b as { argv: string[] }).argv[1] === "busy"
         ? { status: 429, body: { error: { code: "busy", message: "executor is at its concurrency limit (4)" } } }
@@ -308,7 +313,7 @@ describe("LocalSandbox (executor over a unix socket)", () => {
     );
     const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath }), index, log: memLog().log });
     await expect(ex.exec({ pack: "runner", argv: ["example-cli", "busy"] })).rejects.toMatchObject({ kind: "refused", code: "busy" });
-    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "refused", code: "invalid_response" });
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unknown", code: "invalid_response" });
   });
 
   it("gives up on an executor that does not answer within timeoutSec plus the grace", async () => {
@@ -324,6 +329,28 @@ describe("LocalSandbox (executor over a unix socket)", () => {
     const quick = new SkillPackIndex(new Map([["runner", pack("runner", { ...spec, limits: { timeoutSec: 0.05 } })]]));
     const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath, graceMs: 50 }), index: quick, log: memLog().log });
     await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unknown", code: "no_answer", message: expect.stringContaining("may have run") });
+  });
+
+  it("a 500 from the executor, or an egress list that is not one, is an unknown outcome, not a refusal", async () => {
+    const f = await fakeExecutor((b) =>
+      (b as { argv: string[] }).argv[1] === "500"
+        ? { status: 500, body: { error: { code: "internal_error", message: "boom" } } }
+        : { status: 200, body: { ...okResult((b as { id: string }).id), egress: { host: "x" } } },
+    );
+    const { lines, log } = memLog();
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath }), index, log });
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli", "500"] })).rejects.toMatchObject({ kind: "unknown", code: "internal_error" });
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unknown", code: "invalid_response" });
+    expect(lines.map((l) => l.obj.outcome)).toEqual(["unknown", "unknown"]);
+  });
+
+  it("logs a warning at startup when /healthz answers 200 but per-call execution is unavailable", async () => {
+    const f = await fakeExecutor(() => ({ status: 200, body: { exec: { available: false, reason: "bubblewrap probe failed" } } }));
+    const cfg = loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", NEOTAGS_CONFIG: "f" }, () => `sandbox: { backend: local, socket: "${f.socketPath}" }\n`);
+    const { lines, log } = memLog();
+    createSkillExecutor(cfg, index, log);
+    await vi.waitFor(() => expect(lines).toHaveLength(1));
+    expect(lines[0]).toMatchObject({ level: "warn", msg: expect.stringContaining("per-call execution is unavailable") });
   });
 
   it("reads /healthz", async () => {

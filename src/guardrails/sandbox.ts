@@ -71,7 +71,8 @@ export function checkExec(index: SkillPackIndex, call: ExecCall, packs?: readonl
     for (const [f, content] of Object.entries(call.files)) {
       if (typeof content !== "string" || content.includes("\0")) return deny("files", `file ${f} must be text without NUL`);
       total += bytes(content);
-      const norm = path.posix.normalize(f);
+      // Like Python's normpath, which the executor uses: no trailing slash.
+      const norm = path.posix.normalize(f).replace(/(.)\/+$/, "$1");
       // The executor refuses any normalized path that starts with "..", "..config" included.
       if (!f || f.includes("\\") || path.posix.isAbsolute(f) || norm === "." || norm.startsWith("..")) {
         return deny("files", `file path ${JSON.stringify(f)} must be relative and stay in the work directory`);

@@ -64,7 +64,9 @@ export class LocalSandbox implements Sandbox {
     const message = typeof err.message === "string" ? err.message : `the executor answered HTTP ${status}`;
     // 503 is the self-check refusing every execution (sandbox_unavailable); 502 and 504 cannot have run anything.
     if (status === 502 || status === 503 || status === 504) return new SandboxError("unavailable", code, `the execution sandbox is unavailable: ${message}`);
-    if (status === 200) return new SandboxError("refused", "invalid_response", "the executor's answer is not an execution result");
+    // A broken result, or the executor failing on the request, can come after the command ran.
+    if (status === 200) return new SandboxError("unknown", "invalid_response", "the executor's answer is not an execution result; the command may have run");
+    if (status >= 500) return new SandboxError("unknown", code, `the executor failed (HTTP ${status}); the command may have run`);
     if (body === undefined) return new SandboxError("refused", code, `the executor answered HTTP ${status} without JSON`);
     return new SandboxError("refused", code, message);
   }
@@ -151,5 +153,10 @@ export class DisabledSandbox implements Sandbox {
 }
 
 function isResult(v: unknown): v is ExecResult {
-  return isObj(v) && typeof v.exitCode === "number" && typeof v.stdout === "string" && typeof v.stderr === "string";
+  if (!isObj(v) || typeof v.exitCode !== "number" || typeof v.stdout !== "string" || typeof v.stderr !== "string") return false;
+  if (v.egress === undefined) return true;
+  return (
+    Array.isArray(v.egress) &&
+    v.egress.every((e) => isObj(e) && typeof e.host === "string" && (e.injected === undefined || (Array.isArray(e.injected) && e.injected.every((n) => typeof n === "string"))))
+  );
 }
