@@ -69,6 +69,7 @@ export interface LlmDeps {
   timeoutMs: number;
   maxRetries: number;
   sleep?: (ms: number) => Promise<void>;
+  /** Clock for the call's deadline (default Date.now); tests pass a fake one together with `sleep`. */
   now?: () => number;
   /** Upper bound when a call is retried with a larger output budget (llm.maxTokens). */
   maxTokensCap?: number;
