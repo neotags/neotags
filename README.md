@@ -31,7 +31,7 @@ Try it: invite the bot to a public channel (private channels are off unless `sla
 
 ### MCP tools (agent runs)
 
-Agent runs get the tools of the MCP servers in `mcp.servers` (Streamable HTTP), named `<server>__<tool>`, for example `o2__SearchSQL`. Each server lists `allowTools`; nothing else is offered to the model. Header values come from env vars (`headersFromEnv: { Authorization: O2_MCP_AUTH }`), never from the file. A server that is down does not stop startup: it is retried in the background, and the system prompt names it until it is back.
+Agent runs get the tools of the MCP servers in `mcp.servers` (Streamable HTTP), named `<server>__<tool>`, for example `o2__SearchSQL`. Each server lists `allowTools`; nothing else is offered to the model. Header values come from env vars (`headersFromEnv: { Authorization: O2_MCP_AUTH }`), never from the file. A server that is down does not stop startup: it is retried in the background, and the system prompt names it until it is back. A call that loses its connection (a restarted server, an expired session) reconnects once and retries. Like the RunManager, the MCP client is not wired to an entry yet: the O2 gateway will start it (`startMcp`) and pass it to `createRunManager`.
 
 Every call passes the tool guard first (`src/guardrails/tools.ts`), in code:
 

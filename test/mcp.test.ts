@@ -31,6 +31,8 @@ class FakeMcp {
   calls: { tool: string; args: Record<string, unknown> }[] = [];
   headers: IncomingHttpHeaders[] = [];
   down = false;
+  /** Requests that fail with 503 before the server answers again (a restart, an expired session). */
+  failNext = 0;
   output = "ok";
   private http?: Server;
   port = 0;
@@ -63,7 +65,8 @@ class FakeMcp {
   async listen(port = 0): Promise<this> {
     this.http = createServer(async (req, res) => {
       this.headers.push(req.headers);
-      if (this.down) {
+      if (this.down || this.failNext > 0) {
+        this.failNext = Math.max(0, this.failNext - 1);
         res.writeHead(503).end("down");
         return;
       }
@@ -99,15 +102,15 @@ async function fake(): Promise<FakeMcp> {
   return f;
 }
 
-function hubFor(servers: ({ name: string; url: string } & Partial<McpServerConfig>)[], o: { env?: NodeJS.ProcessEnv; outputChars?: number } = {}) {
+function hubFor(servers: ({ name: string; url: string } & Partial<McpServerConfig>)[], o: { env?: NodeJS.ProcessEnv; outputChars?: number; reconnectMinMs?: number } = {}) {
   const cfgs = servers.map((s) => ({ ...o2Policy, headersFromEnv: {}, ...s }));
   const hub = new McpHub({
     servers: cfgs,
     guard: guardFor(cfgs, o.outputChars),
     connectTimeoutMs: 2000,
     callTimeoutMs: 2000,
-    reconnectMinMs: 20,
-    reconnectMaxMs: 40,
+    reconnectMinMs: o.reconnectMinMs ?? 20,
+    reconnectMaxMs: Math.max(40, o.reconnectMinMs ?? 0),
     env: o.env ?? {},
     log,
   });
@@ -133,15 +136,16 @@ async function runToolCall(hub: McpHub, name: string, args: Record<string, unkno
     streamFn: stream,
     now: () => NOW,
   });
+  const ended: { args?: unknown; output: string }[] = [];
   const ctx: RunContext = {
     runId: "r1",
     signal: new AbortController().signal,
     budget: { maxSteps: 5, softDeadline: Number.MAX_SAFE_INTEGER, maxInputTokens: 100_000 },
-    observer: {},
+    observer: { toolEnd: (c) => ended.push({ args: c.args, output: c.output }) },
   };
   await runner.run({ source: "o2", sessionId: "s1", question: "q" }, ctx);
   // The system prompt is the transcript's first message.
-  return { firstRequest: transcriptText(stream.calls[0]!.context), seen: transcriptText(stream.calls[1]!.context) };
+  return { firstRequest: transcriptText(stream.calls[0]!.context), seen: transcriptText(stream.calls[1]!.context), ended };
 }
 
 describe("MCP client", () => {
@@ -187,7 +191,9 @@ describe("MCP client", () => {
     const f = await fake();
     const hub = hubFor([{ name: "o2", url: f.url() }]);
     await hub.start();
-    await runToolCall(hub, "o2__SearchSQL", { query: { sql: "SELECT count(*) FROM k8s_logs" } });
+    const { ended } = await runToolCall(hub, "o2__SearchSQL", { query: { sql: "SELECT count(*) FROM k8s_logs" } });
+    // The entry gets what ran, not what the model sent: evidence links must reproduce the query.
+    expect(ended[0]?.args).toEqual(f.calls[0]?.args);
     await runToolCall(hub, "o2__tools_call", { tool: "SearchSQL", args: { request_body: { query: { sql: "SELECT * FROM t LIMIT 20" } } } });
     expect(f.calls[0]).toEqual({
       tool: "SearchSQL",
@@ -237,13 +243,37 @@ describe("MCP client", () => {
     expect(seen).toContain("Data source o2 is unavailable");
     expect(seen).toContain("Continue without it and say what you could not check.");
     expect(hub.unavailable()).toEqual(["o2"]);
-    // The tools stay listed, so the next run sees the same tool set; its call reconnects first.
+    // The tools stay listed, so the next run sees the same tool set.
     expect(hub.tools().map((t) => t.name)).toContain("o2__tool_search");
 
     f.down = false;
+    await expect.poll(() => hub.unavailable(), { timeout: 2000 }).toEqual([]);
     const again = await runToolCall(hub, "o2__tool_search", { query: "b" });
     expect(again.seen).toContain("ok");
     expect(hub.unavailable()).toEqual([]);
+  });
+
+  it("a call that loses its connection once (server restart, expired session) reconnects and retries", async () => {
+    const f = await fake();
+    const hub = hubFor([{ name: "o2", url: f.url() }]);
+    await hub.start();
+    f.failNext = 1;
+    const { seen } = await runToolCall(hub, "o2__tool_search", { query: "a" });
+    expect(seen).toContain("ok");
+    expect(f.calls).toEqual([{ tool: "tool_search", args: { query: "a" } }]);
+    expect(hub.unavailable()).toEqual([]);
+  });
+
+  it("while a server is down, calls fail at once until the next reconnect is due", async () => {
+    const f = await fake();
+    const hub = hubFor([{ name: "o2", url: f.url() }], { reconnectMinMs: 60_000 });
+    await hub.start();
+    f.down = true;
+    const tool = hub.tools().find((t) => t.name === "o2__tool_search")!;
+    await expect(tool.execute("1", { query: "a" })).rejects.toThrow(/Data source o2 is unavailable/);
+    const requests = f.headers.length;
+    await expect(tool.execute("2", { query: "b" })).rejects.toThrow(/Data source o2 is unavailable/);
+    expect(f.headers.length).toBe(requests);
   });
 
   it("an error result of the tool reaches the model as an error, and the server stays up", async () => {
@@ -295,11 +325,15 @@ describe("McpGuard", () => {
     expect(g.check({ name: "o2__manage_rules", args: { operation: "list" } })).toEqual({ ok: true });
     expect(g.check({ name: "o2__manage_rules", args: { operation: "delete" } })).toEqual({ ok: false, reason: 'manage_rules operation must be one of list, get, not "delete"' });
     expect(g.check({ name: "o2__manage_rules", args: {} })).toMatchObject({ ok: false });
+    const outer = guardFor([{ ...o2Policy, argAllow: { tools_call: { detail: ["summary"] } } }]);
+    expect(outer.check({ name: "o2__tools_call", args: { tool: "StreamList", args: {}, detail: "full" } })).toMatchObject({ ok: false, reason: expect.stringContaining("tools_call detail") });
     const inner = guardFor([{ ...o2Policy, innerAllow: ["manage_rules"] }]);
     expect(inner.check({ name: "o2__tools_call", args: { tool: "manage_rules", args: { operation: "create" } } })).toMatchObject({ ok: false });
   });
 
   it("caps the argument size", () => {
+    expect(g.check({ name: "o2__tools_call", args: { tool: "SearchSQL", args: '{"request_body":{}}' } })).toEqual({ ok: false, reason: "tools_call args must be an object" });
+    expect(g.prepare("o2__tools_call", { tool: "SearchSQL", args: "{}" })).toEqual({ tool: "SearchSQL", args: "{}" });
     expect(g.check({ name: "o2__tool_search", args: { query: "x".repeat(3000) } })).toMatchObject({ ok: false, reason: expect.stringContaining("at most 2000") });
   });
 
@@ -330,7 +364,7 @@ describe("McpGuard", () => {
     expect(call({ start: "2026-11-05T00:00:00Z", end: "2026-11-07T00:00:00Z", step: "5m" })).toMatchObject({ ok: false, reason: expect.stringContaining("48h") });
     expect(call({ start: "2026-11-06T12:00:00Z", end: "2026-11-07T12:00:00Z", step: "15s" })).toEqual({
       ok: false,
-      reason: "step 15s gives 5760 points per series; at most 1000: use a step of at least 87s",
+      reason: "step 15s gives 5761 points per series; at most 1000: use a step of at least 87s",
     });
     expect(call({ start: String(NOW / 1000 - 600), end: NOW / 1000, step: 30 })).toEqual({ ok: true });
     expect(call({ start: "yesterday", end: "now", step: "1m" })).toMatchObject({ ok: false, reason: expect.stringContaining("RFC 3339") });
@@ -343,6 +377,9 @@ describe("McpGuard", () => {
     expect(trailingLimit("SELECT * FROM t LIMIT 5, 30")).toBe(30);
     expect(trailingLimit("SELECT * FROM (SELECT * FROM t LIMIT 10) s")).toBeUndefined();
     expect(trailingLimit("SELECT 1 LIMIT 10 /* top */ -- end")).toBe(10);
+    expect(trailingLimit("SELECT * FROM k8s WHERE log LIKE '%--namespace%' LIMIT 50")).toBe(50);
+    expect(trailingLimit("SELECT * FROM t WHERE a = 'it''s /* x' LIMIT 7")).toBe(7);
+    expect(trailingLimit("SELECT * FROM t WHERE a = 'LIMIT 5'")).toBeUndefined();
     expect(duration("1m30s")).toBe(90);
     expect(duration("500ms")).toBe(0.5);
     expect(duration("0s")).toBeUndefined();
@@ -363,5 +400,10 @@ describe("mcp config", () => {
     expect(() => load("mcp:\n  servers:\n    - { name: o2, url: http://a.example.com/mcp, allowTools: [x] }\n    - { name: o2, url: http://b.example.com/mcp, allowTools: [x] }\n")).toThrow(/duplicate MCP server/);
     expect(() => load("mcp:\n  servers:\n    - { name: o2_prod, url: http://a.example.com/mcp, allowTools: [x] }\n")).toThrow(/lowercase/);
     expect(() => load("mcp:\n  servers:\n    - { name: o2, url: http://a.example.com/mcp, allowTools: [] }\n")).toThrow();
+  });
+
+  it("refuses query defaults above their limits", () => {
+    expect(() => load("agent:\n  queryLimits: { sqlMaxLimit: 50 }\n")).toThrow(/sqlDefaultLimit.*must not exceed sqlMaxLimit|must not exceed sqlMaxLimit/s);
+    expect(() => load("agent:\n  queryLimits: { maxRangeSec: 600 }\n")).toThrow(/must not exceed maxRangeSec/);
   });
 });

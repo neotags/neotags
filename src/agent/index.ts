@@ -27,11 +27,20 @@ export function toolOutput(result: unknown): string {
   return content.map((c) => (c.type === "text" ? (c.text ?? "") : `[${c.type}]`)).join("\n");
 }
 
+/** The arguments a tool ran with when it reports them (`details.arguments`: MCP tools, after the guard's defaults). */
+export function executedArgs(result: unknown): unknown {
+  const details = (result as { details?: unknown })?.details;
+  return details && typeof details === "object" && "arguments" in details ? (details as { arguments: unknown }).arguments : undefined;
+}
+
 /** One `execute_tool` span per tool call of `agent`; denials are reported through the returned spans' `denied`. */
 export function traceToolCalls(agent: Pick<Agent, "subscribe">, spans: ToolSpans): void {
   agent.subscribe((ev) => {
     if (ev.type === "tool_execution_start") spans.start({ id: ev.toolCallId, name: ev.toolName, args: ev.args });
-    else if (ev.type === "tool_execution_end") spans.end({ id: ev.toolCallId, isError: ev.isError, output: toolOutput(ev.result) });
+    else if (ev.type === "tool_execution_end") {
+      const args = executedArgs(ev.result);
+      spans.end({ id: ev.toolCallId, isError: ev.isError, output: toolOutput(ev.result), ...(args !== undefined && { args }) });
+    }
     else if (ev.type === "agent_end") spans.closeAll("the agent stopped before the tool finished");
   });
 }

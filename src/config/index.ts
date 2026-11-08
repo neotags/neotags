@@ -215,8 +215,13 @@ const fileSchema = z.object({
           // SQL without a LIMIT gets `sqlDefaultLimit`; a LIMIT above `sqlMaxLimit` is refused.
           sqlDefaultLimit: z.number().int().positive().default(100),
           sqlMaxLimit: z.number().int().positive().default(1000),
-          // PromQL range queries: points per series (range / step) at most.
-          promMaxPoints: z.number().int().positive().default(1000),
+          // PromQL range queries: points per series at most.
+          promMaxPoints: z.number().int().min(2).default(1000),
+        })
+        .superRefine((q, ctx) => {
+          // A default above its limit would make every query that relies on the default fail the check.
+          if (q.defaultRangeSec > q.maxRangeSec) ctx.addIssue({ code: "custom", path: ["defaultRangeSec"], message: "must not exceed maxRangeSec" });
+          if (q.sqlDefaultLimit > q.sqlMaxLimit) ctx.addIssue({ code: "custom", path: ["sqlDefaultLimit"], message: "must not exceed sqlMaxLimit" });
         })
         .prefault({}),
     })

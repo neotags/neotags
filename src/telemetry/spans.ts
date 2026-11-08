@@ -314,13 +314,17 @@ export class ToolSpans {
     if (t) t.denied = reason;
   }
 
-  end(call: { id: string; isError: boolean; output: string }): void {
+  /** `args`: the arguments that ran, when the tool changed the model's (the MCP tool guard's defaults). */
+  end(call: { id: string; isError: boolean; output: string; args?: unknown }): void {
     const t = this.open.get(call.id);
     if (!t) return;
     this.open.delete(call.id);
     guarded(() => {
       try {
-        if (this.o.captureContent) t.span.setAttribute("gen_ai.tool.call.result", recorded(call.output));
+        if (this.o.captureContent) {
+          if (call.args !== undefined) t.span.setAttribute("gen_ai.tool.call.arguments", recorded(JSON.stringify(call.args)));
+          t.span.setAttribute("gen_ai.tool.call.result", recorded(call.output));
+        }
         if (t.denied !== undefined) fail(t.span, t.denied, "tool_denied");
         // The error text is tool output: content, recorded only when content is.
         // Redacted before it is cut: a cut through a secret (a PEM block) would no longer match its pattern.

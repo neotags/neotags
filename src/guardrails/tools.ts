@@ -58,6 +58,8 @@ export class McpGuard {
     if (!id || !isObj(args)) return args;
     if (id.tool === TOOLS_CALL) {
       if (typeof args.tool !== "string") return args;
+      // Not an object (a model that sends the inner arguments as a JSON string): left as is, so `check` refuses it.
+      if (args.args !== undefined && !isObj(args.args)) return args;
       const inner = this.prepareQuery(args.tool, isObj(args.args) ? args.args : {});
       return { ...args, args: inner };
     }
@@ -75,6 +77,8 @@ export class McpGuard {
     if (size > this.o.maxArgChars) return deny(`the arguments are ${size} characters; at most ${this.o.maxArgChars}`);
     if (!isObj(call.args)) return deny("the arguments must be an object");
 
+    const outer = this.allowedValues(server, id.tool, call.args);
+    if (!outer.ok) return outer;
     let tool = id.tool;
     let args: Obj = call.args;
     if (tool === TOOLS_CALL) {
@@ -86,14 +90,10 @@ export class McpGuard {
       if (args.args !== undefined && !isObj(args.args)) return deny(`${TOOLS_CALL} args must be an object`);
       tool = inner;
       args = isObj(args.args) ? args.args : {};
+      const d = this.allowedValues(server, tool, args);
+      if (!d.ok) return d;
     }
 
-    for (const [param, values] of Object.entries(server.argAllow[tool] ?? {})) {
-      const v = args[param];
-      if (typeof v !== "string" || !values.includes(v)) {
-        return deny(`${tool} ${param} must be one of ${values.join(", ")}, not ${JSON.stringify(v ?? null)}`);
-      }
-    }
     if (tool === SEARCH_SQL) return this.checkSql(args);
     if (tool === PROM_RANGE) return this.checkProm(args);
     return OK;
@@ -101,10 +101,23 @@ export class McpGuard {
 
   /** Redacted, then cut to `outputChars` with a note that tells the model how to get the rest. */
   output(text: string): string {
-    const clean = redact(text).text;
     const max = this.o.outputChars;
-    if (clean.length <= max) return clean;
-    return `${clean.slice(0, max)}\n\n[Output truncated: ${max} of ${clean.length} characters shown. Narrow the query (a shorter time range, more filters, a smaller LIMIT) to see the rest.]`;
+    // Redaction is linear but not cheap, and a result can be megabytes: only the part that can be kept is scanned. Twice
+    // the budget, so that a secret across `max` is still whole when matched (redaction can shorten the text).
+    const clean = redact(text.length > 2 * max ? text.slice(0, 2 * max) : text).text;
+    if (clean.length <= max && text.length <= 2 * max) return clean;
+    return `${clean.slice(0, max)}\n\n[Output truncated: ${max} of ${text.length} characters shown. Narrow the query (a shorter time range, more filters, a smaller LIMIT) to see the rest.]`;
+  }
+
+  /** `argAllow` of `tool`: each listed parameter must be one of its values. */
+  private allowedValues(server: McpServerPolicy, tool: string, args: Obj): Decision {
+    for (const [param, values] of Object.entries(server.argAllow[tool] ?? {})) {
+      const v = args[param];
+      if (typeof v !== "string" || !values.includes(v)) {
+        return deny(`${tool} ${param} must be one of ${values.join(", ")}, not ${JSON.stringify(v ?? null)}`);
+      }
+    }
+    return OK;
   }
 
   private prepareQuery(tool: string, args: Obj): Obj {
@@ -180,9 +193,10 @@ export class McpGuard {
     if (range > this.o.limits.maxRangeSec) return deny(`the time range is ${hours(range)}; one query covers at most ${hours(this.o.limits.maxRangeSec)}: narrow it or split it`);
     const step = duration(args.step);
     if (step === undefined) return deny("step must be a duration such as 60s or 5m");
-    const points = Math.ceil(range / step);
+    // Prometheus returns both ends: floor(range / step) + 1 points.
+    const points = Math.floor(range / step) + 1;
     const max = this.o.limits.promMaxPoints;
-    if (points > max) return deny(`step ${args.step} gives ${points} points per series; at most ${max}: use a step of at least ${Math.ceil(range / max)}s`);
+    if (points > max) return deny(`step ${args.step} gives ${points} points per series; at most ${max}: use a step of at least ${Math.ceil(range / Math.max(1, max - 1))}s`);
     return OK;
   }
 }
@@ -204,7 +218,11 @@ function sqlQuery(args: Obj): { query: Obj; at: "body" | "top" } | undefined {
 
 /** Row count of the outer query's LIMIT (`LIMIT n`, `LIMIT n OFFSET m`, `LIMIT m, n`), or undefined without one. */
 export function trailingLimit(sql: string): number | undefined {
-  const body = sql.replace(/\/\*[\s\S]*?\*\//g, " ").replace(/--[^\n]*/g, " ");
+  // Literals first ('it''s', "col"), so that a "--" or "/*" inside one is not taken for a comment.
+  const body = sql
+    .replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "''")
+    .replace(/\/\*[\s\S]*?\*\//g, " ")
+    .replace(/--[^\n]*/g, " ");
   const m = /\blimit\s+(\d+)(?:\s*,\s*(\d+)|\s+offset\s+\d+)?\s*;?\s*$/i.exec(body);
   if (!m) return undefined;
   return Number(m[2] ?? m[1]);

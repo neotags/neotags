@@ -60,7 +60,8 @@ export interface RunObserver {
   queued?(info: { runId: string; ahead: number }): void;
   started?(info: { runId: string }): void;
   toolStart?(call: { id: string; name: string; args: unknown }): void;
-  toolEnd?(call: { id: string; name: string; isError: boolean; output: string; durationMs?: number }): void;
+  /** `args`: what actually ran, when a tool changed the model's arguments (MCP query defaults); for evidence links. */
+  toolEnd?(call: { id: string; name: string; isError: boolean; output: string; durationMs?: number; args?: unknown }): void;
   /** Text of the answer, in order. Concatenated, the deltas are the answer. */
   delta?(text: string): void;
   done?(result: RunResult): void;

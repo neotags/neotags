@@ -2,7 +2,7 @@ import { Agent, type AgentMessage, type AgentTool, type StreamFn } from "@earend
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { context as otelContext } from "@opentelemetry/api";
 import type { Logger } from "pino";
-import { agentChatRequest, thinkingLevel, toBeforeToolCall, toolOutput, traceToolCalls, type ToolGuard } from "../agent/index.js";
+import { agentChatRequest, executedArgs, thinkingLevel, toBeforeToolCall, toolOutput, traceToolCalls, type ToolGuard } from "../agent/index.js";
 import { ModelUnavailableError, isRequestError } from "../agent/llm.js";
 import type { Gateway } from "../agent/models.js";
 import type { Effort } from "../config/index.js";
@@ -146,7 +146,9 @@ export class PiAgentRunner implements AgentRunner {
           break;
         case "tool_execution_end": {
           const output = toolOutput(ev.result);
+          const args = executedArgs(ev.result);
           ctx.observer.toolEnd?.({
+            ...(args !== undefined && { args }),
             id: ev.toolCallId,
             name: ev.toolName,
             isError: ev.isError,

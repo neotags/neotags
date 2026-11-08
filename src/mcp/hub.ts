@@ -36,6 +36,8 @@ interface ServerState {
   down?: string;
   connecting?: Promise<void>;
   retryMs: number;
+  /** Epoch ms before which a call on a down server fails at once instead of reconnecting (the backoff). */
+  retryAt: number;
   timer?: NodeJS.Timeout;
 }
 
@@ -44,14 +46,15 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 /**
  * The configured MCP servers over Streamable HTTP, one long-lived client each. A server that cannot be reached
  * does not stop startup: it is retried in the background, and `unavailable()` names it so the agent is told.
- * A call on a server that went away tries one reconnect, then fails with an error the model can act on.
+ * A call that loses the connection (a restarted server, an expired session) reconnects once and retries; while a
+ * server is down, calls fail at once with an error the model can act on until the next reconnect is due.
  */
 export class McpHub {
   private states: ServerState[];
   private closed = false;
 
   constructor(private o: McpHubOptions) {
-    this.states = o.servers.map((cfg) => ({ cfg, tools: [], down: "not connected yet", retryMs: o.reconnectMinMs ?? 5000 }));
+    this.states = o.servers.map((cfg) => ({ cfg, tools: [], down: "not connected yet", retryMs: o.reconnectMinMs ?? 5000, retryAt: 0 }));
   }
 
   get guard(): McpGuard {
@@ -134,6 +137,8 @@ export class McpHub {
       s.tools = tools;
       s.down = undefined;
       s.retryMs = this.o.reconnectMinMs ?? 5000;
+      s.retryAt = 0;
+      clearTimeout(s.timer);
       this.o.log.info({ server: cfg.name, tools: tools.length }, "mcp: connected");
     } catch (err) {
       await client?.close().catch(() => undefined);
@@ -152,6 +157,7 @@ export class McpHub {
     clearTimeout(s.timer);
     s.timer = setTimeout(() => void this.connect(s), s.retryMs);
     s.timer.unref();
+    s.retryAt = Date.now() + s.retryMs;
     s.retryMs = Math.min(s.retryMs * 2, this.o.reconnectMaxMs);
   }
 
@@ -169,29 +175,42 @@ export class McpHub {
     };
   }
 
-  private async call(s: ServerState, tool: string, args: unknown, signal?: AbortSignal): Promise<AgentToolResult<undefined>> {
-    if (!s.client) {
-      clearTimeout(s.timer);
-      await this.connect(s);
-    }
-    const client = s.client;
+  private async call(s: ServerState, tool: string, args: unknown, signal?: AbortSignal): Promise<AgentToolResult<{ arguments: unknown }>> {
+    // Within the backoff a down server fails at once: a run making many calls must not wait on a connect each time.
+    if (!s.client && Date.now() >= s.retryAt) await this.connect(s);
+    let client = s.client;
     if (!client) throw new Error(unavailableMessage(s.cfg.name, s.down));
-    let res: CallToolResult;
-    try {
-      res = (await client.callTool({ name: tool, arguments: (args ?? {}) as Record<string, unknown> }, undefined, {
-        timeout: this.o.callTimeoutMs,
-        ...(signal && { signal }),
-      })) as CallToolResult;
-    } catch (err) {
-      if (signal?.aborted) throw err;
-      // A JSON-RPC error is the server answering (bad arguments, unknown tool, timeout); anything else is the
-      // connection: HTTP errors, refused connections, an expired session.
-      if (err instanceof McpError && err.code !== ErrorCode.ConnectionClosed) throw new Error(message(err));
-      if (s.client === client) this.markDown(s, message(err));
-      throw new Error(unavailableMessage(s.cfg.name, message(err)));
+    let res: CallToolResult | undefined;
+    for (let attempt = 0; !res; attempt++) {
+      try {
+        res = (await client.callTool({ name: tool, arguments: (args ?? {}) as Record<string, unknown> }, undefined, {
+          timeout: this.o.callTimeoutMs,
+          ...(signal && { signal }),
+        })) as CallToolResult;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        // A JSON-RPC error is the server answering (bad arguments, unknown tool, timeout); anything else is the
+        // connection: HTTP errors, refused connections, an expired session.
+        if (err instanceof McpError && err.code !== ErrorCode.ConnectionClosed) throw new Error(message(err));
+        // A restarted server or an expired session: reconnect once and retry; the tools are read-only.
+        if (attempt === 0 && s.client === client) {
+          s.client = undefined;
+          void client.close().catch(() => undefined);
+          await this.connect(s);
+          if (s.client) {
+            client = s.client;
+            continue;
+          }
+          throw new Error(unavailableMessage(s.cfg.name, s.down));
+        }
+        if (s.client === client) this.markDown(s, message(err));
+        throw new Error(unavailableMessage(s.cfg.name, message(err)));
+      }
     }
     const text = this.o.guard.output(resultText(res));
-    return { content: [{ type: "text", text }], details: undefined, ...(res.isError && { isError: true }) };
+    // The arguments that ran, after the guard's defaults, for traces and the entry (evidence links): pi reports the
+    // model's own arguments on tool events.
+    return { content: [{ type: "text", text }], details: { arguments: args }, ...(res.isError && { isError: true }) };
   }
 }
 
