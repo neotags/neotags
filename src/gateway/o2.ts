@@ -14,7 +14,7 @@ export interface O2GatewayOptions {
   cfg: Config["o2Gateway"];
   /** x-o2-agent-key. */
   key: string;
-  runs: Pick<RunManager, "submit" | "cancelSession" | "active">;
+  runs: Pick<RunManager, "submit" | "cancelSession" | "active" | "stats">;
   log: Pick<Logger, "info" | "warn" | "error">;
   pingMs?: number;
 }
@@ -64,11 +64,13 @@ function sendJson(res: ServerResponse, body: unknown): void {
 async function readBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
   const chunks: Buffer[] = [];
   let size = 0;
+  // Read to the end even when too large: leaving the loop early destroys the socket, and O2 would get a reset
+  // instead of the 400.
   for await (const chunk of req) {
     size += (chunk as Buffer).length;
-    if (size > maxBytes) throw new HttpError(400, "bad_request", `the request body is over ${Math.floor(maxBytes / 1024)} KB`);
-    chunks.push(chunk as Buffer);
+    if (size <= maxBytes) chunks.push(chunk as Buffer);
   }
+  if (size > maxBytes) throw new HttpError(400, "bad_request", `the request body is over ${Math.floor(maxBytes / 1024)} KB`);
   if (size === 0) return {};
   try {
     return JSON.parse(Buffer.concat(chunks).toString("utf8"));
@@ -167,7 +169,8 @@ export function createO2Gateway(o: O2GatewayOptions) {
       res,
       question,
       lang,
-      firstTurn: history.length === 0,
+      // What the panel sent, not what fits: a follow-up whose history was all cut must not rename the chat.
+      firstTurn: (body.history ?? []).length === 0,
       ...(orgId && { org: orgId }),
       ...(server && { currentServer: server }),
       fallbackTraceId: trace?.[1] ?? randomBytes(16).toString("hex"),
@@ -185,6 +188,10 @@ export function createO2Gateway(o: O2GatewayOptions) {
       tools: [turn.navigationTool()],
       ...(trace && { traceparent: traceparent! }),
     };
+    // The user may have pressed Stop while the body was still arriving: no run for a turn nobody reads.
+    if (res.destroyed || req.socket.destroyed) return;
+    // Queueing is fine for a moment; a long queue means minutes of pings, so the panel gets its turn-limit notice.
+    if (o.runs.stats().queued >= cfg.maxQueued) throw new HttpError(429, "turn_limit", "too many questions are waiting; ask again shortly", 30);
     const submitted = o.runs.submit(input, turn.observer);
     if (!submitted.ok) {
       if (submitted.code === "rate_limited") throw new HttpError(429, "turn_limit", submitted.message, submitted.retryAfterSec);
@@ -243,6 +250,8 @@ export function createO2Gateway(o: O2GatewayOptions) {
   const server: Server = createServer((req, res) => {
     handle(req, res).catch((err: unknown) => {
       if (err instanceof HttpError) return sendError(res, err);
+      // The client went away mid-request (an aborted upload): nobody to answer.
+      if (res.destroyed || req.destroyed) return;
       log.error({ err }, "o2 gateway request failed");
       sendError(res, new HttpError(500, "internal_error", "internal error"));
     });

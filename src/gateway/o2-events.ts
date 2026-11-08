@@ -76,11 +76,14 @@ export function sqlCallArgs(args: Record<string, unknown>): SqlCallArgs | undefi
   };
 }
 
+/** At most `max` characters (code points, so an emoji is never split), with an ellipsis when cut. */
+export function cap(s: string, max: number): string {
+  const chars = Array.from(s);
+  return chars.length > max ? `${chars.slice(0, max - 1).join("")}…` : s;
+}
+
 const CARD_STRING_CHARS = 2000;
-const card = (v: string) => {
-  const s = redact(v).text;
-  return s.length > CARD_STRING_CHARS ? `${s.slice(0, CARD_STRING_CHARS)}…` : s;
-};
+const card = (v: string) => cap(redact(v).text, CARD_STRING_CHARS);
 
 /** What the tool card shows of the arguments: the query fields the panel knows, redacted and capped. */
 export function cardContext(t: PanelTool): Record<string, unknown> {
@@ -106,7 +109,7 @@ type Lang<T> = Record<AnswerLang, T>;
 
 /** One line on the tool card while the call runs. `other`: the call queries another org than the user's. */
 export function callMessage(t: PanelTool, lang: AnswerLang, other?: string): string {
-  const s = (v: unknown) => (typeof v === "string" && v ? card(v).slice(0, 80) : undefined);
+  const s = (v: unknown) => (typeof v === "string" && v ? cap(redact(v).text, 80) : undefined);
   const stream = s(t.args.stream_name) ?? s(FROM.exec(String(sqlQuery(t.args)?.sql ?? ""))?.[1]);
   const m: Lang<string> = (() => {
     switch (t.tool) {
@@ -168,8 +171,7 @@ const ERROR_MESSAGE_CHARS = 300;
 /** The card line of a finished call. A failure shows the start of the error, redacted. */
 export function resultMessage(ok: boolean, output: string, summary: { count?: number } | undefined, lang: AnswerLang): string {
   if (!ok) {
-    const first = redact(output.trim()).text.replace(/\s+/g, " ");
-    const text = first.length > ERROR_MESSAGE_CHARS ? `${first.slice(0, ERROR_MESSAGE_CHARS)}…` : first;
+    const text = cap(redact(output.trim()).text.replace(/\s+/g, " "), ERROR_MESSAGE_CHARS);
     return text || (lang === "zh" ? "调用失败" : "The call failed");
   }
   if (summary?.count !== undefined) return lang === "zh" ? `返回 ${summary.count} 行` : `Returned ${summary.count} rows`;
@@ -201,8 +203,7 @@ const TITLE_CHARS = 60;
 
 /** Chat title for the first turn, from the question: written by code, so the first event goes out at once. */
 export function title(question: string): string {
-  const one = redact(question).text.replace(/\s+/g, " ").trim();
-  return one.length > TITLE_CHARS ? `${one.slice(0, TITLE_CHARS - 1)}…` : one;
+  return cap(redact(question).text.replace(/\s+/g, " ").trim(), TITLE_CHARS);
 }
 
 /**

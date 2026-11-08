@@ -296,6 +296,8 @@ const fileSchema = z.object({
       maxBodyKb: z.number().int().positive().default(4096),
       // Earlier turns kept for the model, newest first; older ones are dropped.
       maxHistoryChars: z.number().int().positive().default(48_000),
+      // Runs waiting for a slot (all entries); beyond it a turn is refused with 429 turn_limit instead of queued.
+      maxQueued: z.number().int().nonnegative().default(8),
     })
     .prefault({}),
   // LLM traces over OTLP (OpenObserve, Langfuse, an OTel collector). The exporter is configured with the standard

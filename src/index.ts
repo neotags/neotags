@@ -27,14 +27,15 @@ let llm: LlmClient | undefined;
 let routerLlm: LlmClient | undefined;
 let gateway: Gateway | undefined;
 if (llmConfigured(cfg.llm)) {
-  gateway = createGateway(cfg, {
+  const g = createGateway(cfg, {
     onBreakerChange: (model, state) =>
       state === "closed" ? log.info({ model, breaker: state }, "llm model available again") : log.warn({ model, breaker: state }, "llm model circuit breaker"),
   });
-  llm = createLlm(cfg, { gateway });
-  routerLlm = createLlm(cfg, { role: "router", gateway });
+  gateway = g;
+  llm = createLlm(cfg, { gateway: g });
+  routerLlm = createLlm(cfg, { role: "router", gateway: g });
   const chains = Object.fromEntries(
-    CHAINS.map((c) => [c, gateway!.policy.steps(c).map((s) => (s.effort ? `${s.model.id}@${s.effort}` : s.model.id))]),
+    CHAINS.map((c) => [c, g.policy.steps(c).map((s) => (s.effort ? `${s.model.id}@${s.effort}` : s.model.id))]),
   );
   log.info({ chains }, "llm configured");
   if (cfg.llm.chains && (cfg.llm.model || cfg.llm.routerModel)) {

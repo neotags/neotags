@@ -228,10 +228,10 @@ function callerContext(traceparent: string | undefined): { parent?: Context; lin
   return (sc.traceFlags & TraceFlags.SAMPLED) === TraceFlags.SAMPLED ? { parent: trace.setSpanContext(ROOT_CONTEXT, sc) } : { link: sc };
 }
 
-/** Trace id of a recording span; undefined when tracing is off (the no-op span has an invalid context). */
+/** Trace id of a span that is exported; undefined when tracing is off or the sampler dropped it. */
 export function spanTraceId(span: Span): string | undefined {
   const sc = span.spanContext();
-  return isSpanContextValid(sc) ? sc.traceId : undefined;
+  return span.isRecording() && isSpanContextValid(sc) ? sc.traceId : undefined;
 }
 
 /**

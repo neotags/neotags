@@ -83,6 +83,7 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #   orgs: {}                      # O2 org identifier -> the mcp.servers entry that queries it, e.g. { default: o2 }
 #   maxBodyKb: 4096
 #   maxHistoryChars: 48000        # earlier turns kept, newest first
+#   maxQueued: 8                  # runs waiting for a slot; beyond it O2 gets 429 turn_limit
 # sandbox:                        # where skill-pack commands run (executor/README.md); nothing runs in this process
 #   backend: none                 # none (default): every execution is refused. local: the executor sidecar
 #   socket: /run/executor/exec.sock

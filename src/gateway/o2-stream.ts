@@ -22,6 +22,9 @@ import {
   type SqlCallArgs,
 } from "./o2-events.js";
 
+/** Unsent output a stream may hold before the client counts as gone. */
+const MAX_BUFFERED_BYTES = 1024 * 1024;
+
 /** The tool through which the model asks to open a query on the user's page. */
 export const NAVIGATE_TOOL = "open_query_in_o2";
 
@@ -55,11 +58,13 @@ export class O2Turn {
   /** The last SearchSQL that succeeded against the current org: what navigation may open. */
   private lastSql: SqlCallArgs | undefined;
   private pendingNav: SqlCallArgs | undefined;
+  private handle: RunHandle | undefined;
 
   constructor(private o: O2TurnOptions) {}
 
   /** Status line and headers, then the first event. Call once the run was accepted. */
   open(handle: RunHandle): void {
+    this.handle = handle;
     const { res } = this.o;
     res.writeHead(200, {
       "content-type": "text/event-stream",
@@ -167,8 +172,9 @@ export class O2Turn {
         if (!this.textSent) this.text(r.answer);
         return this.end(errorEvent("budget_exhausted", lang));
       case "failed":
-        // The degraded answer is a normal reply (the context package written by code); a half-written one is an error.
-        if (r.degraded) {
+        // The degraded answer is a normal reply (the context package written by code); a half-written one is an
+        // error, also when the run was degraded after part of the answer went out (the abort backstop).
+        if (r.degraded && !this.textSent) {
           this.text(r.answer);
           return this.end({ type: "complete", trace_id: r.traceId ?? this.o.fallbackTraceId });
         }
@@ -188,6 +194,15 @@ export class O2Turn {
     const { res } = this.o;
     if (this.ended || res.writableEnded || res.destroyed) return;
     res.write(chunk);
+    // A reader that stopped reading would make the buffer grow for the rest of the run: give up on it.
+    if (res.writableLength > MAX_BUFFERED_BYTES) {
+      this.ended = true;
+      this.stopPing();
+      this.o.log.warn({ runId: this.handle?.id, buffered: res.writableLength }, "o2 client is not reading; run cancelled");
+      this.handle?.cancel("client not reading");
+      res.destroy();
+      return;
+    }
     this.armPing();
   }
 

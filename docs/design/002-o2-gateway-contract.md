@@ -169,4 +169,4 @@ Choices the contract left to the gateway (`src/gateway/o2.ts`, `o2-stream.ts`, `
   | client disconnected | nothing: the run is cancelled |
 
 - **Trace id.** `complete.trace_id` is the `invoke_agent` span's trace id. A sampled `traceparent` makes the span its child (same trace id); an unsampled one would make the default sampler drop every span of the run, so it becomes a span link on a new root. With tracing off, the caller's trace id, else a random one.
-- **Limits.** History keeps the newest turns within `o2Gateway.maxHistoryChars`; a page-context value over 4000 characters is replaced by a note; the body is capped at `o2Gateway.maxBodyKb`.
+- **Limits.** History keeps the newest turns within `o2Gateway.maxHistoryChars`; a page-context value over 4000 characters is replaced by a note; the body is capped at `o2Gateway.maxBodyKb`. A turn waits for a slot while at most `o2Gateway.maxQueued` runs are queued; past that it gets `429 turn_limit`. A client that stops reading (over 1 MB unsent) is disconnected and its run cancelled.
