@@ -4,6 +4,7 @@ import type { ToolGuard } from "../agent/index.js";
 import type { Gateway } from "../agent/models.js";
 import type { Config } from "../config/index.js";
 import type { McpHub } from "../mcp/index.js";
+import { EXEC_TOOL, skillExecTool, type SkillExecutor } from "../sandbox/index.js";
 import { SkillPackIndex, loadSkillPacks } from "../tools/skillpacks.js";
 import { RunManager } from "./manager.js";
 import { PiAgentRunner } from "./pi-runner.js";
@@ -33,17 +34,35 @@ export function createRunManager(
     mcp?: Pick<McpHub, "tools" | "unavailable" | "guard">;
     tools?: AgentTool<any>[];
     guard?: ToolGuard;
+    /** Command execution behind the sandbox tool guard; a run gets `run_skill_command` only when one of its packs can run something. */
+    executor?: SkillExecutor;
   },
 ): RunManager {
   const a = cfg.agent;
-  const { mcp } = deps;
-  const tools = mcp ? () => [...mcp.tools(), ...(deps.tools ?? [])] : deps.tools;
-  const guard: ToolGuard | undefined = mcp
+  const { mcp, executor } = deps;
+  const exec = executor?.enabled ? executor : undefined;
+  // Built per run: the exec tool lists and allows only that run's skill packs.
+  const tools =
+    mcp || exec
+      ? ({ packs }: { packs: readonly string[] }) => {
+          const run = exec && skillExecTool(exec, packs, a.toolOutputChars);
+          return [...(mcp?.tools() ?? []), ...(deps.tools ?? []), ...(run ? [run] : [])];
+        }
+      : deps.tools;
+  const checks: ToolGuard[] = [
+    ...(mcp ? [(call: Parameters<ToolGuard>[0]) => mcp.guard.check(call)] : []),
+    ...(exec ? [(call: Parameters<ToolGuard>[0]) => (call.name === EXEC_TOOL ? exec.check(call.args, call.packs ?? []) : { ok: true as const })] : []),
+    ...(deps.guard ? [deps.guard] : []),
+  ];
+  const guard: ToolGuard | undefined = checks.length
     ? async (call) => {
-        const d = mcp.guard.check(call);
-        return d.ok && deps.guard ? deps.guard(call) : d;
+        for (const check of checks) {
+          const d = await check(call);
+          if (!d.ok) return d;
+        }
+        return { ok: true };
       }
-    : deps.guard;
+    : undefined;
   const runner = new PiAgentRunner({
     gateway: deps.gateway,
     index: deps.index,

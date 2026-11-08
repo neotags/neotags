@@ -5,16 +5,77 @@ import { Type } from "@earendil-works/pi-ai";
 import { parse } from "yaml";
 import { z } from "zod";
 
-// What a pack may run in the execution sandbox (§13 of the design). Parsed here, enforced by the tool guard.
+// Headers the executor never injects a credential into.
+const HOP_HEADERS = new Set(["host", "content-length", "transfer-encoding", "connection", "keep-alive", "te", "trailer", "upgrade", "proxy-authorization", "proxy-connection"]);
+
+// What a pack may run in the execution sandbox (§13 of the design). Parsed here, enforced by the tool guard. The
+// rules are the executor's (executor/executor/policy.py), so a declaration it would refuse fails here, at load time.
+// A host name (or an IP literal, IPv6 in brackets), as the executor's normalize_host and _valid_host read it.
+const HOST = /^(?:(?!-)[a-z0-9-]{1,63}(?<!-)(?:\.(?!-)[a-z0-9-]{1,63}(?<!-))*|\[[0-9a-f:.]+\])$/;
+const normHost = (h: string) => h.trim().toLowerCase().replace(/\.$/, "");
+const validHost = (h: string) => HOST.test(h) && h.length <= 253 && h !== "localhost" && !h.endsWith(".localhost");
+
+/** A `net` entry: one host, optionally with a port in 1..65535; no wildcards, paths, userinfo or spaces. */
+function netEntry(entry: string): { host: string; port?: number } | undefined {
+  const e = normHost(entry);
+  // A bare IPv6 literal (more than one colon, no brackets) has no port, as in the executor's split_host_port.
+  if (!e.startsWith("[") && e.split(":").length > 2) return /^[0-9a-f:.]+$/.test(e) ? { host: e } : undefined;
+  const m = /^(.*?)(?::(\d+))?$/.exec(e);
+  if (!m || !validHost(m[1]!)) return undefined;
+  if (m[2] === undefined) return { host: m[1]! };
+  const port = Number(m[2]);
+  return port >= 1 && port <= 65535 ? { host: m[1]!, port } : undefined;
+}
+const bare = (h: string) => h.replace(/^\[|\]$/g, "");
+
 const sandboxSchema = z.object({
-  net: z.array(z.string().min(1)).default([]),
-  tools: z.array(z.string().min(1)).default([]),
+  net: z
+    .array(z.string().refine((e) => netEntry(e) !== undefined, "a single host name (not localhost), optionally with a port in 1..65535"))
+    .max(16)
+    .default([]),
+  // Bare command names: the executor looks them up on its PATH.
+  tools: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/, "a bare command name")).default([]),
   credentials: z
-    .array(z.object({ name: z.string().min(1), hosts: z.array(z.string().min(1)).min(1), header: z.string().min(1) }))
+    .array(
+      z.object({
+        name: z.string().regex(/^[A-Z][A-Z0-9_]{0,63}$/, "an upper-case env var name"),
+        hosts: z.array(z.string().min(1)).min(1),
+        header: z
+          .string()
+          .regex(/^[A-Za-z0-9!#$%&'*+.^_`|~-]{1,64}$/, "a header name")
+          .refine((h) => !HOP_HEADERS.has(h.toLowerCase()), "not a header a credential may go into"),
+      }),
+    )
+    .max(8)
     .default([]),
   limits: z
-    .object({ cpu: z.union([z.number(), z.string()]).optional(), mem: z.string().optional(), timeoutSec: z.number().positive().optional() })
+    .object({
+      // Average cores over the timeout: a number (or "0.5"), not "500m".
+      cpu: z
+        .union([z.number(), z.string().regex(/^\d+(\.\d+)?$/, "a number of cores, not 500m")])
+        .refine((c) => Number(c) > 0, "more than 0")
+        .optional(),
+      // MiB, or "512Mi" / "1Gi"; the executor's floor is 16 MiB.
+      mem: z
+        .union([z.number().int(), z.string().regex(/^\d+(Mi|Gi)$/, "like 512Mi")])
+        .refine((m) => (typeof m === "number" ? m : Number.parseInt(m, 10) * (m.endsWith("Gi") ? 1024 : 1)) >= 16, "at least 16Mi")
+        .optional(),
+      timeoutSec: z.number().positive().optional(),
+    })
     .optional(),
+}).superRefine((s, ctx) => {
+  // The executor's own cross-field rules; its upper limits (cpu, mem, timeoutSec) are its configuration and are
+  // checked there.
+  const hosts = new Set(s.net.map((e) => bare(netEntry(e)?.host ?? "")));
+  const names = new Set<string>();
+  s.credentials.forEach((c, i) => {
+    if (names.has(c.name)) ctx.addIssue({ code: "custom", path: ["credentials", i, "name"], message: `duplicate credential ${c.name}` });
+    names.add(c.name);
+    for (const h of c.hosts) {
+      // A host without a port: the executor matches credential hosts against net hosts, ports aside.
+      if (!hosts.has(bare(normHost(h)))) ctx.addIssue({ code: "custom", path: ["credentials", i, "hosts"], message: `host ${h} is not a host (without port) in net` });
+    }
+  });
 });
 export type SandboxSpec = z.infer<typeof sandboxSchema>;
 
@@ -167,7 +228,10 @@ export async function loadSkillPacks(o: SkillPackOptions): Promise<{ index: Skil
       if (meta.sandbox !== undefined) {
         const s = sandboxSchema.safeParse(meta.sandbox);
         if (s.success) sandbox = s.data;
-        else warnings.push(`skill pack ${name}: invalid sandbox declaration, ignored (the pack cannot execute anything)`);
+        else {
+          const issues = s.error.issues.map((i) => `${["sandbox", ...i.path].join(".")}: ${i.message}`).join("; ");
+          warnings.push(`skill pack ${name}: invalid sandbox declaration, ignored (the pack cannot execute anything): ${issues}`);
+        }
       }
     }
     const files = new Set(whole ? await listRefs(name) : []);

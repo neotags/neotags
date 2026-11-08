@@ -25,7 +25,7 @@ export function splitToolName(name: string): { server: string; tool: string } | 
 }
 
 type Obj = Record<string, unknown>;
-const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
+export const isObj = (v: unknown): v is Obj => typeof v === "object" && v !== null && !Array.isArray(v);
 const deny = (reason: string): Decision => ({ ok: false, reason });
 const OK: Decision = { ok: true };
 
@@ -101,18 +101,7 @@ export class McpGuard {
 
   /** Redacted, then cut to `outputChars` with a note that tells the model how to get the rest. */
   output(text: string): string {
-    const max = this.o.outputChars;
-    // Redaction is linear but not cheap, and a result can be megabytes: only a prefix is scanned. The scanned prefix must
-    // still be twice the budget after redaction, which can shorten it a lot, so that a secret cut at the end of the
-    // prefix (and no longer matching its pattern) lies past what is kept unless it is longer than `max` itself.
-    let window = 2 * max;
-    let clean = redact(text.slice(0, window)).text;
-    while (window < text.length && clean.length < 2 * max) {
-      window *= 2;
-      clean = redact(text.slice(0, window)).text;
-    }
-    if (clean.length <= max && window >= text.length) return clean;
-    return `${clean.slice(0, max)}\n\n[Output truncated: ${max} of ${text.length} characters shown. Narrow the query (a shorter time range, more filters, a smaller LIMIT) to see the rest.]`;
+    return boundedOutput(text, this.o.outputChars, "Narrow the query (a shorter time range, more filters, a smaller LIMIT) to see the rest.");
   }
 
   /** `argAllow` of `tool`: each listed parameter must be one of its values. */
@@ -210,6 +199,21 @@ export class McpGuard {
     if (points > max) return deny(`step ${args.step} gives ${points} points per series; at most ${max}: use a step of at least ${Math.ceil(range / Math.max(1, max - 1))}s`);
     return OK;
   }
+}
+
+/** `text` redacted, then cut to `max` characters with a note ending in `hint`. */
+export function boundedOutput(text: string, max: number, hint: string): string {
+  // Redaction is linear but not cheap, and a result can be megabytes: only a prefix is scanned. The scanned prefix must
+  // still be twice the budget after redaction, which can shorten it a lot, so that a secret cut at the end of the
+  // prefix (and no longer matching its pattern) lies past what is kept unless it is longer than `max` itself.
+  let window = 2 * max;
+  let clean = redact(text.slice(0, window)).text;
+  while (window < text.length && clean.length < 2 * max) {
+    window *= 2;
+    clean = redact(text.slice(0, window)).text;
+  }
+  if (clean.length <= max && window >= text.length) return clean;
+  return `${clean.slice(0, max)}\n\n[Output truncated: ${max} of ${text.length} characters shown. ${hint}]`;
 }
 
 const missing = (v: unknown) => v === undefined || v === null || v === "";

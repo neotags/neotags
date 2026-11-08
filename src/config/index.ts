@@ -273,6 +273,16 @@ const fileSchema = z.object({
       maxFileKb: z.number().positive().default(256),
     })
     .prefault({}),
+  // Where skill-pack commands run (§13 of the design). Only packs whose front matter declares `sandbox` may run
+  // anything, and only the declared tools, hosts, credentials and limits. Nothing ever runs in this process.
+  sandbox: z
+    .object({
+      // none: every execution is refused. local: the executor sidecar in the Pod (executor/README.md).
+      backend: z.enum(["none", "local"]).default("none"),
+      // The executor's unix socket, on an emptyDir shared with the sidecar.
+      socket: z.string().min(1).default("/run/executor/exec.sock"),
+    })
+    .prefault({}),
   // LLM traces over OTLP (OpenObserve, Langfuse, an OTel collector). The exporter is configured with the standard
   // OTEL_EXPORTER_OTLP_* env vars; tracing is off unless an endpoint is set.
   telemetry: z

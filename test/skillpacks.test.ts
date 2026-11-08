@@ -82,6 +82,43 @@ describe("skill pack loader", () => {
     expect(warnings.join()).toMatch(/invalid sandbox/);
   });
 
+  it("drops declarations the executor would refuse: paths as tools, Kubernetes CPU, bad credential names or headers", async () => {
+    const bad = [
+      "{ tools: [/usr/bin/jq] }",
+      "{ tools: ['my tool'] }",
+      "{ tools: [jq], limits: { cpu: 500m } }",
+      "{ tools: [jq], limits: { mem: 1G } }",
+      "{ tools: [jq], net: [a.example.com], credentials: [{ name: api-token, hosts: [a.example.com], header: Authorization }] }",
+      "{ tools: [jq], net: [a.example.com], credentials: [{ name: TOKEN, hosts: [a.example.com], header: Host }] }",
+      "{ tools: [jq], net: ['*.example.com'] }",
+      "{ tools: [jq], net: [a.example.com/path] }",
+      "{ tools: [jq], net: [localhost] }",
+      "{ tools: [jq], net: [a.example.com], credentials: [{ name: TOKEN, hosts: [b.example.com], header: Authorization }] }",
+      "{ tools: [jq], net: [a.example.com], credentials: [{ name: T, hosts: [a.example.com], header: X-A }, { name: T, hosts: [a.example.com], header: X-B }] }",
+      "{ tools: [jq], limits: { mem: 8Mi } }",
+      "{ tools: [jq], limits: { cpu: '0' } }",
+      "{ tools: [jq], net: ['a.example.com:0'] }",
+      "{ tools: [jq], net: ['a.example.com:99999'] }",
+      `{ tools: [jq], net: ['${"a".repeat(60)}.${"b".repeat(60)}.${"c".repeat(60)}.${"d".repeat(60)}.example.com'] }`,
+      "{ tools: [jq], net: ['a.example.com:8443'], credentials: [{ name: T, hosts: ['a.example.com:8443'], header: Authorization }] }",
+    ];
+    bad.forEach((s, i) => put(`bad${i}/SKILL.md`, `---\nname: bad${i}\ndescription: d\nsandbox: ${s}\n---\nbody`));
+    const { index } = await load({ packs: bad.map((_, i) => `bad${i}`), refs: {} });
+    bad.forEach((s, i) => expect(index.get(`bad${i}`)!.sandbox, s).toBeUndefined());
+  });
+
+  it("keeps declarations the executor accepts: host with port, credential host with a port in net, numeric cpu strings", async () => {
+    put("ok/SKILL.md", "---\nname: ok\ndescription: d\nsandbox: { tools: [jq], net: ['API.example.com:8080'], credentials: [{ name: TOKEN, hosts: [api.example.com], header: Authorization }], limits: { cpu: '0.5', mem: 1Gi } }\n---\nbody");
+    const { index } = await load({ packs: ["ok"], refs: {} });
+    expect(index.get("ok")!.sandbox?.limits).toEqual({ cpu: "0.5", mem: "1Gi" });
+  });
+
+  it("says which rule an invalid sandbox declaration breaks", async () => {
+    put("bad/SKILL.md", "---\nname: bad\ndescription: d\nsandbox: { tools: [jq], net: [a.example.com], credentials: [{ name: T, hosts: [b.example.com], header: Authorization }] }\n---\nbody");
+    const { warnings } = await load({ packs: ["bad"], refs: {} });
+    expect(warnings.join()).toContain("sandbox.credentials.0.hosts: host b.example.com is not a host (without port) in net");
+  });
+
   it("rejects paths that escape the pack dir, by name or by symlink", async () => {
     symlinkSync(path.join(outside, "secret.md"), path.join(dir, "governance/references/link.md"));
     const { index, warnings } = await load({ refs: { governance: ["../../etc/passwd", "/etc/passwd", "link.md", "research-method.md"], "../x": ["a.md"] } });

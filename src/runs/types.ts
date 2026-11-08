@@ -22,7 +22,10 @@ export interface RunInput {
   history?: HistoryTurn[];
   /** Page context (O2: stream, SQL, time range, org) or alert labels. Untrusted. */
   context?: Record<string, unknown>;
-  /** Skill packs in the system prompt; default: agent.entries[source]. */
+  /**
+   * Skill packs in the system prompt; default: agent.entries[source]. They are also the packs the run may execute
+   * commands through (their `sandbox` hosts and credentials), so set them from configuration, never from a request.
+   */
   packs?: string[];
   /** Links for the "AI unavailable" answer (stream, dashboard, ...), built by the entry. */
   links?: { title: string; url: string }[];

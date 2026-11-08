@@ -77,6 +77,9 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #   packs: [o2-query-assistant]   # whole packs: SKILL.md + every text file under references/
 #   refs:                         # single reference files of other packs, relative to references/
 #     some-pack: [method.md, data/table.json]
+# sandbox:                        # where skill-pack commands run (executor/README.md); nothing runs in this process
+#   backend: none                 # none (default): every execution is refused. local: the executor sidecar
+#   socket: /run/executor/exec.sock
 telemetry:               # LLM traces over OTLP/HTTP (OpenObserve, Langfuse, an OTel collector): one trace per
   #                      # request, one span per LLM call with model, tokens, latency, retries. Off unless
   #                      # OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (or OTEL_EXPORTER_OTLP_ENDPOINT) is set; auth via

@@ -20,8 +20,8 @@ export interface PiRunnerOptions {
   botName: string;
   /** Skill packs in the system prompt per entry (agent.entries). */
   entries: Partial<Record<RunSource, string[]>>;
-  /** More tools (MCP) next to read_skill / read_skill_ref; a function is read at the start of every run. */
-  tools?: AgentTool<any>[] | (() => AgentTool<any>[]);
+  /** More tools (MCP) next to read_skill / read_skill_ref; a function is read at the start of every run, with its skill packs. */
+  tools?: AgentTool<any>[] | ((run: { packs: readonly string[] }) => AgentTool<any>[]);
   /** Data sources (MCP servers) that are down at the start of a run; the system prompt names them. */
   unavailable?: () => string[];
   /** Checked after the built-in rule that only registered tools run. */
@@ -72,12 +72,13 @@ export class PiAgentRunner implements AgentRunner {
     const { step, lease } = picked;
     const stats = { steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 }, model: step.model.id, ...(step.effort && { effort: step.effort }) };
 
-    const extra = typeof o.tools === "function" ? o.tools() : (o.tools ?? []);
+    const packs = input.packs ?? o.entries[input.source] ?? [];
+    const extra = typeof o.tools === "function" ? o.tools({ packs }) : (o.tools ?? []);
     const tools = [...skillPackTools(o.index), ...extra];
     const names = new Set(tools.map((t) => t.name));
     const guard: ToolGuard = async (call) => {
       if (!names.has(call.name)) return { ok: false, reason: `unknown tool ${call.name}` };
-      return o.guard ? o.guard(call) : { ok: true };
+      return o.guard ? o.guard({ ...call, packs }) : { ok: true };
     };
     const budget = ctx.budget;
     const fits = (messages: AgentMessage[]) => compactToBudget(messages, { maxTokens: budget.maxInputTokens, charsPerToken: o.charsPerToken }).fits;
@@ -99,7 +100,7 @@ export class PiAgentRunner implements AgentRunner {
         systemPrompt: systemPrompt({
           botName: o.botName,
           index: o.index,
-          entryPacks: input.packs ?? o.entries[input.source] ?? [],
+          entryPacks: packs,
           unavailable: o.unavailable?.() ?? [],
         }),
         model: step.model,
