@@ -27,10 +27,13 @@ export function toolOutput(result: unknown): string {
   return content.map((c) => (c.type === "text" ? (c.text ?? "") : `[${c.type}]`)).join("\n");
 }
 
-/** The arguments a tool ran with when it reports them (`details.arguments`: MCP tools, after the guard's defaults). */
+/** Key of a tool result's `details` with the arguments that ran (MCP tools, after the tool guard's defaults). */
+export const EXECUTED_ARGS = "neotagsExecutedArgs";
+
+/** The arguments a tool ran with when it reports them under {@link EXECUTED_ARGS}; else undefined (the model's ran). */
 export function executedArgs(result: unknown): unknown {
   const details = (result as { details?: unknown })?.details;
-  return details && typeof details === "object" && "arguments" in details ? (details as { arguments: unknown }).arguments : undefined;
+  return details && typeof details === "object" && EXECUTED_ARGS in details ? (details as Record<string, unknown>)[EXECUTED_ARGS] : undefined;
 }
 
 /** One `execute_tool` span per tool call of `agent`; denials are reported through the returned spans' `denied`. */

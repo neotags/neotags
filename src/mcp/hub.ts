@@ -1,9 +1,10 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "@earendil-works/pi-ai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Logger } from "pino";
+import { EXECUTED_ARGS } from "../agent/index.js";
 import type { Config } from "../config/index.js";
 import { mcpToolName, type McpGuard } from "../guardrails/tools.js";
 
@@ -46,7 +47,7 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 /**
  * The configured MCP servers over Streamable HTTP, one long-lived client each. A server that cannot be reached
  * does not stop startup: it is retried in the background, and `unavailable()` names it so the agent is told.
- * A call that loses the connection (a restarted server, an expired session) reconnects once and retries; while a
+ * A call rejected on the connection (a restarted server, an expired session) reconnects once and retries; while a
  * server is down, calls fail at once with an error the model can act on until the next reconnect is due.
  */
 export class McpHub {
@@ -175,11 +176,9 @@ export class McpHub {
     };
   }
 
-  private async call(s: ServerState, tool: string, args: unknown, signal?: AbortSignal): Promise<AgentToolResult<{ arguments: unknown }>> {
+  private async call(s: ServerState, tool: string, args: unknown, signal?: AbortSignal): Promise<AgentToolResult<McpCallDetails>> {
     // Within the backoff a down server fails at once: a run making many calls must not wait on a connect each time.
-    if (!s.client && Date.now() >= s.retryAt) await this.connect(s);
-    let client = s.client;
-    if (!client) throw new Error(unavailableMessage(s.cfg.name, s.down));
+    let client = await this.ready(s, signal);
     let res: CallToolResult | undefined;
     for (let attempt = 0; !res; attempt++) {
       try {
@@ -192,16 +191,19 @@ export class McpHub {
         // A JSON-RPC error is the server answering (bad arguments, unknown tool, timeout); anything else is the
         // connection: HTTP errors, refused connections, an expired session.
         if (err instanceof McpError && err.code !== ErrorCode.ConnectionClosed) throw new Error(message(err));
-        // A restarted server or an expired session: reconnect once and retry; the tools are read-only.
-        if (attempt === 0 && s.client === client) {
-          s.client = undefined;
-          void client.close().catch(() => undefined);
-          await this.connect(s);
-          if (s.client) {
-            client = s.client;
-            continue;
+        // Retried once, after a reconnect, only when the request cannot have run: an expired session or a server that
+        // refused it. A dropped response (reset, timeout) may have run, so it is not sent again.
+        if (attempt === 0 && notProcessed(err)) {
+          if (s.client === client) {
+            s.client = undefined;
+            // Closed later, not now: closing fails the other calls still waiting on it with "connection closed",
+            // which would hide their own (retriable) error.
+            const old = client;
+            setTimeout(() => void old.close().catch(() => undefined), this.o.callTimeoutMs).unref();
           }
-          throw new Error(unavailableMessage(s.cfg.name, s.down));
+          // Parallel calls that hit the same expired session share this reconnect.
+          client = await this.ready(s, signal, true);
+          continue;
         }
         if (s.client === client) this.markDown(s, message(err));
         throw new Error(unavailableMessage(s.cfg.name, message(err)));
@@ -210,8 +212,38 @@ export class McpHub {
     const text = this.o.guard.output(resultText(res));
     // The arguments that ran, after the guard's defaults, for traces and the entry (evidence links): pi reports the
     // model's own arguments on tool events.
-    return { content: [{ type: "text", text }], details: { arguments: args }, ...(res.isError && { isError: true }) };
+    return { content: [{ type: "text", text }], details: { [EXECUTED_ARGS]: args }, ...(res.isError && { isError: true }) };
   }
+
+  /**
+   * A connected client: the current one, or one from a reconnect (shared with concurrent callers) when the backoff
+   * allows it or `now` asks for it. Throws the unavailable error otherwise, or when `signal` aborts the wait.
+   */
+  private async ready(s: ServerState, signal?: AbortSignal, now = false): Promise<Client> {
+    if (!s.client && (s.connecting || now || Date.now() >= s.retryAt)) await abortable(this.connect(s), signal);
+    if (!s.client) throw new Error(unavailableMessage(s.cfg.name, s.down));
+    return s.client;
+  }
+}
+
+export type McpCallDetails = { [EXECUTED_ARGS]: unknown };
+
+/** The request was rejected before it ran: an expired session (404), a server or proxy that is down, a refused connection. */
+function notProcessed(err: unknown): boolean {
+  if (err instanceof StreamableHTTPError) return err.code === 404 || err.code === 502 || err.code === 503;
+  const cause = (err as { cause?: { code?: string } })?.cause;
+  return cause?.code === "ECONNREFUSED";
+}
+
+/** `p`, or a rejection as soon as `signal` aborts; `p` itself keeps running (a reconnect others may share). */
+function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return p;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+    p.then(resolve, reject).finally(() => signal.removeEventListener("abort", onAbort));
+  });
 }
 
 const unavailableMessage = (server: string, why: string | undefined) =>

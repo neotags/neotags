@@ -33,6 +33,8 @@ class FakeMcp {
   down = false;
   /** Requests that fail with 503 before the server answers again (a restart, an expired session). */
   failNext = 0;
+  /** Status of those failures: 503 cannot have run; 500 may have. */
+  failStatus = 503;
   output = "ok";
   private http?: Server;
   port = 0;
@@ -67,7 +69,7 @@ class FakeMcp {
       this.headers.push(req.headers);
       if (this.down || this.failNext > 0) {
         this.failNext = Math.max(0, this.failNext - 1);
-        res.writeHead(503).end("down");
+        res.writeHead(this.down ? 503 : this.failStatus).end("down");
         return;
       }
       const server = this.build();
@@ -264,6 +266,30 @@ describe("MCP client", () => {
     expect(hub.unavailable()).toEqual([]);
   });
 
+  it("parallel calls that hit the same expired session share one reconnect and all retry", async () => {
+    const f = await fake();
+    const hub = hubFor([{ name: "o2", url: f.url() }]);
+    await hub.start();
+    f.failNext = 2;
+    const tool = hub.tools().find((t) => t.name === "o2__tool_search")!;
+    const results = await Promise.all([tool.execute("1", { query: "a" }), tool.execute("2", { query: "b" })]);
+    expect(results.map((r) => r.isError)).toEqual([undefined, undefined]);
+    expect(f.calls.map((c) => c.args.query).sort()).toEqual(["a", "b"]);
+  });
+
+  it("does not resend a call whose request may have run (a 500), and marks the server down", async () => {
+    const f = await fake();
+    const hub = hubFor([{ name: "o2", url: f.url() }], { reconnectMinMs: 60_000 });
+    await hub.start();
+    f.failNext = 1;
+    f.failStatus = 500;
+    const requests = f.headers.length;
+    const tool = hub.tools().find((t) => t.name === "o2__tool_search")!;
+    await expect(tool.execute("1", { query: "a" })).rejects.toThrow(/Data source o2 is unavailable/);
+    expect(f.headers.length).toBe(requests + 1);
+    expect(hub.unavailable()).toEqual(["o2"]);
+  });
+
   it("while a server is down, calls fail at once until the next reconnect is due", async () => {
     const f = await fake();
     const hub = hubFor([{ name: "o2", url: f.url() }], { reconnectMinMs: 60_000 });
@@ -371,6 +397,23 @@ describe("McpGuard", () => {
     expect(call({ start: "2026-11-07T11:00:00Z", end: "2026-11-07T12:00:00Z", step: "1 minute" })).toMatchObject({ ok: false, reason: expect.stringContaining("duration") });
   });
 
+  it("picks a default step that fits a small promMaxPoints", () => {
+    const small = new McpGuard({ servers: [o2Policy], maxArgChars: 2000, outputChars: 1000, limits: { ...limits, promMaxPoints: 20 }, now: () => NOW });
+    const out = small.prepare("o2__PrometheusRangeQuery", { query: "up" });
+    expect(out).toMatchObject({ step: "190s" });
+    expect(small.check({ name: "o2__PrometheusRangeQuery", args: out })).toEqual({ ok: true });
+  });
+
+  it("keeps a secret out of truncated output even when earlier redactions shorten the text", () => {
+    const small = guardFor([o2Policy], 100);
+    // Each 60-character key shrinks to [REDACTED]: the first 200 characters redact to far less than 200.
+    const key = (i: number) => `AKIA${String(i).padStart(16, "0")}`;
+    const text = Array.from({ length: 40 }, (_, i) => key(i)).join(" ") + " ghp_" + "a1B2".repeat(10) + " " + "x".repeat(400);
+    const out = small.output(text);
+    expect(out).not.toMatch(/AKIA|ghp_a1B2/);
+    expect(out).toContain("[Output truncated: 100 of");
+  });
+
   it("parses LIMIT forms and durations", () => {
     expect(trailingLimit("SELECT * FROM t LIMIT 10")).toBe(10);
     expect(trailingLimit("select * from t limit 10 offset 20;")).toBe(10);
@@ -380,6 +423,9 @@ describe("McpGuard", () => {
     expect(trailingLimit("SELECT * FROM k8s WHERE log LIKE '%--namespace%' LIMIT 50")).toBe(50);
     expect(trailingLimit("SELECT * FROM t WHERE a = 'it''s /* x' LIMIT 7")).toBe(7);
     expect(trailingLimit("SELECT * FROM t WHERE a = 'LIMIT 5'")).toBeUndefined();
+    // An apostrophe in a comment does not open a literal: the real LIMIT is seen, not one inside the comment.
+    expect(trailingLimit("SELECT * FROM t LIMIT 100000 /* it's */ -- x' LIMIT 10")).toBe(100000);
+    expect(trailingLimit("SELECT * FROM t -- user's stream\nWHERE a = 'x' LIMIT 5")).toBe(5);
     expect(duration("1m30s")).toBe(90);
     expect(duration("500ms")).toBe(0.5);
     expect(duration("0s")).toBeUndefined();
@@ -403,6 +449,7 @@ describe("mcp config", () => {
   });
 
   it("refuses query defaults above their limits", () => {
+    expect(() => load("agent:\n  queryLimits: { promMaxPoints: 1 }\n")).toThrow();
     expect(() => load("agent:\n  queryLimits: { sqlMaxLimit: 50 }\n")).toThrow(/sqlDefaultLimit.*must not exceed sqlMaxLimit|must not exceed sqlMaxLimit/s);
     expect(() => load("agent:\n  queryLimits: { maxRangeSec: 600 }\n")).toThrow(/must not exceed maxRangeSec/);
   });

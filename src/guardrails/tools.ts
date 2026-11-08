@@ -102,10 +102,16 @@ export class McpGuard {
   /** Redacted, then cut to `outputChars` with a note that tells the model how to get the rest. */
   output(text: string): string {
     const max = this.o.outputChars;
-    // Redaction is linear but not cheap, and a result can be megabytes: only the part that can be kept is scanned. Twice
-    // the budget, so that a secret across `max` is still whole when matched (redaction can shorten the text).
-    const clean = redact(text.length > 2 * max ? text.slice(0, 2 * max) : text).text;
-    if (clean.length <= max && text.length <= 2 * max) return clean;
+    // Redaction is linear but not cheap, and a result can be megabytes: only a prefix is scanned. The scanned prefix must
+    // still be twice the budget after redaction, which can shorten it a lot, so that a secret cut at the end of the
+    // prefix (and no longer matching its pattern) lies past what is kept unless it is longer than `max` itself.
+    let window = 2 * max;
+    let clean = redact(text.slice(0, window)).text;
+    while (window < text.length && clean.length < 2 * max) {
+      window *= 2;
+      clean = redact(text.slice(0, window)).text;
+    }
+    if (clean.length <= max && window >= text.length) return clean;
     return `${clean.slice(0, max)}\n\n[Output truncated: ${max} of ${text.length} characters shown. Narrow the query (a shorter time range, more filters, a smaller LIMIT) to see the rest.]`;
   }
 
@@ -178,8 +184,10 @@ export class McpGuard {
     const end = promTime(a.end);
     if (missing(a.start) && end !== undefined) a.start = new Date((end - def) * 1000).toISOString();
     const start = promTime(a.start);
-    // About 60 points per series, as the skill pack asks for.
-    if (missing(a.step) && start !== undefined && end !== undefined && end > start) a.step = `${Math.max(1, Math.ceil((end - start) / 60))}s`;
+    // About 60 points per series, as the skill pack asks for, and never more than promMaxPoints: a step of
+    // ceil(range / n) gives at most n + 1 points.
+    const n = Math.max(1, Math.min(60, this.o.limits.promMaxPoints - 1));
+    if (missing(a.step) && start !== undefined && end !== undefined && end > start) a.step = `${Math.max(1, Math.ceil((end - start) / n))}s`;
     return a;
   }
 
@@ -218,11 +226,9 @@ function sqlQuery(args: Obj): { query: Obj; at: "body" | "top" } | undefined {
 
 /** Row count of the outer query's LIMIT (`LIMIT n`, `LIMIT n OFFSET m`, `LIMIT m, n`), or undefined without one. */
 export function trailingLimit(sql: string): number | undefined {
-  // Literals first ('it''s', "col"), so that a "--" or "/*" inside one is not taken for a comment.
-  const body = sql
-    .replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"/g, "''")
-    .replace(/\/\*[\s\S]*?\*\//g, " ")
-    .replace(/--[^\n]*/g, " ");
+  // One left-to-right pass over literals ('it''s', "col") and comments, as the SQL parser reads them: whichever starts
+  // first wins, so a "--" inside a literal is not a comment and an apostrophe inside a comment does not open a literal.
+  const body = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|\/\*[\s\S]*?\*\/|--[^\n]*/g, (m) => (m.startsWith("'") || m.startsWith('"') ? "''" : " "));
   const m = /\blimit\s+(\d+)(?:\s*,\s*(\d+)|\s+offset\s+\d+)?\s*;?\s*$/i.exec(body);
   if (!m) return undefined;
   return Number(m[2] ?? m[1]);
