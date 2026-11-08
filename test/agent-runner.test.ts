@@ -187,9 +187,18 @@ describe("PiAgentRunner", () => {
   });
 
   it("does not count a rejected request (context too long) against the model", async () => {
-    const { runner, gateway } = setup([fail("400 maximum context length exceeded")]);
+    for (const m of ["400 maximum context length exceeded", "400 messages are too long", "400 prompt_too_long"]) {
+      const { runner, gateway } = setup([fail(m)]);
+      await expect(runner.run(input, ctxFor().ctx)).rejects.toMatchObject({ kind: "model_error" });
+      expect(gateway.policy.steps("agent")[0]!.breaker.state).toBe("closed");
+    }
+  });
+
+  it("retries a gateway timeout and counts it against the model, though its message says \"too long\"", async () => {
+    const { runner, gateway, stream } = setup([fail("model took too long to respond"), fail("model took too long to respond")]);
     await expect(runner.run(input, ctxFor().ctx)).rejects.toMatchObject({ kind: "model_error" });
-    expect(gateway.policy.steps("agent")[0]!.breaker.state).toBe("closed");
+    expect(stream.calls).toHaveLength(2);
+    expect(gateway.policy.steps("agent")[0]!.breaker.state).toBe("open");
   });
 
   it("returns cancelled when its signal is aborted mid-request", async () => {

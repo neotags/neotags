@@ -65,9 +65,12 @@ type CompleteFn = (context: Context, opts: Record<string, unknown>, step?: Chain
 
 export interface LlmDeps {
   complete: CompleteFn;
+  /** One call's deadline (llm.timeoutMs), retries included. */
   timeoutMs: number;
   maxRetries: number;
   sleep?: (ms: number) => Promise<void>;
+  /** Clock for the call's deadline (default Date.now); tests pass a fake one together with `sleep`. */
+  now?: () => number;
   /** Upper bound when a call is retried with a larger output budget (llm.maxTokens). */
   maxTokensCap?: number;
   /** Extra fields merged into every request body (llm.extraBody), e.g. to switch off thinking on a gateway. */
@@ -96,10 +99,13 @@ export function effortRequest(step: Pick<ChainStep, "effort" | "effortBody"> | u
 }
 
 // pi-ai reports failures as stopReason "error" rather than throwing; retry the transient ones.
-const TRANSIENT = /\b(408|409|425|429|500|502|503|504)\b|timed? ?out|econn|socket|unavailable|upstream|overloaded|rate limit/i;
+const TRANSIENT = /\b(408|409|425|429|500|502|503|504)\b|timed? ?out|took too long|econn|socket|unavailable|upstream|overloaded|rate limit/i;
 // Rejections of this request's content, not of the model: they must not open the breaker for everyone else.
 // Every other error counts, 400 included, since some gateways answer an unknown model name with a 400.
-const REQUEST_ERROR = /context[ _-]?(length|window)|maximum context|too long|too many tokens|content[ _-]?(filter|policy|management)|response_format/i;
+// A timeout ("upstream request took too long") is the model's failure and must count, or a model that keeps
+// timing out never opens its breaker; every other "too long" (prompt_too_long, messages are too long, ...) is content.
+const REQUEST_ERROR =
+  /context[ _-]?(length|window)|maximum context|(?<!took[ _])too[ _-]long|too many tokens|content[ _-]?(filter|policy|management)|response_format/i;
 
 /** A gateway error worth retrying (rate limit, 5xx, timeout, ...). */
 export const isTransientError = (message: string): boolean => TRANSIENT.test(message);
@@ -149,9 +155,20 @@ export class PiLlmClient implements LlmClient {
     let outcome: "success" | "failure" | "neutral" = "failure";
     let widened = false;
     let last = "LLM request failed";
+    const now = this.d.now ?? Date.now;
+    // One deadline for the whole call, so a model that stops answering costs the caller timeoutMs, not
+    // (maxRetries + 1) times that: a retry gets only the time left. Fast failures (429, 503) still retry.
+    let deadline = now() + this.d.timeoutMs;
+    const minAttemptMs = Math.min(1000, this.d.timeoutMs / 10);
+    let attempts = 0;
     try {
       for (let attempt = 0; attempt <= this.d.maxRetries; attempt++) {
-        if (attempt > 0) await sleep(Math.min(500 * 2 ** (attempt - 1), 8000));
+        if (attempt > 0) {
+          const backoff = Math.min(500 * 2 ** (attempt - 1), 8000);
+          if (deadline - now() < backoff + minAttemptMs) break;
+          await sleep(backoff);
+        }
+        attempts++;
         const span = startChatSpan({
           model: step?.model.id ?? "unknown",
           chain,
@@ -169,7 +186,7 @@ export class PiLlmClient implements LlmClient {
         let msg: AssistantMessage;
         try {
           msg = await this.d.complete(context, {
-            signal: AbortSignal.timeout(this.d.timeoutMs),
+            signal: AbortSignal.timeout(Math.max(1, deadline - now())),
             ...(temperature !== undefined && { temperature }),
             ...(budget !== undefined && { maxTokens: budget }),
             ...(reasoningEffort && { reasoningEffort }),
@@ -181,16 +198,16 @@ export class PiLlmClient implements LlmClient {
         } catch (err) {
           last = (err as Error).message;
           endChatSpan(span, { error: last });
-          outcome = REQUEST_ERROR.test(last) ? "neutral" : "failure";
-          if (TRANSIENT.test(last)) continue;
+          outcome = isRequestError(last) ? "neutral" : "failure";
+          if (isTransientError(last)) continue;
           throw new LlmError(`LLM request failed: ${last}`);
         }
         // The span reads the reply inside its guard: an error reply is closed before its content is touched here.
         endChatSpan(span, { msg, captureContent: this.d.captureContent ?? false });
         if (msg.stopReason === "error" || msg.stopReason === "aborted") {
           last = msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`;
-          outcome = REQUEST_ERROR.test(last) ? "neutral" : "failure";
-          if (TRANSIENT.test(last)) continue;
+          outcome = isRequestError(last) ? "neutral" : "failure";
+          if (isTransientError(last)) continue;
           throw new LlmError(`LLM request failed: ${last}`);
         }
         const text = msg.content
@@ -204,6 +221,7 @@ export class PiLlmClient implements LlmClient {
         if ((!text || msg.stopReason === "length") && !widened && budget !== undefined && cap !== undefined && budget < cap) {
           widened = true;
           budget = Math.min(Math.max(budget * 4, 1024), cap);
+          deadline = now() + this.d.timeoutMs; // the model answered; the bigger reply gets a full timeout of its own
           attempt--;
           last = "output budget too small";
           continue;
@@ -221,7 +239,7 @@ export class PiLlmClient implements LlmClient {
           ...(step?.effort && { effort: step.effort }),
         };
       }
-      throw new LlmError(`LLM request failed after ${this.d.maxRetries + 1} attempts: ${last}`);
+      throw new LlmError(`LLM request failed after ${attempts} attempt${attempts === 1 ? "" : "s"}: ${last}`);
     } finally {
       if (outcome === "success") picked?.lease.success();
       else if (outcome === "failure") picked?.lease.failure(last);

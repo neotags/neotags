@@ -131,6 +131,7 @@ const fileSchema = z.object({
       contextWindow: z.number().int().positive().default(128_000),
       maxTokens: z.number().int().positive().default(8192),
       reasoning: z.boolean().default(false),
+      // A one-shot call's deadline, retries included; agent runs abort a stream that stalls this long.
       timeoutMs: z.number().int().positive().default(60_000),
       maxRetries: z.number().int().min(0).default(2),
       compat: compatSchema.extend({ supportsDeveloperRole: z.boolean().default(false) }).prefault({}),

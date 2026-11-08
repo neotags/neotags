@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { CircuitBreaker, type BreakerState } from "../src/agent/breaker.js";
-import { ModelUnavailableError, PiLlmClient, createLlm, effortRequest, mergeBody } from "../src/agent/llm.js";
+import { ModelUnavailableError, PiLlmClient, createLlm, effortRequest, isRequestError, isTransientError, mergeBody } from "../src/agent/llm.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 
@@ -190,7 +190,7 @@ describe("PiLlmClient with a model policy", () => {
 `, { LLM_MODEL: "m" });
     const { policy } = createGateway(cfg);
     const breaker = policy.steps("summary")[0]!.breaker;
-    const client = (complete: () => Promise<never>) => new PiLlmClient({ complete, policy, timeoutMs: 1000, maxRetries, sleep: async () => {} });
+    const client = (complete: () => Promise<never>) => new PiLlmClient({ complete, policy, timeoutMs: 60_000, maxRetries, sleep: async () => {} });
     return { breaker, client };
   };
   const hi = [{ role: "user" as const, content: "hi" }];
@@ -222,6 +222,42 @@ describe("PiLlmClient with a model policy", () => {
     await expect(unknownModel.chat(hi)).rejects.toThrow(/Invalid model name/);
     await expect(unknownModel.chat(hi)).rejects.toThrow(/Invalid model name/);
     expect(breaker.state).toBe("open");
+  });
+
+  it("retries gateway timeouts and counts them as failures, so a model that keeps timing out opens its breaker", async () => {
+    for (const m of ["504 upstream request took too long", "model took too long to respond", "504 Gateway Timeout"]) {
+      expect(isRequestError(m)).toBe(false);
+      expect(isTransientError(m)).toBe(true);
+      const { breaker, client } = setup(2);
+      let calls = 0;
+      const llm = client(async () => (calls++, err(m)));
+      await expect(llm.chat(hi)).rejects.toThrow(/after 3 attempts/);
+      expect(calls).toBe(3);
+      expect(breaker.state).toBe("closed");
+      await expect(llm.chat(hi)).rejects.toThrow(m);
+      expect(breaker.state).toBe("open");
+    }
+  });
+
+  it("still treats every other \"too long\" as the request's content, whatever the wording", async () => {
+    const { breaker, client } = setup(1, 0);
+    for (const m of [
+      "400 prompt is too long: 200000 tokens",
+      "400 Your request was too long",
+      "400 prompt was too long",
+      "400 messages are too long",
+      "400 Input text is too long",
+      "400 The conversation is too long",
+      "413 request payload too long",
+      '400 {"code":"prompt_too_long"}',
+      "400 input-too-long",
+      "400 This model's maximum context length is 131072 tokens",
+    ]) {
+      expect(isRequestError(m), m).toBe(true);
+      expect(isTransientError(m), m).toBe(false); // retrying the same content would only be rejected again
+      await expect(client(async () => err(m)).chat(hi)).rejects.toThrow(m);
+    }
+    expect(breaker.state).toBe("closed");
   });
 
   it("says why the model is unavailable", async () => {
