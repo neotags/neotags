@@ -65,9 +65,11 @@ type CompleteFn = (context: Context, opts: Record<string, unknown>, step?: Chain
 
 export interface LlmDeps {
   complete: CompleteFn;
+  /** One call's deadline (llm.timeoutMs), retries included. */
   timeoutMs: number;
   maxRetries: number;
   sleep?: (ms: number) => Promise<void>;
+  now?: () => number;
   /** Upper bound when a call is retried with a larger output budget (llm.maxTokens). */
   maxTokensCap?: number;
   /** Extra fields merged into every request body (llm.extraBody), e.g. to switch off thinking on a gateway. */
@@ -152,9 +154,20 @@ export class PiLlmClient implements LlmClient {
     let outcome: "success" | "failure" | "neutral" = "failure";
     let widened = false;
     let last = "LLM request failed";
+    const now = this.d.now ?? Date.now;
+    // One deadline for the whole call, so a model that stops answering costs the caller timeoutMs, not
+    // (maxRetries + 1) times that: a retry gets only the time left. Fast failures (429, 503) still retry.
+    let deadline = now() + this.d.timeoutMs;
+    const minAttemptMs = Math.min(1000, this.d.timeoutMs / 10);
+    let attempts = 0;
     try {
       for (let attempt = 0; attempt <= this.d.maxRetries; attempt++) {
-        if (attempt > 0) await sleep(Math.min(500 * 2 ** (attempt - 1), 8000));
+        if (attempt > 0) {
+          const backoff = Math.min(500 * 2 ** (attempt - 1), 8000);
+          if (deadline - now() < backoff + minAttemptMs) break;
+          await sleep(backoff);
+        }
+        attempts++;
         const span = startChatSpan({
           model: step?.model.id ?? "unknown",
           chain,
@@ -172,7 +185,7 @@ export class PiLlmClient implements LlmClient {
         let msg: AssistantMessage;
         try {
           msg = await this.d.complete(context, {
-            signal: AbortSignal.timeout(this.d.timeoutMs),
+            signal: AbortSignal.timeout(Math.max(1, deadline - now())),
             ...(temperature !== undefined && { temperature }),
             ...(budget !== undefined && { maxTokens: budget }),
             ...(reasoningEffort && { reasoningEffort }),
@@ -207,6 +220,7 @@ export class PiLlmClient implements LlmClient {
         if ((!text || msg.stopReason === "length") && !widened && budget !== undefined && cap !== undefined && budget < cap) {
           widened = true;
           budget = Math.min(Math.max(budget * 4, 1024), cap);
+          deadline = now() + this.d.timeoutMs; // the model answered; the bigger reply gets a full timeout of its own
           attempt--;
           last = "output budget too small";
           continue;
@@ -224,7 +238,7 @@ export class PiLlmClient implements LlmClient {
           ...(step?.effort && { effort: step.effort }),
         };
       }
-      throw new LlmError(`LLM request failed after ${this.d.maxRetries + 1} attempts: ${last}`);
+      throw new LlmError(`LLM request failed after ${attempts} attempt${attempts === 1 ? "" : "s"}: ${last}`);
     } finally {
       if (outcome === "success") picked?.lease.success();
       else if (outcome === "failure") picked?.lease.failure(last);

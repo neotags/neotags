@@ -190,7 +190,7 @@ describe("PiLlmClient with a model policy", () => {
 `, { LLM_MODEL: "m" });
     const { policy } = createGateway(cfg);
     const breaker = policy.steps("summary")[0]!.breaker;
-    const client = (complete: () => Promise<never>) => new PiLlmClient({ complete, policy, timeoutMs: 1000, maxRetries, sleep: async () => {} });
+    const client = (complete: () => Promise<never>) => new PiLlmClient({ complete, policy, timeoutMs: 60_000, maxRetries, sleep: async () => {} });
     return { breaker, client };
   };
   const hi = [{ role: "user" as const, content: "hi" }];
@@ -254,6 +254,7 @@ describe("PiLlmClient with a model policy", () => {
       "400 This model's maximum context length is 131072 tokens",
     ]) {
       expect(isRequestError(m), m).toBe(true);
+      expect(isTransientError(m), m).toBe(false); // retrying the same content would only be rejected again
       await expect(client(async () => err(m)).chat(hi)).rejects.toThrow(m);
     }
     expect(breaker.state).toBe("closed");

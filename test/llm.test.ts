@@ -120,19 +120,65 @@ describe("PiLlmClient", () => {
       .mockResolvedValueOnce(msg({ stopReason: "error", errorMessage: "429 rate limit" }))
       .mockRejectedValueOnce(new Error("503 service unavailable"))
       .mockResolvedValueOnce(msg());
-    const c = new PiLlmClient({ complete, timeoutMs: 1000, maxRetries: 2, sleep: noSleep });
+    const c = new PiLlmClient({ complete, timeoutMs: 60_000, maxRetries: 2, sleep: noSleep });
     expect((await c.chat([{ role: "user", content: "x" }])).text).toBe("ok");
     expect(complete).toHaveBeenCalledTimes(3);
   });
 
   it("does not retry permanent errors, and gives up after maxRetries", async () => {
     const bad = vi.fn().mockResolvedValue(msg({ stopReason: "error", errorMessage: "400 unknown model" }));
-    await expect(new PiLlmClient({ complete: bad, timeoutMs: 1, maxRetries: 2, sleep: noSleep }).chat([])).rejects.toThrow(LlmError);
+    await expect(new PiLlmClient({ complete: bad, timeoutMs: 60_000, maxRetries: 2, sleep: noSleep }).chat([])).rejects.toThrow(LlmError);
     expect(bad).toHaveBeenCalledTimes(1);
 
     const flaky = vi.fn().mockResolvedValue(msg({ stopReason: "error", errorMessage: "502 bad gateway" }));
-    await expect(new PiLlmClient({ complete: flaky, timeoutMs: 1, maxRetries: 2, sleep: noSleep }).chat([])).rejects.toThrow(/after 3 attempts/);
+    await expect(new PiLlmClient({ complete: flaky, timeoutMs: 60_000, maxRetries: 2, sleep: noSleep }).chat([])).rejects.toThrow(/after 3 attempts/);
     expect(flaky).toHaveBeenCalledTimes(3);
+  });
+
+  describe("one deadline per call, retries included", () => {
+    // A fake clock: each request and each backoff takes the time it is given.
+    const clocked = (steps: [ms: number, reply: unknown][]) => {
+      let t = 0;
+      const sleeps: number[] = [];
+      const complete = vi.fn(async () => {
+        const [ms, reply] = steps.shift()!;
+        t += ms;
+        return reply as never;
+      });
+      const client = new PiLlmClient({
+        complete, timeoutMs: 60_000, maxRetries: 2, maxTokensCap: 8192, now: () => t,
+        sleep: async (ms) => { sleeps.push(ms); t += ms; },
+      });
+      return { client, complete, sleeps };
+    };
+    const timeout = msg({ stopReason: "error", errorMessage: "model took too long to respond" });
+
+    it("does not retry a request that used up the whole timeout", async () => {
+      const { client, complete, sleeps } = clocked([[60_000, timeout]]);
+      await expect(client.chat([{ role: "user", content: "x" }])).rejects.toThrow(/after 1 attempt: model took too long/);
+      expect(complete).toHaveBeenCalledTimes(1);
+      expect(sleeps).toEqual([]);
+    });
+
+    it("retries in the time left, then gives up at the deadline instead of after maxRetries", async () => {
+      const { client, complete } = clocked([[30_000, timeout], [29_000, timeout]]);
+      await expect(client.chat([{ role: "user", content: "x" }])).rejects.toThrow(/after 2 attempts/);
+      expect(complete).toHaveBeenCalledTimes(2); // 59.5s spent: no room for a third
+    });
+
+    it("still retries fast failures maxRetries times", async () => {
+      const busy = msg({ stopReason: "error", errorMessage: "503 service unavailable" });
+      const { client, complete } = clocked([[100, busy], [100, busy], [100, msg()]]);
+      expect((await client.chat([{ role: "user", content: "x" }])).text).toBe("ok");
+      expect(complete).toHaveBeenCalledTimes(3);
+    });
+
+    it("gives the reply widened for a bigger output budget a full timeout of its own", async () => {
+      const busy = msg({ stopReason: "error", errorMessage: "503 service unavailable" });
+      const { client, complete } = clocked([[59_000, msg({ content: [], stopReason: "length" })], [100, busy], [100, msg()]]);
+      expect((await client.chat([{ role: "user", content: "x" }], { maxTokens: 1000 })).text).toBe("ok");
+      expect(complete).toHaveBeenCalledTimes(3);
+    });
   });
 
   it("rejects an empty response", async () => {
