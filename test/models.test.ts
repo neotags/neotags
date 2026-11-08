@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { CircuitBreaker, type BreakerState } from "../src/agent/breaker.js";
-import { ModelUnavailableError, PiLlmClient, createLlm, effortRequest, mergeBody } from "../src/agent/llm.js";
+import { ModelUnavailableError, PiLlmClient, createLlm, effortRequest, isRequestError, mergeBody } from "../src/agent/llm.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 
@@ -222,6 +222,21 @@ describe("PiLlmClient with a model policy", () => {
     await expect(unknownModel.chat(hi)).rejects.toThrow(/Invalid model name/);
     await expect(unknownModel.chat(hi)).rejects.toThrow(/Invalid model name/);
     expect(breaker.state).toBe("open");
+  });
+
+  it("counts gateway timeouts as failures, so a model that keeps timing out opens its breaker", async () => {
+    for (const m of ["504 upstream request took too long", "model took too long to respond", "504 Gateway Timeout"]) {
+      expect(isRequestError(m)).toBe(false);
+      const { breaker, client } = setup(2);
+      const llm = client(async () => err(m));
+      await expect(llm.chat(hi)).rejects.toThrow(m);
+      expect(breaker.state).toBe("closed");
+      await expect(llm.chat(hi)).rejects.toThrow(m);
+      expect(breaker.state).toBe("open");
+    }
+    for (const m of ["prompt is too long: 200000 tokens", "input too long", "This model's maximum context length is 131072 tokens"]) {
+      expect(isRequestError(m)).toBe(true);
+    }
   });
 
   it("says why the model is unavailable", async () => {

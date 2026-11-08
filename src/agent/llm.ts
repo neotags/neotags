@@ -99,7 +99,10 @@ export function effortRequest(step: Pick<ChainStep, "effort" | "effortBody"> | u
 const TRANSIENT = /\b(408|409|425|429|500|502|503|504)\b|timed? ?out|econn|socket|unavailable|upstream|overloaded|rate limit/i;
 // Rejections of this request's content, not of the model: they must not open the breaker for everyone else.
 // Every other error counts, 400 included, since some gateways answer an unknown model name with a 400.
-const REQUEST_ERROR = /context[ _-]?(length|window)|maximum context|too long|too many tokens|content[ _-]?(filter|policy|management)|response_format/i;
+// "too long" only after a word for the request's content: a timeout ("upstream request took too long") is the
+// model's failure and must count, or a model that keeps timing out never opens its breaker.
+const REQUEST_ERROR =
+  /context[ _-]?(length|window)|maximum context|\b(prompt|input|message|request|context) (is )?too long|too many tokens|content[ _-]?(filter|policy|management)|response_format/i;
 
 /** A gateway error worth retrying (rate limit, 5xx, timeout, ...). */
 export const isTransientError = (message: string): boolean => TRANSIENT.test(message);
