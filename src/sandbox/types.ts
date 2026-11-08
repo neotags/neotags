@@ -30,9 +30,10 @@ export interface ExecResult {
  * Why an execution did not run:
  * - `denied`: the tool guard refused it (no declaration, undeclared tool, reserved env, execution disabled, ...);
  * - `unavailable`: no executor answered, or its self-check failed. Never a reason to run the command another way;
- * - `refused`: the executor refused the request (validation, missing credential, busy) or failed on it.
+ * - `refused`: the executor refused the request (validation, missing credential, busy) or failed on it;
+ * - `unknown`: the request was sent but no answer came (deadline, cancelled): the command may have run.
  */
-export type SandboxErrorKind = "denied" | "unavailable" | "refused";
+export type SandboxErrorKind = "denied" | "unavailable" | "refused" | "unknown";
 
 export class SandboxError extends Error {
   constructor(

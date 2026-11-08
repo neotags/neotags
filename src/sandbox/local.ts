@@ -16,6 +16,8 @@ export interface LocalSandboxOptions {
 
 /** Errors that mean nothing is listening (or allowed to connect) on the socket. */
 const DOWN = new Set(["ENOENT", "ECONNREFUSED", "EACCES", "ECONNRESET", "EPIPE", "ENOTSOCK"]);
+/** Of those, the ones that mean the connection never opened. */
+const DOWN_BEFORE_SEND = new Set(["ENOENT", "ECONNREFUSED", "EACCES", "ENOTSOCK"]);
 
 /**
  * Backend `local`: the executor sidecar in the same Pod, over HTTP on a unix socket (executor/README.md). This
@@ -70,9 +72,13 @@ export class LocalSandbox implements Sandbox {
   private call(method: string, path: string, body: unknown, waitMs: number, signal?: AbortSignal): Promise<{ status: number; body: unknown }> {
     const payload = body === undefined ? undefined : Buffer.from(JSON.stringify(body));
     return new Promise((resolve, reject) => {
-      const aborted = () => new SandboxError("refused", "aborted", "the execution was cancelled");
+      // Once the request is out, the executor may be running the command: no answer means the outcome is unknown,
+      // not that the sandbox is down, so a caller must not treat it as "did not run".
+      const lost = (detail: string) => new SandboxError("unknown", signal?.aborted ? "aborted" : "no_answer", `${detail}; the command may have run`);
+      const aborted = () => lost("the execution was cancelled");
       // The first outcome wins; later errors from tearing the request down are ignored.
       let settled = false;
+      let sent = false;
       let deadline: NodeJS.Timeout | undefined;
       const done = (err: SandboxError | undefined, value?: { status: number; body: unknown }) => {
         if (settled) return;
@@ -81,9 +87,8 @@ export class LocalSandbox implements Sandbox {
         if (err) reject(err);
         else resolve(value!);
       };
-      const unavailable = (detail: string) =>
-        done(signal?.aborted ? aborted() : new SandboxError("unavailable", "executor_unreachable", `the execution sandbox is unavailable: ${detail}`));
-      if (signal?.aborted) return reject(aborted());
+      const unavailable = (detail: string) => done(new SandboxError("unavailable", "executor_unreachable", `the execution sandbox is unavailable: ${detail}`));
+      if (signal?.aborted) return reject(new SandboxError("refused", "aborted", "the execution was cancelled before it was sent"));
       const req = request(
         {
           socketPath: this.o.socketPath,
@@ -104,7 +109,7 @@ export class LocalSandbox implements Sandbox {
             }
             chunks.push(c);
           });
-          res.on("error", (e) => unavailable(e.message));
+          res.on("error", (e) => done(signal?.aborted ? aborted() : lost(`the executor's answer broke off (${e.message})`)));
           res.on("end", () => {
             const status = res.statusCode ?? 0;
             let parsed: unknown;
@@ -120,10 +125,17 @@ export class LocalSandbox implements Sandbox {
       );
       // A deadline for the whole call: an idle timeout would be reset by every byte of a slow answer.
       deadline = setTimeout(() => {
-        unavailable(`no answer from the executor within ${Math.round(waitMs / 1000)}s`);
+        done(lost(`no answer from the executor within ${Math.round(waitMs / 1000)}s`));
         req.destroy();
       }, waitMs);
-      req.on("error", (e: NodeJS.ErrnoException) => unavailable(DOWN.has(e.code ?? "") ? `${e.code} on ${this.o.socketPath}` : e.message));
+      // A connection that never opened (no socket, refused) cannot have run anything; one that broke after the
+      // request was written may have.
+      req.on("error", (e: NodeJS.ErrnoException) => {
+        if (signal?.aborted) return done(sent ? aborted() : new SandboxError("refused", "aborted", "the execution was cancelled before it was sent"));
+        if (sent && !DOWN_BEFORE_SEND.has(e.code ?? "")) return done(lost(`the connection to the executor broke (${e.code ?? e.message})`));
+        unavailable(DOWN.has(e.code ?? "") ? `${e.code} on ${this.o.socketPath}` : e.message);
+      });
+      req.on("finish", () => (sent = true));
       req.end(payload);
     });
   }

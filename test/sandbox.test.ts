@@ -99,9 +99,9 @@ const okResult = (id: string) => ({
 
 describe("sandbox tool guard", () => {
   it("refuses a pack that declares no sandbox, an unknown pack, and an undeclared tool", () => {
-    expect(checkExec(index, { pack: "reader", argv: ["example-cli"] })).toEqual({ ok: false, reason: expect.stringContaining("declares no sandbox") });
-    expect(checkExec(index, { pack: "nope", argv: ["example-cli"] })).toEqual({ ok: false, reason: expect.stringContaining("unknown skill pack") });
-    expect(checkExec(index, { pack: "runner", argv: ["sh", "-c", "id"] })).toEqual({ ok: false, reason: expect.stringContaining("not a tool of runner") });
+    expect(checkExec(index, { pack: "reader", argv: ["example-cli"] })).toMatchObject({ ok: false, reason: expect.stringContaining("declares no sandbox") });
+    expect(checkExec(index, { pack: "nope", argv: ["example-cli"] })).toMatchObject({ ok: false, reason: expect.stringContaining("unknown skill pack") });
+    expect(checkExec(index, { pack: "runner", argv: ["sh", "-c", "id"] })).toMatchObject({ ok: false, reason: expect.stringContaining("not a tool of runner") });
     expect(checkExec(index, { pack: "runner", argv: ["/usr/bin/example-cli"] }).ok).toBe(false);
     expect(checkExec(index, { pack: "runner", argv: [] }).ok).toBe(false);
   });
@@ -113,6 +113,17 @@ describe("sandbox tool guard", () => {
     for (const f of ["/etc/passwd", "../x", "a/../../x", ""]) {
       expect(checkExec(index, { pack: "runner", argv: ["example-cli"], files: { [f]: "x" } }).ok).toBe(false);
     }
+  });
+
+  it("applies the executor's request limits, so the model gets the reason from the guard", () => {
+    const call = (o: Record<string, unknown>) => checkExec(index, { pack: "runner", argv: ["example-cli"], ...o });
+    expect(call({ argv: ["example-cli", "a".repeat(8193)] })).toMatchObject({ ok: false, rule: "argv" });
+    expect(call({ argv: ["example-cli", "a\0b"] })).toMatchObject({ ok: false, rule: "argv" });
+    expect(call({ stdin: "x".repeat(1024 * 1024 + 1) })).toMatchObject({ ok: false, rule: "stdin" });
+    expect(call({ files: { "..config": "x" } })).toMatchObject({ ok: false, rule: "files" });
+    expect(call({ files: { "a/b": "x", "a/./b": "y" } })).toMatchObject({ ok: false, rule: "files" });
+    expect(call({ files: { a: "x", "a/b": "y" } })).toMatchObject({ ok: false, rule: "files" });
+    expect(call({ files: { a: "x".repeat(3 * 1024 * 1024), b: "x".repeat(2 * 1024 * 1024) } })).toMatchObject({ ok: false, rule: "files" });
   });
 
   it("allows a declared tool, with the pack's declaration as the constraints", () => {
@@ -136,6 +147,12 @@ describe("SkillExecutor", () => {
       expect.objectContaining({ audit: "sandbox_exec", pack: "runner", tool: "sh", outcome: "denied" }),
     ]);
     expect(JSON.stringify(lines)).not.toContain("curl evil");
+    expect(lines.map((l) => l.obj.rule)).toEqual(["no_sandbox", "tool_not_declared"]);
+    // A refusal quotes the caller's values to the model, never into the audit line.
+    const { lines: l2, log: log2 } = memLog();
+    const ex2 = new SkillExecutor({ sandbox: backend, index, log: log2 });
+    await expect(ex2.exec({ pack: "runner", argv: ["example-cli"], files: { "../tok-abc123secret": "x" } })).rejects.toThrow("tok-abc123secret");
+    expect(JSON.stringify(l2)).not.toContain("tok-abc123secret");
   });
 
   it("sends the pack's constraints, not the caller's", async () => {
@@ -172,7 +189,7 @@ describe("SkillExecutor", () => {
   it("refuses a pack the run was not given, even one that declares a sandbox", async () => {
     const backend = new Recorder();
     const ex = new SkillExecutor({ sandbox: backend, index, log: memLog().log });
-    expect(checkExec(index, { pack: "runner", argv: ["example-cli"] }, ["reader"])).toEqual({ ok: false, reason: expect.stringContaining("not one of this run's") });
+    expect(checkExec(index, { pack: "runner", argv: ["example-cli"] }, ["reader"])).toMatchObject({ ok: false, reason: expect.stringContaining("not one of this run's") });
     expect(ex.check({ pack: "runner", argv: ["example-cli"] }, ["reader"]).ok).toBe(false);
     await expect(ex.exec({ pack: "runner", argv: ["example-cli"] }, { packs: ["reader"] })).rejects.toMatchObject({ kind: "denied" });
     expect(backend.calls).toEqual([]);
@@ -242,7 +259,7 @@ describe("LocalSandbox (executor over a unix socket)", () => {
     await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unavailable" });
   });
 
-  it("a cancelled execution is reported as cancelled, not as an unreachable executor", async () => {
+  it("a run cancelled while the executor works is reported as an unknown outcome, not as an unreachable executor", async () => {
     const dir = mkdtempSync(path.join(tmpdir(), "nt-exec-"));
     const socketPath = path.join(dir, "exec.sock");
     const server = createServer((_req, res) => res.writeHead(200, { "content-type": "application/json" }).write("{"));
@@ -258,7 +275,7 @@ describe("LocalSandbox (executor over a unix socket)", () => {
     const p = ex.exec({ pack: "runner", argv: ["example-cli"] }, { signal: ac.signal });
     setTimeout(() => ac.abort(), 50);
     await expect(p).rejects.toMatchObject({ code: "aborted" });
-    expect(lines[0]!.obj).toMatchObject({ outcome: "refused", code: "aborted" });
+    expect(lines[0]!.obj).toMatchObject({ outcome: "unknown", code: "aborted" });
   });
 
   it("the wait is a deadline: a slow trickle of bytes does not extend it", async () => {
@@ -279,7 +296,7 @@ describe("LocalSandbox (executor over a unix socket)", () => {
     const quick = new SkillPackIndex(new Map([["runner", pack("runner", { ...spec, limits: { timeoutSec: 0.1 } })]]));
     const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath, graceMs: 100 }), index: quick, log: memLog().log });
     const started = Date.now();
-    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unavailable", message: expect.stringContaining("no answer") });
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unknown", code: "no_answer", message: expect.stringContaining("may have run") });
     expect(Date.now() - started).toBeLessThan(1000);
   });
 
@@ -306,7 +323,7 @@ describe("LocalSandbox (executor over a unix socket)", () => {
     });
     const quick = new SkillPackIndex(new Map([["runner", pack("runner", { ...spec, limits: { timeoutSec: 0.05 } })]]));
     const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath, graceMs: 50 }), index: quick, log: memLog().log });
-    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unavailable", message: expect.stringContaining("no answer") });
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unknown", code: "no_answer", message: expect.stringContaining("may have run") });
   });
 
   it("reads /healthz", async () => {

@@ -90,10 +90,22 @@ describe("skill pack loader", () => {
       "{ tools: [jq], limits: { mem: 1G } }",
       "{ tools: [jq], net: [a.example.com], credentials: [{ name: api-token, hosts: [a.example.com], header: Authorization }] }",
       "{ tools: [jq], net: [a.example.com], credentials: [{ name: TOKEN, hosts: [a.example.com], header: Host }] }",
+      "{ tools: [jq], net: ['*.example.com'] }",
+      "{ tools: [jq], net: [a.example.com/path] }",
+      "{ tools: [jq], net: [localhost] }",
+      "{ tools: [jq], net: [a.example.com], credentials: [{ name: TOKEN, hosts: [b.example.com], header: Authorization }] }",
+      "{ tools: [jq], net: [a.example.com], credentials: [{ name: T, hosts: [a.example.com], header: X-A }, { name: T, hosts: [a.example.com], header: X-B }] }",
+      "{ tools: [jq], limits: { mem: 8Mi } }",
     ];
     bad.forEach((s, i) => put(`bad${i}/SKILL.md`, `---\nname: bad${i}\ndescription: d\nsandbox: ${s}\n---\nbody`));
     const { index } = await load({ packs: bad.map((_, i) => `bad${i}`), refs: {} });
     bad.forEach((s, i) => expect(index.get(`bad${i}`)!.sandbox, s).toBeUndefined());
+  });
+
+  it("keeps declarations the executor accepts: host with port, credential host with a port in net, numeric cpu strings", async () => {
+    put("ok/SKILL.md", "---\nname: ok\ndescription: d\nsandbox: { tools: [jq], net: ['API.example.com:8080'], credentials: [{ name: TOKEN, hosts: [api.example.com], header: Authorization }], limits: { cpu: '0.5', mem: 1Gi } }\n---\nbody");
+    const { index } = await load({ packs: ["ok"], refs: {} });
+    expect(index.get("ok")!.sandbox?.limits).toEqual({ cpu: "0.5", mem: "1Gi" });
   });
 
   it("rejects paths that escape the pack dir, by name or by symlink", async () => {

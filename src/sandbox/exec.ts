@@ -57,7 +57,8 @@ export class SkillExecutor {
     const audit = { audit: "sandbox_exec", id, backend: this.o.sandbox.backend, pack: entry.pack, tool };
     const d = checkExec(this.o.index, entry, packs);
     if (!d.ok) {
-      this.o.log.warn({ ...audit, outcome: "denied", reason: d.reason }, "sandbox exec denied");
+      // The rule, not the reason: a reason can quote the caller's file paths, env names or arguments.
+      this.o.log.warn({ ...audit, outcome: "denied", rule: d.rule }, "sandbox exec denied");
       throw new SandboxError("denied", "not_allowed", d.reason);
     }
     const c = d.constraints;
@@ -86,7 +87,10 @@ export class SkillExecutor {
       return r;
     } catch (err) {
       const e = err instanceof SandboxError ? err : new SandboxError("refused", "error", (err as Error).message);
-      this.o.log.warn({ ...audit, ...declared, outcome: e.kind, code: e.code, reason: e.message, durationMs: Date.now() - started }, "sandbox exec failed");
+      // An executor refusal can echo the request (file paths, env names), so only its code is kept; the other
+      // messages are this client's own.
+      const reason = e.kind === "refused" ? undefined : e.message;
+      this.o.log.warn({ ...audit, ...declared, outcome: e.kind, code: e.code, ...(reason && { reason }), durationMs: Date.now() - started }, "sandbox exec failed");
       throw e;
     }
   }

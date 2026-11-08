@@ -10,8 +10,12 @@ const HOP_HEADERS = new Set(["host", "content-length", "transfer-encoding", "con
 
 // What a pack may run in the execution sandbox (§13 of the design). Parsed here, enforced by the tool guard. The
 // rules are the executor's (executor/executor/policy.py), so a declaration it would refuse fails here, at load time.
+// One host, optionally with a port: no wildcards, paths, userinfo or spaces.
+const NET_ENTRY = /^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?(?:\.[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)*|\[[0-9a-f:.]+\])(?::\d{1,5})?$/i;
+const netHost = (entry: string) => entry.replace(/:\d+$/, "").replace(/^\[|\]$/g, "").toLowerCase().replace(/\.$/, "");
+
 const sandboxSchema = z.object({
-  net: z.array(z.string().min(1)).default([]),
+  net: z.array(z.string().regex(NET_ENTRY, "a single host name, optionally with :port").refine((h) => !/^localhost$|\.localhost$/i.test(netHost(h)), "not localhost")).max(16).default([]),
   // Bare command names: the executor looks them up on its PATH.
   tools: z.array(z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/, "a bare command name")).default([]),
   credentials: z
@@ -25,15 +29,32 @@ const sandboxSchema = z.object({
           .refine((h) => !HOP_HEADERS.has(h.toLowerCase()), "not a header a credential may go into"),
       }),
     )
+    .max(8)
     .default([]),
   limits: z
     .object({
-      // Average cores over the timeout (a number, not "500m").
-      cpu: z.number().positive().optional(),
-      mem: z.union([z.number().int().positive(), z.string().regex(/^\d+(Mi|Gi)$/, "like 512Mi")]).optional(),
+      // Average cores over the timeout: a number (or "0.5"), not "500m".
+      cpu: z.union([z.number().positive(), z.string().regex(/^\d+(\.\d+)?$/, "a number of cores, not 500m")]).optional(),
+      // MiB, or "512Mi" / "1Gi"; the executor's floor is 16 MiB.
+      mem: z
+        .union([z.number().int(), z.string().regex(/^\d+(Mi|Gi)$/, "like 512Mi")])
+        .refine((m) => (typeof m === "number" ? m : Number.parseInt(m, 10) * (m.endsWith("Gi") ? 1024 : 1)) >= 16, "at least 16Mi")
+        .optional(),
       timeoutSec: z.number().positive().optional(),
     })
     .optional(),
+}).superRefine((s, ctx) => {
+  // The executor's own cross-field rules; its upper limits (cpu, mem, timeoutSec) are its configuration and are
+  // checked there.
+  const hosts = new Set(s.net.map(netHost));
+  const names = new Set<string>();
+  s.credentials.forEach((c, i) => {
+    if (names.has(c.name)) ctx.addIssue({ code: "custom", path: ["credentials", i, "name"], message: `duplicate credential ${c.name}` });
+    names.add(c.name);
+    for (const h of c.hosts) {
+      if (!hosts.has(netHost(h))) ctx.addIssue({ code: "custom", path: ["credentials", i, "hosts"], message: `host ${h} is not in net` });
+    }
+  });
 });
 export type SandboxSpec = z.infer<typeof sandboxSchema>;
 
