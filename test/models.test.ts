@@ -3,7 +3,7 @@ import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import { CircuitBreaker, type BreakerState } from "../src/agent/breaker.js";
-import { ModelUnavailableError, PiLlmClient, createLlm, effortRequest, isRequestError, mergeBody } from "../src/agent/llm.js";
+import { ModelUnavailableError, PiLlmClient, createLlm, effortRequest, isRequestError, isTransientError, mergeBody } from "../src/agent/llm.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 
@@ -224,12 +224,15 @@ describe("PiLlmClient with a model policy", () => {
     expect(breaker.state).toBe("open");
   });
 
-  it("counts gateway timeouts as failures, so a model that keeps timing out opens its breaker", async () => {
+  it("retries gateway timeouts and counts them as failures, so a model that keeps timing out opens its breaker", async () => {
     for (const m of ["504 upstream request took too long", "model took too long to respond", "504 Gateway Timeout"]) {
       expect(isRequestError(m)).toBe(false);
+      expect(isTransientError(m)).toBe(true);
       const { breaker, client } = setup(2);
-      const llm = client(async () => err(m));
-      await expect(llm.chat(hi)).rejects.toThrow(m);
+      let calls = 0;
+      const llm = client(async () => (calls++, err(m)));
+      await expect(llm.chat(hi)).rejects.toThrow(/after 3 attempts/);
+      expect(calls).toBe(3);
       expect(breaker.state).toBe("closed");
       await expect(llm.chat(hi)).rejects.toThrow(m);
       expect(breaker.state).toBe("open");

@@ -96,7 +96,7 @@ export function effortRequest(step: Pick<ChainStep, "effort" | "effortBody"> | u
 }
 
 // pi-ai reports failures as stopReason "error" rather than throwing; retry the transient ones.
-const TRANSIENT = /\b(408|409|425|429|500|502|503|504)\b|timed? ?out|econn|socket|unavailable|upstream|overloaded|rate limit/i;
+const TRANSIENT = /\b(408|409|425|429|500|502|503|504)\b|timed? ?out|took too long|econn|socket|unavailable|upstream|overloaded|rate limit/i;
 // Rejections of this request's content, not of the model: they must not open the breaker for everyone else.
 // Every other error counts, 400 included, since some gateways answer an unknown model name with a 400.
 // A timeout ("upstream request took too long") is the model's failure and must count, or a model that keeps
@@ -185,7 +185,7 @@ export class PiLlmClient implements LlmClient {
           last = (err as Error).message;
           endChatSpan(span, { error: last });
           outcome = isRequestError(last) ? "neutral" : "failure";
-          if (TRANSIENT.test(last)) continue;
+          if (isTransientError(last)) continue;
           throw new LlmError(`LLM request failed: ${last}`);
         }
         // The span reads the reply inside its guard: an error reply is closed before its content is touched here.
@@ -193,7 +193,7 @@ export class PiLlmClient implements LlmClient {
         if (msg.stopReason === "error" || msg.stopReason === "aborted") {
           last = msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`;
           outcome = isRequestError(last) ? "neutral" : "failure";
-          if (TRANSIENT.test(last)) continue;
+          if (isTransientError(last)) continue;
           throw new LlmError(`LLM request failed: ${last}`);
         }
         const text = msg.content
