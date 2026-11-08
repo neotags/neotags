@@ -99,10 +99,10 @@ export function effortRequest(step: Pick<ChainStep, "effort" | "effortBody"> | u
 const TRANSIENT = /\b(408|409|425|429|500|502|503|504)\b|timed? ?out|econn|socket|unavailable|upstream|overloaded|rate limit/i;
 // Rejections of this request's content, not of the model: they must not open the breaker for everyone else.
 // Every other error counts, 400 included, since some gateways answer an unknown model name with a 400.
-// "too long" only after a word for the request's content: a timeout ("upstream request took too long") is the
-// model's failure and must count, or a model that keeps timing out never opens its breaker.
+// A timeout ("upstream request took too long") is the model's failure and must count, or a model that keeps
+// timing out never opens its breaker; every other "too long" (prompt_too_long, messages are too long, ...) is content.
 const REQUEST_ERROR =
-  /context[ _-]?(length|window)|maximum context|\b(prompt|input|message|request|context) (is )?too long|too many tokens|content[ _-]?(filter|policy|management)|response_format/i;
+  /context[ _-]?(length|window)|maximum context|(?<!took[ _])too[ _-]long|too many tokens|content[ _-]?(filter|policy|management)|response_format/i;
 
 /** A gateway error worth retrying (rate limit, 5xx, timeout, ...). */
 export const isTransientError = (message: string): boolean => TRANSIENT.test(message);
@@ -184,7 +184,7 @@ export class PiLlmClient implements LlmClient {
         } catch (err) {
           last = (err as Error).message;
           endChatSpan(span, { error: last });
-          outcome = REQUEST_ERROR.test(last) ? "neutral" : "failure";
+          outcome = isRequestError(last) ? "neutral" : "failure";
           if (TRANSIENT.test(last)) continue;
           throw new LlmError(`LLM request failed: ${last}`);
         }
@@ -192,7 +192,7 @@ export class PiLlmClient implements LlmClient {
         endChatSpan(span, { msg, captureContent: this.d.captureContent ?? false });
         if (msg.stopReason === "error" || msg.stopReason === "aborted") {
           last = msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`;
-          outcome = REQUEST_ERROR.test(last) ? "neutral" : "failure";
+          outcome = isRequestError(last) ? "neutral" : "failure";
           if (TRANSIENT.test(last)) continue;
           throw new LlmError(`LLM request failed: ${last}`);
         }

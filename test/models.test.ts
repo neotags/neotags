@@ -234,9 +234,26 @@ describe("PiLlmClient with a model policy", () => {
       await expect(llm.chat(hi)).rejects.toThrow(m);
       expect(breaker.state).toBe("open");
     }
-    for (const m of ["prompt is too long: 200000 tokens", "input too long", "This model's maximum context length is 131072 tokens"]) {
-      expect(isRequestError(m)).toBe(true);
+  });
+
+  it("still treats every other \"too long\" as the request's content, whatever the wording", async () => {
+    const { breaker, client } = setup(1, 0);
+    for (const m of [
+      "400 prompt is too long: 200000 tokens",
+      "400 Your request was too long",
+      "400 prompt was too long",
+      "400 messages are too long",
+      "400 Input text is too long",
+      "400 The conversation is too long",
+      "413 request payload too long",
+      '400 {"code":"prompt_too_long"}',
+      "400 input-too-long",
+      "400 This model's maximum context length is 131072 tokens",
+    ]) {
+      expect(isRequestError(m), m).toBe(true);
+      await expect(client(async () => err(m)).chat(hi)).rejects.toThrow(m);
     }
+    expect(breaker.state).toBe("closed");
   });
 
   it("says why the model is unavailable", async () => {
