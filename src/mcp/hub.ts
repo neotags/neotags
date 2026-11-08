@@ -1,10 +1,10 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import type { TSchema } from "@earendil-works/pi-ai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Logger } from "pino";
-import { EXECUTED_ARGS } from "../agent/index.js";
+import { EXECUTED_ARGS } from "../agent/executed.js";
 import type { Config } from "../config/index.js";
 import { mcpToolName, type McpGuard } from "../guardrails/tools.js";
 
@@ -36,6 +36,8 @@ interface ServerState {
   /** Why the server is unavailable; unset while connected. */
   down?: string;
   connecting?: Promise<void>;
+  /** Successful connects so far: tells a failed call whether someone else already replaced its client. */
+  gen: number;
   retryMs: number;
   /** Epoch ms before which a call on a down server fails at once instead of reconnecting (the backoff). */
   retryAt: number;
@@ -47,15 +49,16 @@ const message = (err: unknown) => (err instanceof Error ? err.message : String(e
 /**
  * The configured MCP servers over Streamable HTTP, one long-lived client each. A server that cannot be reached
  * does not stop startup: it is retried in the background, and `unavailable()` names it so the agent is told.
- * A call rejected on the connection (a restarted server, an expired session) reconnects once and retries; while a
- * server is down, calls fail at once with an error the model can act on until the next reconnect is due.
+ * A call that fails on the connection (a restarted server, an expired session) reconnects once and retries; calls
+ * that fail together share that reconnect. While a server is down, calls fail at once with an error the model can act
+ * on until the next reconnect is due.
  */
 export class McpHub {
   private states: ServerState[];
   private closed = false;
 
   constructor(private o: McpHubOptions) {
-    this.states = o.servers.map((cfg) => ({ cfg, tools: [], down: "not connected yet", retryMs: o.reconnectMinMs ?? 5000, retryAt: 0 }));
+    this.states = o.servers.map((cfg) => ({ cfg, tools: [], down: "not connected yet", retryMs: o.reconnectMinMs ?? 5000, retryAt: 0, gen: 0 }));
   }
 
   get guard(): McpGuard {
@@ -135,6 +138,7 @@ export class McpHub {
       }
       if (this.closed) throw new Error("closed");
       s.client = client;
+      s.gen++;
       s.tools = tools;
       s.down = undefined;
       s.retryMs = this.o.reconnectMinMs ?? 5000;
@@ -178,7 +182,10 @@ export class McpHub {
 
   private async call(s: ServerState, tool: string, args: unknown, signal?: AbortSignal): Promise<AgentToolResult<McpCallDetails>> {
     // Within the backoff a down server fails at once: a run making many calls must not wait on a connect each time.
-    let client = await this.ready(s, signal);
+    if (!s.client && (s.connecting || Date.now() >= s.retryAt)) await abortable(this.connect(s), signal);
+    if (!s.client) throw new Error(unavailableMessage(s.cfg.name, s.down));
+    let client: Client = s.client;
+    let gen = s.gen;
     let res: CallToolResult | undefined;
     for (let attempt = 0; !res; attempt++) {
       try {
@@ -189,24 +196,16 @@ export class McpHub {
       } catch (err) {
         if (signal?.aborted) throw err;
         // A JSON-RPC error is the server answering (bad arguments, unknown tool, timeout); anything else is the
-        // connection: HTTP errors, refused connections, an expired session.
+        // connection: HTTP errors, refused or reset connections, an expired session.
         if (err instanceof McpError && err.code !== ErrorCode.ConnectionClosed) throw new Error(message(err));
-        // Retried once, after a reconnect, only when the request cannot have run: an expired session or a server that
-        // refused it. A dropped response (reset, timeout) may have run, so it is not sent again.
-        if (attempt === 0 && notProcessed(err)) {
-          if (s.client === client) {
-            s.client = undefined;
-            // Closed later, not now: closing fails the other calls still waiting on it with "connection closed",
-            // which would hide their own (retriable) error.
-            const old = client;
-            setTimeout(() => void old.close().catch(() => undefined), this.o.callTimeoutMs).unref();
-          }
-          // Parallel calls that hit the same expired session share this reconnect.
-          client = await this.ready(s, signal, true);
-          continue;
+        const next: { client: Client; gen: number } | undefined = attempt === 0 ? await this.replacement(s, client, gen, signal) : undefined;
+        if (!next) {
+          if (attempt > 0 && s.client === client) this.markDown(s, message(err));
+          throw new Error(unavailableMessage(s.cfg.name, s.down ?? message(err)));
         }
-        if (s.client === client) this.markDown(s, message(err));
-        throw new Error(unavailableMessage(s.cfg.name, message(err)));
+        // Sent again: the allowlisted tools only read (read-only credentials, argAllow lets through read operations
+        // only), so a request that did run before its response was lost costs one more read.
+        ({ client, gen } = next);
       }
     }
     const text = this.o.guard.output(resultText(res));
@@ -216,24 +215,24 @@ export class McpHub {
   }
 
   /**
-   * A connected client: the current one, or one from a reconnect (shared with concurrent callers) when the backoff
-   * allows it or `now` asks for it. Throws the unavailable error otherwise, or when `signal` aborts the wait.
+   * The client to retry a call on after `failed` (of generation `gen`) failed on the connection: one someone else
+   * already reconnected, the reconnect in progress, or a reconnect this call starts. Undefined when the reconnect that
+   * replaced `failed` already failed (the server is down) or did not succeed.
    */
-  private async ready(s: ServerState, signal?: AbortSignal, now = false): Promise<Client> {
-    if (!s.client && (s.connecting || now || Date.now() >= s.retryAt)) await abortable(this.connect(s), signal);
-    if (!s.client) throw new Error(unavailableMessage(s.cfg.name, s.down));
-    return s.client;
+  private async replacement(s: ServerState, failed: Client, gen: number, signal?: AbortSignal): Promise<{ client: Client; gen: number } | undefined> {
+    if (s.client && s.gen !== gen) return { client: s.client, gen: s.gen };
+    if (!s.connecting) {
+      if (s.client !== failed) return undefined;
+      // Closing fails the other calls on it with "connection closed"; they then wait for this reconnect.
+      s.client = undefined;
+      void failed.close().catch(() => undefined);
+    }
+    await abortable(this.connect(s), signal);
+    return s.client ? { client: s.client, gen: s.gen } : undefined;
   }
 }
 
 export type McpCallDetails = { [EXECUTED_ARGS]: unknown };
-
-/** The request was rejected before it ran: an expired session (404), a server or proxy that is down, a refused connection. */
-function notProcessed(err: unknown): boolean {
-  if (err instanceof StreamableHTTPError) return err.code === 404 || err.code === 502 || err.code === 503;
-  const cause = (err as { cause?: { code?: string } })?.cause;
-  return cause?.code === "ECONNREFUSED";
-}
 
 /** `p`, or a rejection as soon as `signal` aborts; `p` itself keeps running (a reconnect others may share). */
 function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {

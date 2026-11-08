@@ -38,7 +38,7 @@ Every call passes the tool guard first (`src/guardrails/tools.ts`), in code:
 - `tools_call` (O2) runs only an inner tool listed in `innerAllow`; without `innerAllow` it is always refused.
 - `argAllow` limits a parameter to listed values, for tools that mix reads and writes, such as `{ alerting_manage_rules: { operation: [list, get] } }`.
 - Arguments are capped at `mcp.maxArgChars`.
-- `SearchSQL` and `PrometheusRangeQuery`, direct or through `tools_call`: a missing time range becomes the last hour, SQL without a `LIMIT` gets one, and a range query without a step gets about 60 points. A range over 24 hours, a `LIMIT` over 1000 or a step that gives over 1000 points per series is refused with the reason (`agent.queryLimits`).
+- `SearchSQL` and `PrometheusRangeQuery`, direct or through `tools_call`: a missing time range becomes the last hour, SQL without a `LIMIT` gets one, and a range query without a step gets about 60 points. A range over 24 hours, a `LIMIT` over 1000 or a step that gives over 1000 points per series is refused with the reason (`agent.queryLimits`). Comments are removed from the SQL that runs, and backtick identifiers and backslash-escaped quotes are refused: those are where the guard and O2's parser could read a different `LIMIT`. The `LIMIT` check catches the model's mistakes; the hard bounds are the time range and the output budget.
 - Output is redacted, then cut at `agent.toolOutputChars` with a note that asks the model to narrow the query.
 
 ### LLM traces (OpenObserve / Langfuse)

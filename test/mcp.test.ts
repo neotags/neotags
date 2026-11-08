@@ -33,8 +33,11 @@ class FakeMcp {
   down = false;
   /** Requests that fail with 503 before the server answers again (a restart, an expired session). */
   failNext = 0;
-  /** Status of those failures: 503 cannot have run; 500 may have. */
   failStatus = 503;
+  /** Requests are accepted but never answered. */
+  hang = false;
+  /** Start hanging once the `failNext` failures are used up. */
+  hangAfterFailures = false;
   output = "ok";
   private http?: Server;
   port = 0;
@@ -67,8 +70,10 @@ class FakeMcp {
   async listen(port = 0): Promise<this> {
     this.http = createServer(async (req, res) => {
       this.headers.push(req.headers);
+      if (this.hang) return;
       if (this.down || this.failNext > 0) {
         this.failNext = Math.max(0, this.failNext - 1);
+        if (this.failNext === 0 && this.hangAfterFailures) this.hang = true;
         res.writeHead(this.down ? 503 : this.failStatus).end("down");
         return;
       }
@@ -87,6 +92,7 @@ class FakeMcp {
   }
 
   async stop(): Promise<void> {
+    this.hang = false;
     this.http?.closeAllConnections();
     await new Promise<void>((r) => (this.http ? this.http.close(() => r()) : r()));
   }
@@ -277,17 +283,36 @@ describe("MCP client", () => {
     expect(f.calls.map((c) => c.args.query).sort()).toEqual(["a", "b"]);
   });
 
-  it("does not resend a call whose request may have run (a 500), and marks the server down", async () => {
+  it("retries a call once after any connection error; failing again marks the server down", async () => {
     const f = await fake();
     const hub = hubFor([{ name: "o2", url: f.url() }], { reconnectMinMs: 60_000 });
     await hub.start();
+    const tool = hub.tools().find((t) => t.name === "o2__tool_search")!;
     f.failNext = 1;
     f.failStatus = 500;
-    const requests = f.headers.length;
-    const tool = hub.tools().find((t) => t.name === "o2__tool_search")!;
-    await expect(tool.execute("1", { query: "a" })).rejects.toThrow(/Data source o2 is unavailable/);
-    expect(f.headers.length).toBe(requests + 1);
+    await expect(tool.execute("1", { query: "a" })).resolves.toMatchObject({ content: [{ text: "ok" }] });
+    // Call, reconnect (initialize + list), call again: every one of them fails.
+    f.failNext = 10;
+    await expect(tool.execute("2", { query: "b" })).rejects.toThrow(/Data source o2 is unavailable/);
     expect(hub.unavailable()).toEqual(["o2"]);
+  });
+
+  it("a cancelled run does not wait for a reconnect", async () => {
+    const f = await fake();
+    const hub = hubFor([{ name: "o2", url: f.url() }]);
+    await hub.start();
+    const tool = hub.tools().find((t) => t.name === "o2__tool_search")!;
+    // The call fails, and the reconnect it starts hangs (until the 2 s connect timeout).
+    f.failNext = 1;
+    f.hangAfterFailures = true;
+    const before = f.headers.length;
+    const ac = new AbortController();
+    const started = Date.now();
+    const call = tool.execute("1", { query: "a" }, ac.signal);
+    await expect.poll(() => f.headers.length, { timeout: 1000 }).toBe(before + 2);
+    ac.abort(new Error("cancelled"));
+    await expect(call).rejects.toThrow("cancelled");
+    expect(Date.now() - started).toBeLessThan(1000);
   });
 
   it("while a server is down, calls fail at once until the next reconnect is due", async () => {
@@ -373,9 +398,22 @@ describe("McpGuard", () => {
     expect(g.check({ name: "o2__SearchSQL", args: {} })).toEqual({ ok: false, reason: "SearchSQL needs request_body.query.sql" });
   });
 
-  it("prepares SQL: fills the missing end of the range, appends LIMIT after a trailing comment, caps size", () => {
+  it("refuses SQL that this lexer and O2's parser could read differently, and strips comments in prepare", () => {
+    const q = (s: string) => sql({ sql: s, ...range });
+    expect(g.check(q("SELECT * FROM t LIMIT 10 -- x"))).toMatchObject({ ok: false, reason: expect.stringContaining("remove the SQL comments") });
+    expect(g.check(q("SELECT `a'` FROM t LIMIT 100000 -- ' LIMIT 10"))).toMatchObject({ ok: false });
+    expect(g.check(q("SELECT 'x\\' LIMIT 5 --', * FROM t LIMIT 100000"))).toMatchObject({ ok: false });
+    expect(g.check(q("SELECT * FROM t WHERE log LIKE '%--x%' LIMIT 10"))).toEqual({ ok: true });
+    // Nested comments: what runs has none left, so O2 sees the same two LIMITs this lexer does and rejects the SQL.
+    const nested = g.prepare("o2__SearchSQL", { request_body: { query: { sql: "SELECT * FROM t LIMIT 100000 /* /* */ LIMIT 10 -- */", ...range } } });
+    const sent = (nested as { request_body: { query: { sql: string } } }).request_body.query.sql;
+    expect(sent).not.toMatch(/--|\/\*|\*\//);
+    expect(sent).toMatch(/LIMIT 100000\s+LIMIT 10$/);
+  });
+
+  it("prepares SQL: fills the missing end of the range, strips a trailing comment, caps size", () => {
     const out = g.prepare("o2__SearchSQL", { request_body: { query: { sql: "SELECT 1 -- note;", start_time: NOW_US - 2 * HOUR_US, size: 5000 } } });
-    expect(out).toEqual({ request_body: { query: { sql: "SELECT 1 -- note\nLIMIT 100", start_time: NOW_US - 2 * HOUR_US, end_time: NOW_US, size: 100 } } });
+    expect(out).toEqual({ request_body: { query: { sql: "SELECT 1\nLIMIT 100", start_time: NOW_US - 2 * HOUR_US, end_time: NOW_US, size: 100 } } });
     expect(g.check({ name: "o2__SearchSQL", args: out })).toEqual({ ok: true });
     // A range that is too long is not shortened silently: the check refuses it.
     const long = g.prepare("o2__SearchSQL", { query: { sql: "SELECT 1 LIMIT 5", start_time: NOW_US - 30 * HOUR_US } });

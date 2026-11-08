@@ -1,7 +1,9 @@
+export { EXECUTED_ARGS, executedArgs } from "./executed.js";
 import { Agent, type AgentTool, type BeforeToolCallResult, type StreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Config, Effort } from "../config/index.js";
 import type { Decision } from "../guardrails/policy.js";
 import { endChatSpan, guarded, startChatSpan, ToolSpans, type ChatRequest } from "../telemetry/spans.js";
+import { executedArgs } from "./executed.js";
 import { promptMessages } from "./message.js";
 import { createGateway, type Gateway } from "./models.js";
 
@@ -25,15 +27,6 @@ export function toBeforeToolCall(guard: ToolGuard, onDenied?: (toolCallId: strin
 export function toolOutput(result: unknown): string {
   const content = ((result as { content?: unknown })?.content ?? []) as { type: string; text?: string }[];
   return content.map((c) => (c.type === "text" ? (c.text ?? "") : `[${c.type}]`)).join("\n");
-}
-
-/** Key of a tool result's `details` with the arguments that ran (MCP tools, after the tool guard's defaults). */
-export const EXECUTED_ARGS = "neotagsExecutedArgs";
-
-/** The arguments a tool ran with when it reports them under {@link EXECUTED_ARGS}; else undefined (the model's ran). */
-export function executedArgs(result: unknown): unknown {
-  const details = (result as { details?: unknown })?.details;
-  return details && typeof details === "object" && EXECUTED_ARGS in details ? (details as Record<string, unknown>)[EXECUTED_ARGS] : undefined;
 }
 
 /** One `execute_tool` span per tool call of `agent`; denials are reported through the returned spans' `denied`. */

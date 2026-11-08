@@ -143,10 +143,11 @@ export class McpGuard {
     if (missing(q.end_time)) q.end_time = nowUs;
     if (missing(q.start_time) && typeof num(q.end_time) === "number") q.start_time = (num(q.end_time) as number) - rangeUs;
 
+    // What runs carries no comments: they are where this lexer and O2's parser could disagree on the LIMIT.
+    q.sql = stripSqlComments(q.sql as string).trim();
     let limit = trailingLimit(q.sql as string);
     if (limit === undefined) {
       limit = this.o.limits.sqlDefaultLimit;
-      // On its own line, so that a trailing "-- comment" cannot swallow it.
       q.sql = `${(q.sql as string).replace(/[\s;]+$/, "")}\nLIMIT ${limit}`;
     }
     const size = num(q.size);
@@ -170,6 +171,8 @@ export class McpGuard {
     if (end! <= start!) return deny("end_time must be after start_time");
     const range = (end! - start!) / 1e6;
     if (range > this.o.limits.maxRangeSec) return deny(`the time range is ${hours(range)}; one query covers at most ${hours(this.o.limits.maxRangeSec)}: narrow it or split it`);
+    const ambiguous = ambiguousSql(q.sql as string);
+    if (ambiguous) return deny(`the SQL is refused: ${ambiguous}`);
     const limit = trailingLimit(q.sql as string);
     if (limit === undefined) return deny("the SQL needs a LIMIT at the end");
     if (limit > this.o.limits.sqlMaxLimit) return deny(`LIMIT ${limit} is above ${this.o.limits.sqlMaxLimit}: aggregate, or use a smaller LIMIT`);
@@ -224,11 +227,31 @@ function sqlQuery(args: Obj): { query: Obj; at: "body" | "top" } | undefined {
   return undefined;
 }
 
+// Literals ('it''s'), quoted identifiers ("col") and comments, matched left to right: whichever starts first wins.
+const SQL_TOKENS = /'(?:[^']|'')*'|"(?:[^"]|"")*"|\/\*[\s\S]*?\*\/|--[^\n]*/g;
+const isComment = (tok: string) => tok.startsWith("--") || tok.startsWith("/*");
+
+/** The SQL without its comments; literals are kept. */
+export function stripSqlComments(sql: string): string {
+  return sql.replace(SQL_TOKENS, (tok) => (isComment(tok) ? " " : tok));
+}
+
+/**
+ * Forms where this lexer and O2's SQL parser could read the text differently (nested comments, backslash escapes,
+ * backtick identifiers), so that a LIMIT seen here is not the one O2 runs. `prepare` removes comments; the rest is
+ * refused. This keeps the LIMIT check honest for the model's mistakes; the hard bounds are the time range and the
+ * output budget, which do not depend on parsing SQL.
+ */
+function ambiguousSql(sql: string): string | undefined {
+  if (sql.replace(SQL_TOKENS, (tok) => (isComment(tok) ? "--" : "''")).match(/--|\/\*|\*\//)) return "remove the SQL comments";
+  if (sql.includes("`")) return 'quote identifiers with double quotes ("col"), not backticks';
+  if (/\\['"]/.test(sql)) return "escape a quote by doubling it ('it''s'), not with a backslash";
+  return undefined;
+}
+
 /** Row count of the outer query's LIMIT (`LIMIT n`, `LIMIT n OFFSET m`, `LIMIT m, n`), or undefined without one. */
 export function trailingLimit(sql: string): number | undefined {
-  // One left-to-right pass over literals ('it''s', "col") and comments, as the SQL parser reads them: whichever starts
-  // first wins, so a "--" inside a literal is not a comment and an apostrophe inside a comment does not open a literal.
-  const body = sql.replace(/'(?:[^']|'')*'|"(?:[^"]|"")*"|\/\*[\s\S]*?\*\/|--[^\n]*/g, (m) => (m.startsWith("'") || m.startsWith('"') ? "''" : " "));
+  const body = sql.replace(SQL_TOKENS, (tok) => (isComment(tok) ? " " : "''"));
   const m = /\blimit\s+(\d+)(?:\s*,\s*(\d+)|\s+offset\s+\d+)?\s*;?\s*$/i.exec(body);
   if (!m) return undefined;
   return Number(m[2] ?? m[1]);
