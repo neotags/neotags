@@ -35,7 +35,8 @@ src/router/             LLM intent routing: one tool-less call picks a registere
 src/skills/             Skill interface; kb-collect/ (thread -> redact -> summarize -> Onyx upsert, Undo); kb-files/ (Slack files -> extract -> redact -> Onyx); kb-ask/ (Onyx search -> grounded, cited answer)
 src/tools/              slack (thread reader, file download), onyx (ingestion + search client), extract (PDF/DOCX/XLSX/PPTX/text -> sections), redact (secret scrubbing), skillpacks (allowlisted Agent Skills loader + read_skill tools)
 src/telemetry/          OpenTelemetry setup (OTLP via OTEL_* env) and GenAI spans: invoke_agent per task / run -> chat per LLM request, execute_tool per tool call; content redacted
-src/guardrails/         channel/user allowlist policy; MCP tool guard (tools.ts: allowlists, tools_call inner names, argAllow, query limits, output redaction); enforced in code, not prompts
+src/guardrails/         channel/user allowlist policy; MCP tool guard (tools.ts: allowlists, tools_call inner names, argAllow, query limits, output redaction); sandbox guard (sandbox.ts: only a pack's declared `sandbox` tools, its declaration as the constraints); enforced in code, not prompts
+src/sandbox/            Sandbox interface; backend local (executor sidecar over a unix socket) or none (refuse all); SkillExecutor = sandbox guard + audit; run_skill_command tool
 src/mcp/                MCP clients (Streamable HTTP): allowlisted tools as pi AgentTools named <server>__<tool>, background reconnect, unavailable servers named in the system prompt
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport
 test/                   vitest

@@ -41,6 +41,19 @@ Every call passes the tool guard first (`src/guardrails/tools.ts`), in code:
 - `SearchSQL` and `PrometheusRangeQuery`, direct or through `tools_call`: a missing time range becomes the last hour, SQL without a `LIMIT` gets one, and a range query without a step gets about 60 points. A range over 24 hours, a `LIMIT` over 1000 or a step that gives over 1000 points per series is refused with the reason (`agent.queryLimits`). Comments are removed from the SQL that runs, and backtick identifiers and backslash-escaped quotes are refused: those are where the guard and O2's parser could read a different `LIMIT`. The `LIMIT` check catches the model's mistakes; the hard bounds are the time range and the output budget.
 - Output is redacted, then cut at `agent.toolOutputChars` with a note that asks the model to narrow the query.
 
+### Command execution (agent runs)
+
+neotags never runs a command in its own process. Skill-pack commands run in the executor sidecar ([executor/README.md](executor/README.md)), which starts a fresh bubblewrap sandbox for each one. With `sandbox.backend: none` (the default) every execution is refused; `sandbox.backend: local` sends executions to the sidecar's unix socket (`sandbox.socket`, default `/run/executor/exec.sock`).
+
+Every execution passes the sandbox guard first (`src/guardrails/sandbox.ts`), in code:
+
+- Only a skill pack whose `SKILL.md` front matter declares `sandbox` can run anything, and only the commands in its `tools` (`argv[0]`, a bare name, no shell).
+- The constraints sent to the executor (`net`, `credentials`, `limits`) are the pack's declaration, never the caller's, so a prompt-injected call cannot widen them. The executor checks the request again.
+- Env names that would bypass the proxy or shadow a credential placeholder, and file paths outside the work directory, are refused.
+- If the executor is unreachable or its self-check failed (`503 sandbox_unavailable`), the execution fails; there is no fallback that runs it some other way.
+
+Each execution, refused or not, writes one `sandbox_exec` audit log line with the pack, tool, declared hosts and credential names, the outcome, exit code and duration, never arguments, input or output. Agent runs get the `run_skill_command` tool only when the backend is `local` and a loaded pack declares tools; its output is redacted and cut at `agent.toolOutputChars`. Like the MCP client, it is not wired to an entry yet: the O2 gateway will create it (`createSkillExecutor`) and pass it to `createRunManager`.
+
 ### LLM traces (OpenObserve / Langfuse)
 
 Each request becomes one OpenTelemetry trace, rooted at an `invoke_agent <entry>` span. `gen_ai.agent.name` is the entry (`slack`, `o2`, `job`), so entries can be told apart in one stream; the configured bot name is `neotags.bot.name`. `gen_ai.conversation.id` (and `session.id`, which Langfuse groups by) is the conversation: the Slack channel and thread, or the O2 assistant session. Every chat and tool span repeats `gen_ai.conversation.id`: OpenObserve's session list sums tokens over the spans that carry it. Every span carries `gen_ai.operation.name` (`invoke_agent`, `chat`, `execute_tool`), which OpenObserve's LLM views filter on.

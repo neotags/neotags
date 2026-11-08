@@ -12,9 +12,10 @@ filesystem and has no packages from PyPI.
 
 <!-- prettier-ignore -->
 > [!NOTE]
-> Nothing in neotags calls the executor yet. The `Sandbox` client that
-> sends requests to `/v1/exec` is planned, and the Tool Guard will deny every
-> execution by default.
+> neotags calls `/v1/exec` through its `Sandbox` client (`src/sandbox/`,
+> backend `local`). The client is off by default (`sandbox.backend: none`),
+> and its tool guard refuses every execution from a skill pack without a
+> `sandbox` declaration.
 
 ## How it works
 
@@ -417,7 +418,5 @@ These gaps are known and accepted for now:
 
 These pieces build on the executor and are planned:
 
-- A `Sandbox.exec(entry, constraints)` client in neotags that calls
-  `/v1/exec`.
 - An executor sidecar option in the Helm chart with the settings in
   [Deploy as a sidecar](#deploy-as-a-sidecar).
