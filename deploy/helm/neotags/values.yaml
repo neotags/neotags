@@ -67,8 +67,9 @@ existingSecret: neotags-secrets
 skillPacks:
   configMap: ""      # empty: no packs mounted
   items: []
-  # Packs are read once at startup: change this (e.g. to the packs' git ref) whenever the ConfigMap changes, so the
-  # Pod rolls and loads them. Without it, an updated ConfigMap is ignored until the Pod restarts.
+  # Packs are read once at startup. helm upgrade rolls the Pod when the ConfigMap's data changed (it is read with
+  # lookup); with helm template or a GitOps tool lookup sees nothing, so change this (e.g. to the packs' git ref)
+  # whenever the ConfigMap changes.
   revision: ""
 
 # Command execution for skill packs (executor/README.md "Deploy as a sidecar"). When enabled it runs as a native
@@ -86,15 +87,18 @@ executor:
   credentialsSecret: ""
   tmpSizeLimit: 1Gi  # per-call directories of sandboxed commands (emptyDir sizeLimit)
   # Every sandboxed command runs inside the container's limits below. maxConcurrency x maxMemMib plus 256Mi for the
-  # executor itself must fit the memory limit (the chart checks): past it the kernel kills the whole sidecar.
+  # executor itself must fit the memory limit (the chart checks): past it the kernel kills the whole sidecar. The check
+  # covers each command's address space only, not files a command writes to its in-memory /tmp, nor resident workers
+  # (EXECUTOR_WORKERS); leave headroom for those.
   maxConcurrency: 2  # EXECUTOR_MAX_CONCURRENCY
   maxMemMib: 768     # EXECUTOR_MAX_MEM_MIB: the most one command may declare
-  env: []            # other EXECUTOR_* settings, e.g. { name: EXECUTOR_MAX_TIMEOUT_SEC, value: "120" }
+  env: []            # other EXECUTOR_* settings, e.g. { name: EXECUTOR_MAX_TIMEOUT_SEC, value: "120" }; not the ones the chart sets
   resources:
     requests: { cpu: 100m, memory: 128Mi }
     limits: { cpu: "2", memory: 2Gi }
 
-# Rolling update: start the new Pod before stopping the old one.
+# Rolling update: start the new Pod before stopping the old one, so O2 turns keep a Pod to land on. For a few seconds
+# both Pods receive Slack events; event dedupe is per Pod, so an event Slack retries in that window can run twice.
 strategy:
   maxSurge: 1
   maxUnavailable: 0
@@ -125,8 +129,14 @@ networkPolicy:
   # sandboxes reach only their declared hosts through its proxy, and that proxy's own reach is what this allows.
   # Empty: egress is not restricted by this chart. Set it to the LLM gateway, MCP servers, Onyx, the OTLP collector
   # and the hosts skill packs declare, e.g. [{ to: [{ namespaceSelector: {...} }], ports: [{ port: 443 }] }].
-  # DNS (port 53 to kube-system) is added when this list is set.
+  # DNS (port 53 to networkPolicy.dns) is added when this list is set.
   egress: []
+  # Where DNS goes when egress is restricted: CoreDNS pods in any namespace by default. With NodeLocal DNSCache add
+  # its address, e.g. - ipBlock: { cidr: 169.254.20.10/32 }
+  dns:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels: { k8s-app: kube-dns }
 
 # Slack Events API needs a public HTTPS URL routed to /slack/events.
 ingress:

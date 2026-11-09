@@ -6,9 +6,25 @@
 {{- if and $o2 (lt (float64 $grace) $need) -}}
 {{- fail (printf "terminationGracePeriodSeconds (%s) must be at least config.agent.drainSec + 15 (%.0f) so agent runs can finish on shutdown" $grace $need) -}}
 {{- end -}}
-{{- $packs := and .Values.config.skillPacks .Values.config.skillPacks.packs -}}
-{{- if and $packs (not .Values.skillPacks.configMap) -}}
-{{- fail "config.skillPacks.packs is set but skillPacks.configMap is not: the packs would not be mounted, and runs would start without them" -}}
+{{- if and $o2 (ne .Values.service.type "ClusterIP") -}}
+{{- fail (printf "service.type %s would expose the O2 gateway port outside the cluster; it is in-cluster only (use the Ingress for Slack)" .Values.service.type) -}}
+{{- end -}}
+{{- $sp := default dict .Values.config.skillPacks -}}
+{{- if or $sp.packs $sp.refs -}}
+{{- if not .Values.skillPacks.configMap -}}
+{{- fail "config.skillPacks.packs or refs is set but skillPacks.configMap is not: the packs would not be mounted, and runs would start without them" -}}
+{{- end -}}
+{{- /* ConfigMap keys cannot hold "/": without items the files land flat, and no <pack>/SKILL.md exists. */}}
+{{- if not .Values.skillPacks.items -}}
+{{- fail "skillPacks.items is empty: map each ConfigMap key to its <pack>/... path, or no pack can be loaded" -}}
+{{- end -}}
+{{- end -}}
+{{- if $exec.enabled -}}
+{{- range $exec.env -}}
+{{- if has .name (list "EXECUTOR_SOCKET" "EXECUTOR_REQUIRE_PROCFS" "EXECUTOR_CREDENTIALS_DIR" "EXECUTOR_MAX_CONCURRENCY" "EXECUTOR_MAX_MEM_MIB" "EXECUTOR_SKILLS_DIR") -}}
+{{- fail (printf "executor.env sets %s, which the chart owns (use the executor.* value): a later duplicate would silently win" .name) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if and $exec.enabled $exec.resources.limits $exec.resources.limits.memory -}}
 {{- /* Every sandboxed command runs inside the sidecar's limit: past it the kernel kills the sidecar, not the command. */}}
@@ -26,6 +42,14 @@
 {{- end -}}
 {{- with .Values.skillPacks.revision -}}
 {{- $_ := set $annotations "neotags/skill-packs-revision" (toString .) -}}
+{{- end -}}
+{{- with .Values.skillPacks.configMap -}}
+{{- /* Packs are read at startup: roll the Pod when they change. lookup is empty under helm template and
+dry-runs; there skillPacks.revision is the only trigger. */}}
+{{- $cm := lookup "v1" "ConfigMap" $.Release.Namespace . -}}
+{{- if $cm -}}
+{{- $_ := set $annotations "checksum/skill-packs" (toJson (default dict $cm.data) | sha256sum) -}}
+{{- end -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -172,6 +196,13 @@ spec:
               command: [python3, -c, "import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])", "{{ $exec.socketDir }}/exec.sock"]
             periodSeconds: 1
             failureThreshold: 30
+          # A wedged executor is restarted rather than failing every command for the rest of the Pod's life.
+          livenessProbe:
+            exec:
+              command: [python3, -c, "import socket, sys; s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1]); s.sendall(b'GET /healthz HTTP/1.0\\r\\n\\r\\n'); sys.exit(0 if s.recv(12).startswith(b'HTTP/1.') else 1)", "{{ $exec.socketDir }}/exec.sock"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
           resources: {{- toYaml $exec.resources | nindent 12 }}
           # No envFrom and no service account token: the sidecar never sees the neotags Secret.
           volumeMounts:
@@ -202,7 +233,8 @@ spec:
         - name: executor-run
           emptyDir: {}
         - name: executor-tmp
-          # Per-call directories of untrusted commands: bounded, so a command cannot fill the node's disk.
+          # Per-call directories of untrusted commands. Over the limit the kubelet evicts the Pod (emptyDir has no
+          # "fail the write" mode): a bounded failure, chosen over a command filling the node's disk.
           emptyDir: { sizeLimit: {{ $exec.tmpSizeLimit }} }
         - name: sa-token
           projected:

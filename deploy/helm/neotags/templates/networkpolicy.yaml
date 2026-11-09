@@ -26,10 +26,7 @@ spec:
     {{- end }}
     {{- with .Values.networkPolicy.egress }}
   egress:
-    - to:
-        - namespaceSelector: {}
-          podSelector:
-            matchLabels: { k8s-app: kube-dns }
+    - to: {{- toYaml $.Values.networkPolicy.dns | nindent 8 }}
       ports:
         - { port: 53, protocol: UDP }
         - { port: 53, protocol: TCP }
