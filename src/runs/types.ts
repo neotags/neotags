@@ -1,3 +1,4 @@
+import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Effort, RunSource } from "../config/index.js";
 
 export type { RunSource };
@@ -29,6 +30,15 @@ export interface RunInput {
   packs?: string[];
   /** Links for the "AI unavailable" answer (stream, dashboard, ...), built by the entry. */
   links?: { title: string; url: string }[];
+  /**
+   * Facts the entry states in code, outside the untrusted tags (O2: the current org and the tools that query it).
+   * Never request text: what is built from a request must be validated first.
+   */
+  notes?: string[];
+  /** Tools of this run only, next to the shared ones (O2: opening a query in the user's page). Set by the entry's code. */
+  tools?: AgentTool<any>[];
+  /** W3C trace context of the caller; the run's trace span is its child when it is sampled. */
+  traceparent?: string;
 }
 
 export interface RunUsage {
@@ -46,6 +56,13 @@ export interface RunResult {
   degraded?: boolean;
   /** Why the run did not finish normally (error, budget, cancel reason). */
   reason?: string;
+  /**
+   * What stopped a failed or cancelled run: model_unavailable, model_error, deadline, error (failed);
+   * cancelled, interrupted (shutdown). Entries pick their wording by it.
+   */
+  errorType?: string;
+  /** Trace id of the run's span (32 hex), when tracing is on; O2 sends it back with feedback. */
+  traceId?: string;
   steps: number;
   toolCalls: number;
   usage: RunUsage;

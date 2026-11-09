@@ -63,7 +63,7 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
   #   answer: 1200                       #   kb-ask answer
   # summarizeMaxInputTokens: 60000       # prompt budget; default = contextWindow / 2 - outputTokens.summary
   # charsPerToken: 4                     # lower (e.g. 2-3) for CJK-heavy text so budgets are not overrun
-# Tool-using agent runs (RunManager). Not reachable from an entry yet; the O2 gateway is next.
+# Tool-using agent runs (RunManager), started when o2Gateway is enabled.
 # agent:
 #   entries: { o2: [o2-query-assistant] }   # skill packs in the system prompt per entry (must be in skillPacks.packs)
 #   maxSteps: 30                  # tool-calling turns, then the model answers with what it has
@@ -77,6 +77,13 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #   packs: [o2-query-assistant]   # whole packs: SKILL.md + every text file under references/
 #   refs:                         # single reference files of other packs, relative to references/
 #     some-pack: [method.md, data/table.json]
+# o2Gateway:                      # the OpenObserve AI assistant entry (docs/design/002-o2-gateway-contract.md)
+#   enabled: false                # needs env O2_AGENT_API_KEY (the x-o2-agent-key O2 sends) and an LLM
+#   port: 3001                    # its own port; in-cluster callers only (Service + NetworkPolicy)
+#   orgs: {}                      # O2 org identifier -> the mcp.servers entry that queries it, e.g. { default: o2 }
+#   maxBodyKb: 4096
+#   maxHistoryChars: 48000        # earlier turns kept, newest first
+#   maxQueued: 8                  # runs waiting for a slot; beyond it O2 gets 429 turn_limit
 # sandbox:                        # where skill-pack commands run (executor/README.md); nothing runs in this process
 #   backend: none                 # none (default): every execution is refused. local: the executor sidecar
 #   socket: /run/executor/exec.sock
@@ -87,4 +94,5 @@ telemetry:               # LLM traces over OTLP/HTTP (OpenObserve, Langfuse, an 
   captureContent: false  # true: prompts, replies and tool input/output on spans (redacted; readable by anyone who
   #                      # can read the traces). Or env OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
 logLevel: info
-# Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none)
+# Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none),
+# O2_AGENT_API_KEY (with o2Gateway.enabled)

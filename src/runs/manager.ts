@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { Span } from "@opentelemetry/api";
 import type { Logger } from "pino";
-import { endRunSpan, startRunSpan, withSpan } from "../telemetry/spans.js";
+import { endRunSpan, spanTraceId, startRunSpan, withSpan } from "../telemetry/spans.js";
 import { contextPackage, notice, type DegradeReason } from "./degrade.js";
 import { RateLimiter, limitKey } from "./limits.js";
 import {
@@ -74,8 +74,8 @@ interface Run {
 
 const ZERO = { steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 } };
 
-/** A run's result before the manager stamps id and timing; `errorType` is for the trace span only. */
-type Finished = Omit<RunResult, "id" | "sessionId" | "durationMs"> & { errorType?: string };
+/** A run's result before the manager stamps id, trace and timing. */
+type Finished = Omit<RunResult, "id" | "sessionId" | "durationMs" | "traceId">;
 /** After an abort, how long a runner gets to return before the run is finished without it. */
 const ABORT_GRACE_MS = 10_000;
 
@@ -145,6 +145,11 @@ export class RunManager {
     return runs.map((r) => this.cancel(r, new RunAbort("cancelled", reason))).some(Boolean);
   }
 
+  /** Would a run of this session wait now (no free slot, or its session is busy)? */
+  wouldQueue(sessionId: string): boolean {
+    return this.running.size >= this.o.concurrency || this.active(sessionId);
+  }
+
   /** Is a run of this session queued or running? */
   active(sessionId: string): boolean {
     return this.busySessions.has(sessionId) || this.queue.some((r) => r.input.sessionId === sessionId);
@@ -158,7 +163,7 @@ export class RunManager {
     this.draining = true;
     for (const r of [...this.queue]) {
       this.dequeue(r);
-      this.finish(r, { state: "cancelled", answer: notice("shutting_down", r.input.question), reason: "shutting down", ...ZERO });
+      this.finish(r, { state: "cancelled", answer: notice("shutting_down", r.input.question), reason: "shutting down", errorType: "interrupted", ...ZERO });
     }
     const pending = () => Promise.all([...this.running.values()].map((r) => r.result));
     if (this.running.size === 0) return true;
@@ -176,7 +181,7 @@ export class RunManager {
   private cancel(run: Run, why: RunAbort): boolean {
     if (run.state === "queued") {
       this.dequeue(run);
-      this.finish(run, { state: "cancelled", answer: notice("cancelled", run.input.question), reason: why.message, ...ZERO });
+      this.finish(run, { state: "cancelled", answer: notice("cancelled", run.input.question), reason: why.message, errorType: "cancelled", ...ZERO });
       this.schedule();
       return true;
     }
@@ -232,6 +237,7 @@ export class RunManager {
       runId: run.id,
       sessionId: input.sessionId,
       ...(input.user && { user: input.user }),
+      ...(input.traceparent && { traceparent: input.traceparent }),
       queuedMs: run.startedAt - run.enqueuedAt,
     });
     run.observer.started?.({ runId: run.id });
@@ -285,9 +291,15 @@ export class RunManager {
     if (run.backstop) clearTimeout(run.backstop);
     const wasRunning = this.running.delete(run.id);
     if (wasRunning) this.busySessions.delete(run.input.sessionId);
-    const { errorType, ...r } = finished;
-    run.state = r.state;
-    const result: RunResult = { ...r, id: run.id, sessionId: run.input.sessionId, durationMs: this.now() - (run.startedAt ?? run.enqueuedAt) };
+    run.state = finished.state;
+    const traceId = run.span && spanTraceId(run.span);
+    const result: RunResult = {
+      ...finished,
+      id: run.id,
+      sessionId: run.input.sessionId,
+      ...(traceId && { traceId }),
+      durationMs: this.now() - (run.startedAt ?? run.enqueuedAt),
+    };
     // One summary line per run (§15): enough to chart volume, cost and outcomes from the logs.
     this.o.log?.info(
       {
@@ -298,6 +310,7 @@ export class RunManager {
         state: result.state,
         degraded: result.degraded ?? false,
         reason: result.reason,
+        errorType: result.errorType,
         steps: result.steps,
         toolCalls: result.toolCalls,
         inputTokens: result.usage.inputTokens,
@@ -313,7 +326,6 @@ export class RunManager {
       endRunSpan(run.span, {
         ...result,
         question: run.input.question,
-        ...(errorType && { errorType }),
         captureContent: this.o.captureContent ?? false,
       });
     }

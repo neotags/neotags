@@ -1,9 +1,13 @@
 import { pino } from "pino";
 import { createLlm, type LlmClient } from "./agent/llm.js";
-import { createGateway } from "./agent/models.js";
+import { createGateway, type Gateway } from "./agent/models.js";
 import { CHAINS, inputBudgetTokens, llmConfigured, loadConfig } from "./config/index.js";
+import { createO2Gateway, type O2Gateway } from "./gateway/o2.js";
 import { createSlack } from "./gateway/slack.js";
+import { startMcp, type McpHub } from "./mcp/index.js";
 import { Router } from "./router/index.js";
+import { createRunManager, loadConfiguredSkillPacks, type RunManager } from "./runs/index.js";
+import { createSkillExecutor } from "./sandbox/index.js";
 import { allSkills, selectSkills } from "./skills/registry.js";
 import { startTelemetry } from "./telemetry/index.js";
 import { HttpOnyxClient, type OnyxClient } from "./tools/onyx.js";
@@ -21,15 +25,17 @@ if (telemetry) log.info({ captureContent: cfg.telemetry.captureContent }, "traci
 // Optional integrations: the bot still starts without them and tells users what is missing.
 let llm: LlmClient | undefined;
 let routerLlm: LlmClient | undefined;
+let gateway: Gateway | undefined;
 if (llmConfigured(cfg.llm)) {
-  const gateway = createGateway(cfg, {
+  const g = createGateway(cfg, {
     onBreakerChange: (model, state) =>
       state === "closed" ? log.info({ model, breaker: state }, "llm model available again") : log.warn({ model, breaker: state }, "llm model circuit breaker"),
   });
-  llm = createLlm(cfg, { gateway });
-  routerLlm = createLlm(cfg, { role: "router", gateway });
+  gateway = g;
+  llm = createLlm(cfg, { gateway: g });
+  routerLlm = createLlm(cfg, { role: "router", gateway: g });
   const chains = Object.fromEntries(
-    CHAINS.map((c) => [c, gateway.policy.steps(c).map((s) => (s.effort ? `${s.model.id}@${s.effort}` : s.model.id))]),
+    CHAINS.map((c) => [c, g.policy.steps(c).map((s) => (s.effort ? `${s.model.id}@${s.effort}` : s.model.id))]),
   );
   log.info({ chains }, "llm configured");
   if (cfg.llm.chains && (cfg.llm.model || cfg.llm.routerModel)) {
@@ -81,6 +87,23 @@ const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
       },
   }),
 );
+// Agent runs (the O2 entry today): MCP tools, the sandbox and the skill packs behind the run manager.
+let runs: RunManager | undefined;
+let mcp: McpHub | undefined;
+let o2: O2Gateway | undefined;
+if (cfg.o2Gateway.enabled) {
+  if (!gateway) log.error("o2Gateway is enabled but no LLM is configured; the O2 entry is not started");
+  else {
+    const index = await loadConfiguredSkillPacks(cfg, log);
+    mcp = await startMcp(cfg, log);
+    const executor = createSkillExecutor(cfg, index, log);
+    runs = createRunManager(cfg, { gateway, index, log, mcp, executor });
+    o2 = createO2Gateway({ cfg: cfg.o2Gateway, key: cfg.secrets.o2AgentKey!, runs, log });
+    await o2.listen(cfg.o2Gateway.port);
+    log.info({ port: cfg.o2Gateway.port, orgs: cfg.o2Gateway.orgs }, "o2 gateway listening");
+  }
+}
+
 await app.start(cfg.slack.port);
 log.info({ port: cfg.slack.port, bot: cfg.bot.name }, "neotags started");
 
@@ -90,16 +113,25 @@ async function shutdown(sig: string) {
   shuttingDown = true;
   log.info({ sig }, "shutting down");
   let code = 0;
+  o2?.stopAccepting();
   try {
     await app.stop(); // stop accepting new events
   } catch (err) {
     log.error({ err }, "failed to stop cleanly");
     code = 1;
   }
-  if (!(await drain(DRAIN_TIMEOUT_MS))) {
+  // Slack tasks are short; agent runs get agent.drainSec, which the pod's grace period must cover.
+  const [tasksDone, runsDone] = await Promise.all([drain(DRAIN_TIMEOUT_MS), runs?.drain(cfg.agent.drainSec * 1000) ?? true]);
+  if (!tasksDone) {
     log.warn("timed out waiting for in-flight tasks");
     code = 1;
   }
+  if (!runsDone) {
+    log.warn("agent runs still going after agent.drainSec were aborted");
+    code = 1;
+  }
+  await o2?.close();
+  await mcp?.close().catch((err: unknown) => log.warn({ err }, "failed to close MCP clients"));
   if (telemetry) {
     const timeout = new Promise<"timeout">((r) => setTimeout(r, TRACE_FLUSH_TIMEOUT_MS, "timeout").unref());
     const flushed = await Promise.race([telemetry.shutdown().then(() => "ok" as const), timeout]).catch((err: unknown) => {

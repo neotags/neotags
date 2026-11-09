@@ -2,15 +2,20 @@ import {
   context,
   createContextKey,
   diag,
+  defaultTextMapGetter,
   INVALID_SPAN_CONTEXT,
+  isSpanContextValid,
   ROOT_CONTEXT,
   SpanKind,
   SpanStatusCode,
   trace,
+  TraceFlags,
   type Attributes,
   type Context,
   type Span,
+  type SpanContext,
 } from "@opentelemetry/api";
+import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { messageText, thinkingChars } from "../agent/message.js";
 import { redact } from "../tools/redact.js";
@@ -206,6 +211,27 @@ export interface AgentRunSpan {
   sessionId: string;
   user?: string;
   queuedMs?: number;
+  /** W3C `traceparent` of the caller (O2). */
+  traceparent?: string;
+}
+
+const propagator = new W3CTraceContextPropagator();
+
+/**
+ * The caller's trace context, when it is valid and sampled. An unsampled parent would make the default
+ * (parent-based) sampler drop the run's spans, and every run must reach the LLM traces; it becomes a link instead.
+ */
+function callerContext(traceparent: string | undefined): { parent?: Context; link?: SpanContext } {
+  if (!traceparent) return {};
+  const sc = trace.getSpanContext(propagator.extract(ROOT_CONTEXT, { traceparent }, defaultTextMapGetter));
+  if (!sc || !isSpanContextValid(sc)) return {};
+  return (sc.traceFlags & TraceFlags.SAMPLED) === TraceFlags.SAMPLED ? { parent: trace.setSpanContext(ROOT_CONTEXT, sc) } : { link: sc };
+}
+
+/** Trace id of a span that is exported; undefined when tracing is off or the sampler dropped it. */
+export function spanTraceId(span: Span): string | undefined {
+  const sc = span.spanContext();
+  return span.isRecording() && isSpanContextValid(sc) ? sc.traceId : undefined;
 }
 
 /**
@@ -213,28 +239,29 @@ export interface AgentRunSpan {
  * `neotags.run.*`, not `gen_ai.usage.*`: backends sum tokens over a trace's spans, so the chat spans already count them.
  */
 export function startRunSpan(run: AgentRunSpan): Span {
-  return guarded(
-    () =>
-      tracer.startSpan(
-        `invoke_agent ${run.agent}`,
-        {
-          attributes: {
-            "gen_ai.operation.name": "invoke_agent",
-            "gen_ai.agent.name": run.agent,
-            ...(run.botName && { "neotags.bot.name": run.botName }),
-            "neotags.run.id": run.runId,
-            "gen_ai.conversation.id": run.sessionId,
-            // Langfuse groups sessions by session.id; OpenObserve reads either.
-            "session.id": run.sessionId,
-            ...(run.user && { "user.id": run.user }),
-            ...(run.queuedMs !== undefined && { "neotags.run.queued_ms": run.queuedMs }),
-          },
+  return guarded(() => {
+    const caller = callerContext(run.traceparent);
+    return tracer.startSpan(
+      `invoke_agent ${run.agent}`,
+      {
+        ...(caller.link && { links: [{ context: caller.link }] }),
+        attributes: {
+          "gen_ai.operation.name": "invoke_agent",
+          "gen_ai.agent.name": run.agent,
+          ...(run.botName && { "neotags.bot.name": run.botName }),
+          "neotags.run.id": run.runId,
+          "gen_ai.conversation.id": run.sessionId,
+          // Langfuse groups sessions by session.id; OpenObserve reads either.
+          "session.id": run.sessionId,
+          ...(run.user && { "user.id": run.user }),
+          ...(run.queuedMs !== undefined && { "neotags.run.queued_ms": run.queuedMs }),
         },
-        // Always a root: a queued run is started from whatever finished before it, in that work's context.
-        ROOT_CONTEXT,
-      ),
-    NOOP_SPAN,
-  );
+      },
+      // The caller's trace or a root, never the active context: a queued run is started from whatever finished
+      // before it, in that work's context.
+      caller.parent ?? ROOT_CONTEXT,
+    );
+  }, NOOP_SPAN);
 }
 
 export interface RunSpanOutcome {

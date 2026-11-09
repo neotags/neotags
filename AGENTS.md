@@ -28,9 +28,9 @@ Before finishing a change: typecheck, test, build (and `helm lint` if `deploy/` 
 ```
 src/index.ts            entrypoint
 src/config/             YAML (NEOTAGS_CONFIG) + env secrets, validated with zod
-src/gateway/            Slack Events gateway (Bolt, HTTP), mention stripping, event dedupe
+src/gateway/            Slack Events gateway (Bolt, HTTP), mention stripping, event dedupe; o2.ts: OpenObserve assistant entry (:3001, SSE, docs/design/002), o2-stream.ts: RunObserver -> panel events
 src/agent/              pi-ai gateway model from config (baseUrl/model/key), tool-less LlmClient, pi Agent factory + tool guard
-src/runs/               RunManager (state machine, concurrency, per-session lock, budgets, rate limit, drain) + AgentRunner (pi-agent-core); not wired to an entry yet
+src/runs/               RunManager (state machine, concurrency, per-session lock, budgets, rate limit, drain) + AgentRunner (pi-agent-core); the O2 gateway submits to it
 src/router/             LLM intent routing: one tool-less call picks a registered skill; also dispatches button actions
 src/skills/             Skill interface; kb-collect/ (thread -> redact -> summarize -> Onyx upsert, Undo); kb-files/ (Slack files -> extract -> redact -> Onyx); kb-ask/ (Onyx search -> grounded, cited answer)
 src/tools/              slack (thread reader, file download), onyx (ingestion + search client), extract (PDF/DOCX/XLSX/PPTX/text -> sections), redact (secret scrubbing), skillpacks (allowlisted Agent Skills loader + read_skill tools)
@@ -39,6 +39,7 @@ src/guardrails/         channel/user allowlist policy; MCP tool guard (tools.ts:
 src/sandbox/            Sandbox interface; backend local (executor sidecar over a unix socket) or none (refuse all); SkillExecutor = sandbox guard + audit; run_skill_command tool
 src/mcp/                MCP clients (Streamable HTTP): allowlisted tools as pi AgentTools named <server>__<tool>, background reconnect, unavailable servers named in the system prompt
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport
+src/lang.ts             answer language rule (D13), shared by every entry: answerLang() for code-written text, LANGUAGE_RULE for prompts
 test/                   vitest
 deploy/helm/neotags/    Helm chart; deploy/slack-app-manifest.yaml
 executor/               executor sidecar image (Python stdlib + bubblewrap): sandboxed /v1/exec over a unix socket, own unittest suite; see executor/README.md

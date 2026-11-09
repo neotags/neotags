@@ -1,6 +1,6 @@
 import { Type } from "@earendil-works/pi-ai";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { SpanStatusCode } from "@opentelemetry/api";
+import { SpanStatusCode, trace, TraceFlags } from "@opentelemetry/api";
 import { InMemorySpanExporter, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { beforeEach, describe, expect, it } from "vitest";
 import { traceToolCalls } from "../src/agent/index.js";
@@ -10,7 +10,7 @@ import { RunManager } from "../src/runs/manager.js";
 import { PiAgentRunner, type PiRunnerOptions } from "../src/runs/pi-runner.js";
 import type { RunInput } from "../src/runs/types.js";
 import { startTelemetry } from "../src/telemetry/index.js";
-import { endChatSpan, inSpan, MAX_CONTENT_CHARS, recorded, startChatSpan, ToolSpans } from "../src/telemetry/spans.js";
+import { endChatSpan, inSpan, MAX_CONTENT_CHARS, recorded, spanTraceId, startChatSpan, ToolSpans } from "../src/telemetry/spans.js";
 import { SkillPackIndex } from "../src/tools/skillpacks.js";
 import { callTool, fail, say, scripted, type Reply } from "./fake-stream.js";
 
@@ -238,6 +238,36 @@ describe("trace hygiene", () => {
     const roots = (await flushed()).filter((s) => s.name === "invoke_agent o2");
     expect(roots).toHaveLength(2);
     expect(roots.every((s) => s.parentSpanContext === undefined)).toBe(true);
+  });
+
+  const O2_TRACE = "4bf92f3577b34da6a3ce929d0e0e4736";
+  const O2_SPAN = "00f067aa0ba902b7";
+
+  it("parents a run on the caller's sampled traceparent and reports the trace id", async () => {
+    const { result, root, chats } = await run([say("a"), say("b")], { input: { ...input, traceparent: `00-${O2_TRACE}-${O2_SPAN}-01` } });
+    expect(root.spanContext().traceId).toBe(O2_TRACE);
+    expect(root.parentSpanContext?.spanId).toBe(O2_SPAN);
+    expect(chats[0]!.spanContext().traceId).toBe(O2_TRACE);
+    expect(result.traceId).toBe(O2_TRACE);
+  });
+
+  it("links an unsampled traceparent instead, so the run is still recorded", async () => {
+    const { result, root } = await run([say("a"), say("b")], { input: { ...input, traceparent: `00-${O2_TRACE}-${O2_SPAN}-00` } });
+    expect(root.parentSpanContext).toBeUndefined();
+    expect(root.spanContext().traceId).not.toBe(O2_TRACE);
+    expect(root.links.map((l) => l.context.traceId)).toEqual([O2_TRACE]);
+    expect(result.traceId).toBe(root.spanContext().traceId);
+  });
+
+  it("reports no trace id for a span the sampler dropped", () => {
+    const dropped = trace.wrapSpanContext({ traceId: O2_TRACE, spanId: O2_SPAN, traceFlags: TraceFlags.NONE });
+    expect(spanTraceId(dropped)).toBeUndefined();
+  });
+
+  it("ignores a malformed traceparent", async () => {
+    const { root } = await run([say("a"), say("b")], { input: { ...input, traceparent: "00-zz-1-01" } });
+    expect(root.parentSpanContext).toBeUndefined();
+    expect(root.links).toEqual([]);
   });
 
   it("redacts error text on span status and exception events", async () => {
