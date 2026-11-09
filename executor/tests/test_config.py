@@ -23,6 +23,12 @@ class LimitDefaultsTest(unittest.TestCase):
                 Config.from_env({name: value})
             self.assertIn(message, str(ctx.exception))
 
+    def test_a_default_parse_limits_would_reject_refuses_to_start(self):
+        for name, value in (("EXECUTOR_DEFAULT_MEM_MIB", "8"), ("EXECUTOR_DEFAULT_CPU", "0"), ("EXECUTOR_DEFAULT_TIMEOUT_SEC", "0")):
+            with self.subTest(name), self.assertRaises(ValueError) as ctx:
+                Config.from_env({name: value})
+            self.assertIn(name, str(ctx.exception))
+
     def test_a_lowered_maximum_with_a_matching_default_is_fine(self):
         cfg = Config.from_env({"EXECUTOR_MAX_MEM_MIB": "384", "EXECUTOR_DEFAULT_MEM_MIB": "384"})
         self.assertEqual((cfg.defaults.mem_mib, cfg.maxima.mem_mib), (384, 384))

@@ -145,9 +145,9 @@ export function skillExecTool(executor: SkillExecutor, packs: readonly string[],
         r = await executor.exec({ id: `neotags/${toolCallId}`, pack, argv, ...(stdin !== undefined && { stdin }) }, { ...(signal && { signal }), packs });
       } catch (err) {
         // The same error result the agent loop makes of a throw, plus the wait for the span (a busy timeout is
-        // exactly the call worth finding there).
-        if (!(err instanceof SandboxError)) throw err;
-        return { content: [{ type: "text", text: err.message }], details: waitDetails(err.wait), isError: true };
+        // exactly the call worth finding there). exec() only throws SandboxErrors.
+        const e = err as SandboxError;
+        return { content: [{ type: "text", text: e.message }], details: waitDetails(e.wait), isError: true };
       }
       const status = r.timedOut ? "timed out" : r.signal ? `killed by ${r.signal}` : `exit code ${r.exitCode}`;
       const parts = [`[${status}]`];

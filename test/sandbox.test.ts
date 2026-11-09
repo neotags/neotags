@@ -519,6 +519,15 @@ describe("LocalSandbox queueing (executor at its concurrency limit)", () => {
     expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190);
   });
 
+  it("an answer, even a 500, frees the slot at once: only a call without an answer keeps it", async () => {
+    const f = await slowExecutor(0, (b, n) => (n === 1 ? { status: 500, body: { error: { code: "internal_error", message: "boom" } } } : { status: 200, body: okResult((b as { id: string }).id) }));
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, maxConcurrency: 1 }), index, log: memLog().log });
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unknown", code: "internal_error" });
+    const started = Date.now();
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).resolves.toMatchObject({ exitCode: 0 });
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
   it("config: sandbox.maxConcurrency and queueTimeoutSec default to 4 and 30s; the wait is capped at an hour", () => {
     const cfg = loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y" });
     expect(cfg.sandbox).toMatchObject({ maxConcurrency: 4, queueTimeoutSec: 30 });

@@ -54,15 +54,18 @@ class Config:
     worker_max_timeout_sec: float = 30.0
 
     def __post_init__(self) -> None:
-        # A default above its maximum would refuse every request that omits the limit, one request at a time;
-        # refuse to start instead.
-        for name, unit in (("cpu", ""), ("mem_mib", " MiB"), ("timeout_sec", "s")):
+        # A default that parse_limits rejects would fail every request that omits the limit, one at a time; refuse
+        # to start instead. Same ranges as parse_limits: cpu and timeout in (0, max], mem in [16, max].
+        for name, unit, low in (("cpu", "", 0), ("mem_mib", " MiB", 16), ("timeout_sec", "s", 0)):
             default, maximum = getattr(self.defaults, name), getattr(self.maxima, name)
+            env = name.upper()
             if default > maximum:
-                env = name.upper()
                 raise ValueError(
                     f"EXECUTOR_DEFAULT_{env} ({default}{unit}) is above EXECUTOR_MAX_{env} ({maximum}{unit})"
                 )
+            if default <= 0 or default < low:
+                floor = f"at least {low}{unit}" if low else "above 0"
+                raise ValueError(f"EXECUTOR_DEFAULT_{env} ({default}{unit}) must be {floor}")
 
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Config":

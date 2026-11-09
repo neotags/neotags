@@ -26,10 +26,22 @@
 {{- end -}}
 {{- end -}}
 {{- end -}}
-{{- /* The memory a command gets when it declares none; above maxMemMib every such command would be refused. */}}
-{{- $defaultMem := int (ternary (min 512 (int $exec.maxMemMib)) $exec.defaultMemMib (eq (toString $exec.defaultMemMib) "")) -}}
-{{- if and $exec.enabled (gt $defaultMem (int $exec.maxMemMib)) -}}
-{{- fail (printf "executor.defaultMemMib (%d) is over executor.maxMemMib (%d): every command that declares no mem would be refused" $defaultMem (int $exec.maxMemMib)) -}}
+{{- /* Limits a command gets when it declares none; outside [16 MiB / >0, max] the executor refuses to start. */}}
+{{- $defaultMem := int (ternary (min 512 (int $exec.maxMemMib)) $exec.defaultMemMib (has (toString $exec.defaultMemMib) (list "" "<nil>"))) -}}
+{{- if $exec.enabled -}}
+{{- if or (lt $defaultMem 16) (gt $defaultMem (int $exec.maxMemMib)) -}}
+{{- fail (printf "executor.defaultMemMib (%d) must be in [16, executor.maxMemMib (%d)]: the executor refuses to start otherwise" $defaultMem (int $exec.maxMemMib)) -}}
+{{- end -}}
+{{- /* The cpu and timeout pairs are only reachable through executor.env; same check, executor defaults otherwise. */}}
+{{- $envs := dict -}}
+{{- range $exec.env -}}{{- $_ := set $envs .name (toString .value) -}}{{- end -}}
+{{- range $pair := list (list "CPU" "1" "4") (list "TIMEOUT_SEC" "60" "300") -}}
+{{- $d := float64 (default (index $pair 1) (get $envs (printf "EXECUTOR_DEFAULT_%s" (index $pair 0)))) -}}
+{{- $m := float64 (default (index $pair 2) (get $envs (printf "EXECUTOR_MAX_%s" (index $pair 0)))) -}}
+{{- if or (le $d 0.0) (gt $d $m) -}}
+{{- fail (printf "executor.env: EXECUTOR_DEFAULT_%s (%v) must be in (0, EXECUTOR_MAX_%s (%v)]: the executor refuses to start otherwise" (index $pair 0) $d (index $pair 0) $m) -}}
+{{- end -}}
+{{- end -}}
 {{- end -}}
 {{- if and $exec.enabled $exec.resources.limits $exec.resources.limits.memory -}}
 {{- /* Every sandboxed command runs inside the sidecar's limit: past it the kernel kills the sidecar, not the command. */}}

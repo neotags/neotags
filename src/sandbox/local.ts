@@ -79,8 +79,9 @@ export class LocalSandbox implements Sandbox {
       if (why === "aborted") throw notRun("aborted", "the execution was cancelled while waiting for a free slot");
       throw notRun("busy", `no free execution slot within ${Math.round(this.queueTimeoutMs / 1000)}s`);
     }
-    // When the outcome is unknown (no answer, cancelled after sending) the executor may still be running the
-    // command, holding its own slot until it ends, at the latest when this call's deadline would have passed.
+    // No answer (deadline, cancelled or broken after sending): the executor may still be running the command,
+    // which it does not stop when the client goes away, and holds its own slot until the command ends, at the
+    // latest when this call's deadline would have passed. It reports no in-flight count to release on sooner.
     let holdUntil = 0;
     try {
       for (let backoff = this.busyBackoffMs; ; backoff = Math.min(backoff * 2, BUSY_BACKOFF_MAX_MS)) {
@@ -101,21 +102,26 @@ export class LocalSandbox implements Sandbox {
         // /v1/exec answers busy only from its EXECUTOR_MAX_CONCURRENCY semaphore, before it runs anything: safe to
         // send again until the wait runs out. It happens when the limits are out of step, or while a command whose
         // call ended without an answer still runs there.
-        if (failure.code !== "busy") {
-          if (failure.kind === "unknown") holdUntil = sentAt + waitMs;
-          throw Object.assign(failure, { wait });
-        }
+        // An answer, even a 500 or a broken result, means the executor is done with the request and its slot.
+        if (failure.code !== "busy") throw Object.assign(failure, { wait });
         const delay = backoff / 2 + Math.random() * (backoff / 2);
         if (Date.now() + delay > until) {
           throw notRun("busy", `no free execution slot within ${Math.round(this.queueTimeoutMs / 1000)}s (the executor answered busy ${wait.busyRetries + 1} times)`);
         }
-        if (!(await abortableSleep(delay, signal))) throw notRun("aborted", "the execution was cancelled while waiting for a free slot");
+        if (!(await abortableSleep(delay, signal, { unref: true }))) throw notRun("aborted", "the execution was cancelled while waiting for a free slot");
         wait.busyRetries++;
       }
     } finally {
       const hold = holdUntil - Date.now();
-      if (hold > 0) setTimeout(() => this.slots.release(), hold).unref?.();
-      else this.slots.release();
+      if (hold <= 0) this.slots.release();
+      else {
+        setTimeout(() => {
+          // An accounting bug must not become an uncaught exception that ends every run in the process.
+          try {
+            this.slots.release();
+          } catch {}
+        }, hold).unref?.();
+      }
     }
   }
 
