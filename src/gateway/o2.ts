@@ -5,6 +5,7 @@ import { z } from "zod";
 import { O2_ORG_ID, type Config } from "../config/index.js";
 import { answerLang } from "../lang.js";
 import type { HistoryTurn, RunInput, RunManager } from "../runs/index.js";
+import { cap } from "./o2-events.js";
 import { O2Turn } from "./o2-stream.js";
 
 // The OpenObserve assistant entry: docs/design/002-o2-gateway-contract.md. O2 forwards each chat turn and pipes the
@@ -14,7 +15,7 @@ export interface O2GatewayOptions {
   cfg: Config["o2Gateway"];
   /** x-o2-agent-key. */
   key: string;
-  runs: Pick<RunManager, "submit" | "cancelSession" | "active" | "stats">;
+  runs: Pick<RunManager, "submit" | "cancelSession" | "active" | "stats" | "wouldQueue">;
   log: Pick<Logger, "info" | "warn" | "error">;
   pingMs?: number;
 }
@@ -108,28 +109,32 @@ export function boundedHistory(raw: { role: string; content: unknown }[] | null 
   const kept: HistoryTurn[] = [];
   let chars = 0;
   for (const t of turns.reverse()) {
-    chars += t.content.length;
-    if (chars > maxChars) break;
-    kept.unshift(t);
+    const left = maxChars - chars;
+    if (left <= 0) break;
+    // A turn too long for what is left keeps its start: the latest answer is what a follow-up refers to.
+    const content = t.content.length > left ? `${cap(t.content, left)}\n[cut: ${t.content.length} characters]` : t.content;
+    chars += Math.min(t.content.length, left);
+    kept.unshift({ role: t.role, content });
   }
   return kept;
 }
 
 /** The page context with oversized values (a pasted log, a huge field list) replaced by a note. */
 export function boundedContext(ctx: Record<string, unknown> | null | undefined): Record<string, unknown> {
-  const out: Record<string, unknown> = {};
+  // Built as entries: assigning a request's "__proto__" key to a plain object would set its prototype instead.
+  const out: [string, unknown][] = [];
   let total = 0;
   for (const [k, v] of Object.entries(ctx ?? {})) {
     const size = typeof v === "string" ? v.length : (JSON.stringify(v) ?? "").length;
     const value = size > CONTEXT_VALUE_CHARS ? `[omitted: ${size} characters]` : v;
     total += k.length + (value === v ? size : 32);
     if (total > CONTEXT_CHARS) {
-      out["_omitted"] = "the rest of the page context did not fit";
+      out.push(["_omitted", "the rest of the page context did not fit"]);
       break;
     }
-    out[k] = value;
+    out.push([k, value]);
   }
-  return out;
+  return Object.fromEntries(out);
 }
 
 /**
@@ -169,7 +174,9 @@ export function createO2Gateway(o: O2GatewayOptions) {
     const traceparent = header(req, "traceparent")?.trim().toLowerCase();
     const trace = traceparent ? TRACEPARENT.exec(traceparent) : null;
     const context = boundedContext(body.context);
-    const orgId = typeof context.org_id === "string" && O2_ORG_ID.test(context.org_id) ? context.org_id : undefined;
+    // From the request, not the bounded copy: large page fields before it must not cost the run its org.
+    const rawOrg = body.context?.org_id;
+    const orgId = typeof rawOrg === "string" && O2_ORG_ID.test(rawOrg) ? rawOrg : undefined;
     const { notes, server } = orgNotes(orgId, cfg.orgs);
     const history = boundedHistory(body.history, cfg.maxHistoryChars);
     const lang = answerLang(question);
@@ -182,7 +189,7 @@ export function createO2Gateway(o: O2GatewayOptions) {
       firstTurn: (body.history ?? []).length === 0,
       ...(orgId && { org: orgId }),
       ...(server && { currentServer: server }),
-      fallbackTraceId: trace?.[1] ?? randomBytes(16).toString("hex"),
+      fallbackTraceId: trace && !/^0+$/.test(trace[1]!) ? trace[1]! : randomBytes(16).toString("hex"),
       log,
       ...(o.pingMs && { pingMs: o.pingMs }),
     });
@@ -200,7 +207,7 @@ export function createO2Gateway(o: O2GatewayOptions) {
     // The user may have pressed Stop while the body was still arriving: no run for a turn nobody reads.
     if (res.destroyed || req.socket.destroyed) return;
     // Queueing is fine for a moment; a long queue means minutes of pings, so the panel gets its turn-limit notice.
-    if (o.runs.stats().queued >= cfg.maxQueued) throw new HttpError(429, "turn_limit", "too many questions are waiting; ask again shortly", 30);
+    if (o.runs.wouldQueue(session) && o.runs.stats().queued >= cfg.maxQueued) throw new HttpError(429, "turn_limit", "too many questions are waiting; ask again shortly", 30);
     const submitted = o.runs.submit(input, turn.observer);
     if (!submitted.ok) {
       if (submitted.code === "rate_limited") throw new HttpError(429, "turn_limit", submitted.message, submitted.retryAfterSec);
@@ -283,8 +290,12 @@ export function createO2Gateway(o: O2GatewayOptions) {
       server.close();
       server.closeIdleConnections();
     },
-    /** Close whatever is still open. */
-    close: () => server.closeAllConnections(),
+    /** Close whatever is still open, after up to `graceMs` for responses that just ended to flush their last event. */
+    close: async (graceMs = 2000) => {
+      const closed = new Promise<void>((r) => server.once("close", () => r()));
+      await Promise.race([closed, new Promise((r) => setTimeout(r, graceMs).unref())]);
+      server.closeAllConnections();
+    },
   };
 }
 

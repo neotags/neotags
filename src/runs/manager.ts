@@ -145,6 +145,11 @@ export class RunManager {
     return runs.map((r) => this.cancel(r, new RunAbort("cancelled", reason))).some(Boolean);
   }
 
+  /** Would a run of this session wait now (no free slot, or its session is busy)? */
+  wouldQueue(sessionId: string): boolean {
+    return this.running.size >= this.o.concurrency || this.active(sessionId);
+  }
+
   /** Is a run of this session queued or running? */
   active(sessionId: string): boolean {
     return this.busySessions.has(sessionId) || this.queue.some((r) => r.input.sessionId === sessionId);

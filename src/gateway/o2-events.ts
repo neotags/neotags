@@ -206,15 +206,17 @@ export function title(question: string): string {
  * The terminal `error` of a run that did not finish normally. Never says unauthorized / forbidden / not authorized /
  * permission denied: the panel would replace it with "you are not authorized".
  */
-export function errorEvent(kind: "budget_exhausted" | "failed" | "interrupted", lang: AnswerLang, errorType?: string): Extract<O2Event, { type: "error" }> {
+export function errorEvent(kind: "budget_exhausted" | "deadline" | "failed" | "interrupted", lang: AnswerLang, errorType?: string): Extract<O2Event, { type: "error" }> {
   const text: Lang<Record<typeof kind, { error: string; suggestion: string }>> = {
     zh: {
       budget_exhausted: { error: "排查在得出完整结论前用完了预算（步数、时长或上下文）。", suggestion: "缩小时间范围，或只问一个 namespace 或服务。" },
+      deadline: { error: "回答没有写完：超过了单次排查的时长上限。", suggestion: "缩小时间范围，或只问一个 namespace 或服务。" },
       failed: { error: "回答没有写完：模型调用中途失败。", suggestion: "请稍后重新提问。" },
       interrupted: { error: "排查被中断：服务正在更新。", suggestion: "请稍后重新提问。" },
     },
     en: {
       budget_exhausted: { error: "The investigation used up its budget (steps, time or context) before finishing.", suggestion: "Narrow the time range, or ask about one namespace or service." },
+      deadline: { error: "The answer was not finished: the investigation hit its time limit.", suggestion: "Narrow the time range, or ask about one namespace or service." },
       failed: { error: "The answer was not finished: the model request failed midway.", suggestion: "Please ask again in a moment." },
       interrupted: { error: "The investigation was interrupted: the service is restarting.", suggestion: "Please ask again in a moment." },
     },

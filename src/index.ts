@@ -130,7 +130,7 @@ async function shutdown(sig: string) {
     log.warn("agent runs still going after agent.drainSec were aborted");
     code = 1;
   }
-  o2?.close();
+  await o2?.close();
   await mcp?.close().catch((err: unknown) => log.warn({ err }, "failed to close MCP clients"));
   if (telemetry) {
     const timeout = new Promise<"timeout">((r) => setTimeout(r, TRACE_FLUSH_TIMEOUT_MS, "timeout").unref());

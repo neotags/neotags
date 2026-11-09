@@ -74,7 +74,18 @@ export class PiAgentRunner implements AgentRunner {
 
     const packs = input.packs ?? o.entries[input.source] ?? [];
     const extra = typeof o.tools === "function" ? o.tools({ packs }) : (o.tools ?? []);
-    const tools = [...skillPackTools(o.index), ...extra, ...(input.tools ?? [])];
+    const shared = [...skillPackTools(o.index), ...extra];
+    const taken = new Set(shared.map((t) => t.name));
+    // A run's own tool never shadows a shared one: two tools with one name would leave the guard unable to tell them apart.
+    const own = (input.tools ?? []).filter((t) => {
+      if (!taken.has(t.name)) {
+        taken.add(t.name);
+        return true;
+      }
+      o.log?.warn({ runId: ctx.runId, tool: t.name }, "run tool dropped: the name is taken");
+      return false;
+    });
+    const tools = [...shared, ...own];
     const names = new Set(tools.map((t) => t.name));
     const guard: ToolGuard = async (call) => {
       if (!names.has(call.name)) return { ok: false, reason: `unknown tool ${call.name}` };

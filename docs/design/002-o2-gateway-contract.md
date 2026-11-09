@@ -162,11 +162,11 @@ Choices the contract left to the gateway (`src/gateway/o2.ts`, `o2-stream.ts`, `
   |---|---|
   | done | (`navigation_action`), `complete` |
   | failed, degraded (no model) | the context package as `message_delta`, then `complete` |
-  | failed after part of the answer streamed | `error`, `error_type` = `model_error` \| `deadline` \| `error` |
+  | failed after part of the answer streamed | `error`, `error_type` = `model_error` \| `deadline` \| `error` (a deadline says so and suggests a narrower question) |
   | budget_exhausted | the answer, then `error`, `error_type: budget_exhausted` |
   | cancelled (cancel endpoint) | `cancelled` |
   | interrupted (shutdown drain) | `error`, `error_type: interrupted` |
   | client disconnected | nothing: the run is cancelled |
 
 - **Trace id.** `complete.trace_id` is the `invoke_agent` span's trace id. A sampled `traceparent` makes the span its child (same trace id); an unsampled one would make the default sampler drop every span of the run, so it becomes a span link on a new root. With tracing off, the caller's trace id, else a random one.
-- **Limits.** History keeps the newest turns within `o2Gateway.maxHistoryChars`; a page-context value over 4000 characters is replaced by a note, and keys past 32k characters in all are dropped; the body is capped at `o2Gateway.maxBodyKb`. A turn waits for a slot while at most `o2Gateway.maxQueued` runs are queued; past that it gets `429 turn_limit`. A client that stops reading (over 1 MB unsent) is disconnected and its run cancelled.
+- **Limits.** History keeps the newest turns within `o2Gateway.maxHistoryChars`, the oldest kept one cut to what is left; a page-context value over 4000 characters is replaced by a note, and keys past 32k characters in all are dropped; the body is capped at `o2Gateway.maxBodyKb`. A turn that would wait (no free slot, or its session busy) is refused with `429 turn_limit` once `o2Gateway.maxQueued` runs are queued; one that can start at once never is. A client that stops reading (over 1 MB unsent) is disconnected and its run cancelled.

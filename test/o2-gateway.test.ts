@@ -133,11 +133,9 @@ const withLimit = (args: Record<string, unknown>) => {
 };
 
 let gateways: O2Gateway[] = [];
-afterEach(() => {
-  for (const g of gateways) {
-    g.close();
-    g.stopAccepting();
-  }
+afterEach(async () => {
+  for (const g of gateways) g.stopAccepting();
+  await Promise.all(gateways.map((g) => g.close(0)));
   gateways = [];
 });
 
@@ -393,6 +391,19 @@ describe("O2 gateway: before the stream", () => {
     ac.abort();
   });
 
+  it("still starts a turn at once while other sessions' runs wait on their own sessions", async () => {
+    const { runner: r } = stubRunner(hang);
+    const { url, runs } = await serve(r, { concurrency: 4, gw: { maxQueued: 1 } });
+    const sess = (n: number) => ({ "x-o2-assistant-session-id": `019a5b3c-1d2e-7f40-8a1b-00000000000${n}` });
+    const ac = new AbortController();
+    await post(url, { headers: sess(1), signal: ac.signal });
+    await post(url, { headers: sess(1), signal: ac.signal }); // queued behind its own session
+    expect(runs.stats()).toEqual({ running: 1, queued: 1 });
+    const fresh = await post(url, { headers: sess(2), signal: ac.signal });
+    expect(fresh.status).toBe(200);
+    ac.abort();
+  });
+
   it("answers 503 unavailable while draining", async () => {
     const { url, runs } = await serve(runner);
     await runs.drain(10);
@@ -499,6 +510,19 @@ describe("O2 gateway: ends of a run", () => {
     expect(ev.at(-1)).toMatchObject({ type: "error", error_type: "error" });
   });
 
+  it("says a deadline cut the answer, not the model", async () => {
+    // Streams part of the answer, then is stopped by the wall clock (the manager reports it as deadline).
+    const { runner } = stubRunner(async (_i, ctx) => {
+      ctx.observer.delta?.("Partial");
+      await new Promise((r) => ctx.signal.addEventListener("abort", r, { once: true }));
+      throw new RunError("aborted", "model_error", { answer: "Partial" });
+    });
+    const { url } = await serve(runner, { wallClockSec: { o2: 0.05, slack: 360, job: 600 }, finalReserveSec: 0 });
+    const ev = data(parse(await (await post(url)).text()));
+    expectContract(ev);
+    expect(ev.at(-1)).toMatchObject({ type: "error", error_type: "deadline", error: expect.stringContaining("time limit") });
+  });
+
   it("ends a half-written answer with an error, not complete", async () => {
     const { runner } = stubRunner(async (_i, ctx) => {
       ctx.observer.delta?.("Errors rose");
@@ -545,6 +569,16 @@ describe("O2 gateway: feedback", () => {
 });
 
 describe("O2 request mapping", () => {
+  it("keeps a newest turn that is too long by its start, and the turns before it while they fit", () => {
+    const h = [
+      { role: "user", content: "q1" },
+      { role: "assistant", content: "x".repeat(100) },
+    ];
+    const out = boundedHistory(h, 50);
+    expect(out).toHaveLength(1);
+    expect(out[0]!.content).toMatch(/^x{49}…\n\[cut: 100 characters\]$/);
+  });
+
   it("keeps the newest history that fits, text turns only", () => {
     const h = [
       { role: "user", content: "a".repeat(30) },
@@ -552,7 +586,11 @@ describe("O2 request mapping", () => {
       { role: "assistant", content: "b".repeat(30) },
       { role: "user", content: "c".repeat(30) },
     ];
-    expect(boundedHistory(h, 65).map((t) => t.content[0])).toEqual(["b", "c"]);
+    // b and c fit; a gets the 5 characters left, cut.
+    const out = boundedHistory(h, 65);
+    expect(out.map((t) => t.content[0])).toEqual(["a", "b", "c"]);
+    expect(out[0]!.content).toMatch(/^a{4}…\n\[cut: 30 characters\]$/);
+    expect(boundedHistory(h, 60).map((t) => t.content[0])).toEqual(["b", "c"]);
     expect(boundedHistory(null, 100)).toEqual([]);
   });
 
@@ -562,6 +600,9 @@ describe("O2 request mapping", () => {
     const out = boundedContext(many);
     expect(JSON.stringify(out).length).toBeLessThan(40_000);
     expect(out._omitted).toBe("the rest of the page context did not fit");
+    const proto = boundedContext(JSON.parse('{"__proto__": {"org_id": "default"}, "a": 1}') as Record<string, unknown>);
+    expect(Object.getPrototypeOf(proto)).toBe(Object.prototype);
+    expect(Object.keys(proto)).toEqual(["__proto__", "a"]);
   });
 
   it("counts rows only from a whole result", () => {
@@ -580,6 +621,23 @@ describe("O2 request mapping", () => {
     // Not a configured org, however Object.prototype names it.
     for (const id of ["constructor", "toString", "__proto__", "hasOwnProperty"]) expect(orgNotes(id, orgs).server).toBeUndefined();
     expect(orgNotes("unknown", orgs).notes[0]).toBe("The user is in O2 org unknown, which no data source here queries.");
+  });
+
+  it("reads the org from the request even when large page fields come before it", async () => {
+    const { runner, inputs } = stubRunner(async () => ({ state: "done", answer: "ok", steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 } }));
+    const { url } = await serve(runner);
+    const big = Object.fromEntries(Array.from({ length: 12 }, (_, i) => [`f${i}`, "x".repeat(3900)]));
+    await (await post(url, { body: { ...request.body, context: { ...big, org_id: "default" } } })).text();
+    expect(inputs[0]!.context).toHaveProperty("_omitted");
+    expect(inputs[0]!.notes![0]).toContain("The user is in O2 org default");
+  });
+
+  it("does not hand back an all-zero trace id", async () => {
+    const { runner } = stubRunner(async () => ({ state: "done", answer: "ok", steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 } }));
+    const { url } = await serve(runner);
+    const ev = data(parse(await (await post(url, { headers: { traceparent: `00-${"0".repeat(32)}-${"0".repeat(16)}-00` } })).text()));
+    expect(ev.at(-1)!.trace_id).toMatch(/^[0-9a-f]{32}$/);
+    expect(ev.at(-1)!.trace_id).not.toBe("0".repeat(32));
   });
 
   it("ignores an org id that is not an identifier", async () => {

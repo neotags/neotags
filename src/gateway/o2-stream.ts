@@ -179,7 +179,7 @@ export class O2Turn {
           return this.end({ type: "complete", trace_id: r.traceId ?? this.o.fallbackTraceId });
         }
         if (!this.textSent) this.text(r.answer);
-        return this.end(errorEvent("failed", lang, r.errorType));
+        return this.end(errorEvent(r.errorType === "deadline" ? "deadline" : "failed", lang, r.errorType));
       case "cancelled":
         if (r.errorType === "interrupted") return this.end(errorEvent("interrupted", lang));
         return this.end({ type: "cancelled" });
