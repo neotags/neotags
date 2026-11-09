@@ -80,8 +80,11 @@ export interface RunObserver {
   queued?(info: { runId: string; ahead: number }): void;
   started?(info: { runId: string }): void;
   toolStart?(call: { id: string; name: string; args: unknown }): void;
-  /** `args`: what actually ran, when a tool changed the model's arguments (MCP query defaults); for evidence links. */
-  toolEnd?(call: { id: string; name: string; isError: boolean; output: string; durationMs?: number; args?: unknown }): void;
+  /**
+   * `args`: what actually ran, when a tool changed the model's arguments (MCP query defaults); for evidence links.
+   * `data`: what code parsed out of the whole result (the dashboards a list returned), when the tool reports it.
+   */
+  toolEnd?(call: { id: string; name: string; isError: boolean; output: string; durationMs?: number; args?: unknown; data?: unknown }): void;
   /** Text of the answer, in order. Concatenated, the deltas are the answer. */
   delta?(text: string): void;
   done?(result: RunResult): void;

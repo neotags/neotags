@@ -33,6 +33,44 @@ const OK: Decision = { ok: true };
 const TOOLS_CALL = "tools_call";
 const SEARCH_SQL = "SearchSQL";
 const PROM_RANGE = "PrometheusRangeQuery";
+export const LIST_DASHBOARDS = "ListDashboards";
+export const LIST_ALERTS = "ListAlerts";
+/** List tools whose summary detail level leaves out the ids that opening a result needs (alert_id, folder_id). */
+const ID_LISTS = new Set([LIST_DASHBOARDS, LIST_ALERTS]);
+
+/** A dashboard as a ListDashboards result is cut down to: enough to pick one and to open it. */
+export interface ListedDashboard {
+  dashboard_id: string;
+  title: string;
+  description?: string;
+  /** Missing only if O2 left it out; such a dashboard cannot be opened (the page checks access by its folder). */
+  folder_id?: string;
+  folder_name?: string;
+  owner?: string;
+}
+
+/** An alert as a ListAlerts result is cut down to: what it watches and its state, without its query and conditions. */
+export interface ListedAlert {
+  alert_id: string;
+  name: string;
+  folder_id?: string;
+  folder_name?: string;
+  description?: string;
+  owner?: string;
+  alert_type?: string;
+  stream_type?: string;
+  stream_name?: string;
+  enabled?: boolean;
+  is_real_time?: boolean;
+  status?: string;
+  last_triggered_at?: number;
+}
+
+/** What code parsed out of a whole list result, for the entry (what navigation may open). */
+export interface ListedData {
+  dashboards?: ListedDashboard[];
+  alerts?: ListedAlert[];
+}
 
 /**
  * Tool Guard for MCP tools, enforced in code before and after every call; the model cannot bypass it.
@@ -41,7 +79,9 @@ const PROM_RANGE = "PrometheusRangeQuery";
  *   last `defaultRangeSec`, SQL without a LIMIT gets `sqlDefaultLimit`, a range query without a step gets one.
  * - `check` (the runner's `beforeToolCall`) decides: allowlisted tool, inner tool of tools_call in `innerAllow`,
  *   `argAllow` values, argument size, and the query limits. A refusal goes back to the model with the reason.
- * - `output` redacts a result, then cuts it to `outputChars`.
+ * - `output` redacts a result, then cuts it to `outputChars`; `result` first cuts a ListDashboards or ListAlerts result
+ *   down to the fields of each item (the full detail level carries every panel, query and condition) and hands the list
+ *   to code.
  */
 export class McpGuard {
   private servers: Map<string, McpServerPolicy>;
@@ -61,6 +101,9 @@ export class McpGuard {
       // Not an object (a model that sends the inner arguments as a JSON string): left as is, so `check` refuses it.
       if (args.args !== undefined && !isObj(args.args)) return args;
       const inner = this.prepareQuery(args.tool, isObj(args.args) ? args.args : {});
+      // Only the full detail level has each dashboard's folder_id and each alert's alert_id, which opening one needs;
+      // `result` drops the rest.
+      if (ID_LISTS.has(args.tool)) return { ...args, args: inner, detail: "full" };
       return { ...args, args: inner };
     }
     return this.prepareQuery(id.tool, args);
@@ -115,9 +158,28 @@ export class McpGuard {
     return OK;
   }
 
+  /**
+   * A tool result for the model, and what code needs out of the whole of it: `data` is set for a ListDashboards
+   * (`{ dashboards }`) or ListAlerts (`{ alerts }`) that returned a list, from before the output is cut.
+   */
+  result(name: string, args: unknown, text: string, isError: boolean): { text: string; data?: ListedData } {
+    const id = splitToolName(name);
+    const inner = id?.tool === TOOLS_CALL && isObj(args) ? args.tool : id?.tool;
+    if (isError || typeof inner !== "string" || !ID_LISTS.has(inner)) return { text: this.output(text) };
+    const items = inner === LIST_DASHBOARDS ? listedDashboards(text) : listedAlerts(text);
+    if (!items) return { text: this.output(text) };
+    const hint = inner === LIST_DASHBOARDS ? "Filter by a longer part of the title to see the rest." : "Filter by name (alert_name_substring), folder or stream to see the rest.";
+    return {
+      text: boundedOutput(JSON.stringify({ total: items.length, items }), this.o.outputChars, hint),
+      data: inner === LIST_DASHBOARDS ? { dashboards: items as ListedDashboard[] } : { alerts: items as ListedAlert[] },
+    };
+  }
+
   private prepareQuery(tool: string, args: Obj): Obj {
     if (tool === SEARCH_SQL) return this.prepareSql(args);
     if (tool === PROM_RANGE) return this.prepareProm(args);
+    // Without a filter O2 lists only the default folder; an empty title filters nothing and searches every folder.
+    if (tool === LIST_DASHBOARDS && missing(args.folder) && missing(args.title)) return { ...args, title: "" };
     return args;
   }
 
@@ -216,6 +278,69 @@ export function boundedOutput(text: string, max: number, hint: string): string {
   return `${clean.slice(0, max)}\n\n[Output truncated: ${max} of ${text.length} characters shown. ${hint}]`;
 }
 
+/**
+ * The dashboards of a ListDashboards result (`{ total, items }`, or O2's own `{ dashboards }`), each cut down to
+ * {@link ListedDashboard}; undefined when the text is not such a list.
+ */
+export function listedDashboards(text: string): ListedDashboard[] | undefined {
+  const list = listOf(text, "dashboards");
+  if (!list) return undefined;
+  const out: ListedDashboard[] = [];
+  for (const d of list) {
+    const dashboard_id = str(d.dashboard_id);
+    if (!dashboard_id) continue;
+    out.push({ dashboard_id, title: str(d.title) ?? "", ...pick(d, ["description", "folder_id", "folder_name", "owner"], str) });
+  }
+  return out;
+}
+
+/**
+ * The alerts of a ListAlerts result (`{ total, items }`, or O2's own `{ list }`), each cut down to {@link ListedAlert};
+ * undefined when the text is not such a list.
+ */
+export function listedAlerts(text: string): ListedAlert[] | undefined {
+  const list = listOf(text, "list");
+  if (!list) return undefined;
+  const out: ListedAlert[] = [];
+  for (const a of list) {
+    const alert_id = str(a.alert_id);
+    if (!alert_id) continue;
+    out.push({
+      alert_id,
+      name: str(a.name) ?? "",
+      ...pick(a, ["folder_id", "folder_name", "description", "owner", "alert_type", "stream_type", "stream_name", "status"], str),
+      ...pick(a, ["enabled", "is_real_time"], (x) => (typeof x === "boolean" ? x : undefined)),
+      ...pick(a, ["last_triggered_at"], (x) => (typeof x === "number" ? x : undefined)),
+    });
+  }
+  return out;
+}
+
+/** The objects of a list result: O2 normalizes lists to `{ total, items }`; `key` is the endpoint's own list key. */
+function listOf(text: string, key: string): Obj[] | undefined {
+  let v: unknown;
+  try {
+    v = JSON.parse(text);
+  } catch {
+    return undefined;
+  }
+  if (!isObj(v)) return undefined;
+  const list = Array.isArray(v.items) ? v.items : Array.isArray(v[key]) ? v[key] : undefined;
+  return list?.filter(isObj);
+}
+
+const str = (x: unknown) => (typeof x === "string" && x !== "" ? x : undefined);
+
+/** The `keys` of `o` that `as` accepts, converted by it. */
+function pick<K extends string, V>(o: Obj, keys: readonly K[], as: (x: unknown) => V | undefined): Partial<Record<K, V>> {
+  const out: Partial<Record<K, V>> = {};
+  for (const k of keys) {
+    const v = as(o[k]);
+    if (v !== undefined) out[k] = v;
+  }
+  return out;
+}
+
 const missing = (v: unknown) => v === undefined || v === null || v === "";
 
 /** A number, or a string holding one (models often quote them). */
@@ -282,4 +407,8 @@ export function duration(v: unknown): number | undefined {
   return sec > 0 ? sec : undefined;
 }
 
-const hours = (sec: number) => (sec % 3600 === 0 ? `${sec / 3600}h` : `${(sec / 3600).toFixed(1)}h`);
+/** A range for a refusal: days above 2 days (720h reads badly), else hours. */
+function hours(sec: number): string {
+  if (sec > 2 * 86_400) return sec % 86_400 === 0 ? `${sec / 86_400}d` : `${(sec / 86_400).toFixed(1)}d`;
+  return sec % 3600 === 0 ? `${sec / 3600}h` : `${(sec / 3600).toFixed(1)}h`;
+}

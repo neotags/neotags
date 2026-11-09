@@ -121,7 +121,9 @@ Example of each: `test/fixtures/o2/events/`. Full streams: `test/fixtures/o2/str
 `{"type":"navigation_action","resource_type","action","label","target"}`
 
 - `action: "load_query"`: `resource_type` is `logs` or `traces`; `target` is `{query, sql_mode: true, stream: [names], from, to}` with `from`/`to` in microseconds (or `period`, e.g. `15m`). PromQL to the metrics page is not supported in v1.
-- `action: "navigate_direct"`: `resource_type` `alert` | `dashboard` | `pipeline` with `target.{alert_id|dashboard_id|pipeline_id, name?, folder?}`, or `target.path`.
+- `action: "navigate_direct"`: `resource_type` `alert` | `dashboard` | `pipeline` with `target.{alert_id|dashboard_id|pipeline_id, name?, folder?}`, or `target.path` (with `target.query`, merged into the URL query) for any other `resource_type`.
+  - `dashboard` opens `/dashboards/view?dashboard=<id>&folder=<folder>`. `folder` must be the dashboard's real folder id (default `default`): the page checks access by it, and saves the dashboard to it when it fixes duplicate panel ids.
+  - `alert` with an `alert_id` opens the alert **in its editor** (`/alerts?action=update`). neotags never sends it: an alert's status page is `target.path` `/alerts/detail/<alert_id>` with `target.query.folder`, under `resource_type: "alerts"`; the list is `/alerts`, the history `/alerts/history`.
 - Auto-navigation is on by default in the panel, so this event **moves the user's page immediately**. Send it only when the user asked to open or run something, at most once, as the last event before `complete`. Same current-org rule as `call_args`.
 
 ### `complete`
@@ -152,10 +154,13 @@ Choices the contract left to the gateway (`src/gateway/o2.ts`, `o2-stream.ts`, `
 
 - **Title.** Written by code from the question (redacted, at most 60 characters), so it is also the first byte. No LLM call.
 - **Text.** Only the final answer streams: an investigation turn's text is either commentary before tool calls or a draft the final turn rewrites. So `message_delta` usually follows the last `tool_result`.
-- **Tool cards.** Every tool call gets a card except `open_query_in_o2`. O2 tools by inner name; others by their own name (`read_skill_ref`, `run_skill_command`, `search_indexed_documents`). `message` is written by code in the answer language. A call to another org than the user's says so on the card.
+- **Tool cards.** Every tool call gets a card except the navigation tools (`open_query_in_o2`, `open_dashboard_in_o2`, `open_alerts_in_o2`). O2 tools by inner name; others by their own name (`read_skill_ref`, `run_skill_command`, `search_indexed_documents`). `message` is written by code in the answer language. A call to another org than the user's says so on the card.
 - **Current org.** `o2Gateway.orgs` maps an org identifier to the MCP server that queries it, one server per org. `context.org_id` (checked against the identifier format) picks the user's org; the run is told it in code, outside the untrusted page context.
 - **Evidence.** `call_args` carries the SearchSQL that **ran** (after the tool guard's time range and `LIMIT`), and only for a successful call through the current org's server.
-- **Navigation.** The model asks for it with the tool `open_query_in_o2` (no arguments). Code opens the last SearchSQL that succeeded against the current org, exactly as it ran. The tool refuses when there is none, for another org, and for stream types other than logs and traces. The event is sent once, after the last text, right before `complete`, and only when the run ends `done`.
+- **Navigation.** The model asks for it with a navigation tool; code builds the target. The event is sent once, after the last text, right before `complete`, and only when the run ends `done`; when the model asks more than once, the last request wins.
+  - `open_query_in_o2` (no arguments) opens the last SearchSQL that succeeded against the current org, exactly as it ran. It refuses when there is none, for another org, and for stream types other than logs and traces.
+  - `open_dashboard_in_o2 {dashboard_id}` opens a dashboard that a ListDashboards against the current org returned in this turn, in its folder. The tool guard runs ListDashboards at the `full` detail level (the summary has no `folder_id`), with `title: ""` when no filter is given (no filter lists only the default folder), and cuts the result down to each dashboard's id, title, folder and owner before the model sees it.
+  - `open_alerts_in_o2 {page: list|history|alert, alert_id?}` opens the alerts list, the alert history, or the status page of an alert that a ListAlerts against the current org returned in this turn (also `full`: the summary has no `alert_id`; cut down to what the alert watches and its state).
 - **Ends.** By the run's outcome:
 
   | Run | Stream ends with |

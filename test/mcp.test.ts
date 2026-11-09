@@ -6,7 +6,7 @@ import { afterEach, describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
-import { duration, McpGuard, trailingLimit, type McpServerPolicy } from "../src/guardrails/tools.js";
+import { duration, listedDashboards, McpGuard, trailingLimit, type McpServerPolicy } from "../src/guardrails/tools.js";
 import { McpHub, startMcp, type McpServerConfig } from "../src/mcp/index.js";
 import { PiAgentRunner } from "../src/runs/pi-runner.js";
 import type { RunContext } from "../src/runs/types.js";
@@ -20,7 +20,7 @@ const limits = { defaultRangeSec: 3600, maxRangeSec: 86_400, sqlDefaultLimit: 10
 const o2Policy: McpServerPolicy = {
   name: "o2",
   allowTools: ["SearchSQL", "PrometheusRangeQuery", "tool_search", "tools_call", "manage_rules", "missing_tool"],
-  innerAllow: ["SearchSQL", "StreamList"],
+  innerAllow: ["SearchSQL", "StreamList", "ListDashboards"],
   argAllow: { manage_rules: { operation: ["list", "get"] } },
 };
 const guardFor = (servers: McpServerPolicy[] = [o2Policy], outputChars = 16_000) =>
@@ -59,7 +59,7 @@ class FakeMcp {
       { description: "PromQL range query", inputSchema: { query: z.string(), start: z.string(), end: z.string(), step: z.string().optional() } },
       record("PrometheusRangeQuery"),
     );
-    server.registerTool("tools_call", { inputSchema: { tool: z.string(), args: z.any().optional() } }, record("tools_call"));
+    server.registerTool("tools_call", { inputSchema: { tool: z.string(), args: z.any().optional(), detail: z.string().optional() } }, record("tools_call"));
     server.registerTool("tool_search", { inputSchema: { query: z.string() } }, record("tool_search"));
     server.registerTool("manage_rules", { inputSchema: { operation: z.string() } }, record("manage_rules"));
     server.registerTool("DeleteStream", { inputSchema: { name: z.string() } }, record("DeleteStream"));
@@ -144,12 +144,12 @@ async function runToolCall(hub: McpHub, name: string, args: Record<string, unkno
     streamFn: stream,
     now: () => NOW,
   });
-  const ended: { args?: unknown; output: string }[] = [];
+  const ended: { args?: unknown; output: string; data?: unknown }[] = [];
   const ctx: RunContext = {
     runId: "r1",
     signal: new AbortController().signal,
     budget: { maxSteps: 5, softDeadline: Number.MAX_SAFE_INTEGER, maxInputTokens: 100_000 },
-    observer: { toolEnd: (c) => ended.push({ args: c.args, output: c.output }) },
+    observer: { toolEnd: (c) => ended.push({ args: c.args, output: c.output, ...(c.data !== undefined && { data: c.data }) }) },
   };
   await runner.run({ source: "o2", sessionId: "s1", question: "q" }, ctx);
   // The system prompt is the transcript's first message.
@@ -192,7 +192,7 @@ describe("MCP client", () => {
     await hub.start();
     const { seen } = await runToolCall(hub, "o2__tools_call", { tool: "DeleteStream", args: { name: "k8s_logs" } });
     expect(f.calls).toEqual([]);
-    expect(seen).toContain('Not allowed: tools_call may only run SearchSQL, StreamList on o2, not "DeleteStream"');
+    expect(seen).toContain('Not allowed: tools_call may only run SearchSQL, StreamList, ListDashboards on o2, not "DeleteStream"');
   });
 
   it("fills in the time range and LIMIT of SQL without them, also inside tools_call", async () => {
@@ -210,6 +210,32 @@ describe("MCP client", () => {
     expect(f.calls[1]?.args).toEqual({
       tool: "SearchSQL",
       args: { request_body: { query: { sql: "SELECT * FROM t LIMIT 20", start_time: NOW_US - HOUR_US, end_time: NOW_US, size: 20 } } },
+    });
+  });
+
+  it("lists dashboards of every folder with their folder ids, without the panel definitions", async () => {
+    const f = await fake();
+    // O2's normalized full detail: every field of each dashboard, the panels included.
+    const panels = { panels: [{ id: "p1", type: "line", queries: [{ query: "SELECT * FROM k8s_logs" }] }] };
+    f.output = JSON.stringify({
+      total: 2,
+      items: [
+        { dashboard_id: "d1", title: "L1 Overview", description: "", folder_id: "f7", folder_name: "Network", owner: "a@example.com", hash: "h", v8: panels },
+        { dashboard_id: "d2", title: "GPU", folder_id: "default", folder_name: "default", v8: panels },
+      ],
+    });
+    const hub = hubFor([{ name: "o2", url: f.url() }]);
+    await hub.start();
+    const { seen, ended } = await runToolCall(hub, "o2__tools_call", { tool: "ListDashboards", args: {} });
+    // Only the full detail level has the folder ids; no filter would list the default folder only.
+    expect(f.calls).toEqual([{ tool: "tools_call", args: { tool: "ListDashboards", args: { title: "" }, detail: "full" } }]);
+    expect(seen).toContain('"folder_id":"f7"');
+    expect(seen).not.toContain("SELECT * FROM k8s_logs");
+    expect(ended[0]!.data).toEqual({
+      dashboards: [
+        { dashboard_id: "d1", title: "L1 Overview", folder_id: "f7", folder_name: "Network", owner: "a@example.com" },
+        { dashboard_id: "d2", title: "GPU", folder_id: "default", folder_name: "default" },
+      ],
     });
   });
 
@@ -452,6 +478,55 @@ describe("McpGuard", () => {
     expect(out).toContain("[Output truncated: 100 of");
   });
 
+  it("defaults a dashboard list to every folder and keeps the model's filters", () => {
+    const g = guardFor();
+    expect(g.prepare("o2__tools_call", { tool: "ListDashboards", args: { title: "L1" }, detail: "summary" })).toEqual({ tool: "ListDashboards", args: { title: "L1" }, detail: "full" });
+    expect(g.prepare("o2__tools_call", { tool: "ListDashboards", args: { folder: "f7" } })).toEqual({ tool: "ListDashboards", args: { folder: "f7" }, detail: "full" });
+    expect(g.prepare("o2__tools_call", { tool: "ListDashboards" })).toEqual({ tool: "ListDashboards", args: { title: "" }, detail: "full" });
+    // Other tools keep their detail level.
+    expect(g.prepare("o2__tools_call", { tool: "StreamList", args: {}, detail: "summary" })).toEqual({ tool: "StreamList", args: {}, detail: "summary" });
+  });
+
+  it("cuts a dashboard list down for the model and hands the whole list to code", () => {
+    const g = guardFor([o2Policy], 300);
+    const items = Array.from({ length: 20 }, (_, i) => ({ dashboard_id: `d${i}`, title: `Dash ${i}`, folder_id: "f1", v8: { panels: ["x".repeat(500)] } }));
+    const r = g.result("o2__tools_call", { tool: "ListDashboards", args: {} }, JSON.stringify({ dashboards: items }), false);
+    expect(r.data?.dashboards).toHaveLength(20);
+    expect(r.data?.dashboards?.[19]).toEqual({ dashboard_id: "d19", title: "Dash 19", folder_id: "f1" });
+    expect(r.text).not.toContain("xxx");
+    expect(r.text).toContain("[Output truncated: 300 of");
+    // Errors, other tools and text that is not a list pass through as before.
+    expect(g.result("o2__tools_call", { tool: "ListDashboards" }, "Error 403: Unauthorized Access", true)).toEqual({ text: "Error 403: Unauthorized Access" });
+    expect(g.result("o2__tools_call", { tool: "ListDashboards" }, "not json", false)).toEqual({ text: "not json" });
+    expect(g.result("o2__SearchSQL", {}, JSON.stringify({ items: [{ dashboard_id: "d" }] }), false).data).toBeUndefined();
+    // A dashboard without an id is dropped; one without a folder id is listed but has none.
+    expect(listedDashboards(JSON.stringify({ items: [{ title: "no id" }, { dashboard_id: "d", title: "t" }] }))).toEqual([{ dashboard_id: "d", title: "t" }]);
+  });
+
+  it("lists alerts with their ids at the full detail level, cut down to what they watch and their state", () => {
+    const g = guardFor();
+    expect(g.prepare("o2__tools_call", { tool: "ListAlerts", args: { alert_name_substring: "disk" } })).toEqual({ tool: "ListAlerts", args: { alert_name_substring: "disk" }, detail: "full" });
+    const full = {
+      list: [
+        { alert_id: "k1", name: "Disk Full", folder_id: "f3", folder_name: "Storage", stream_type: "metrics", enabled: true, is_real_time: false, last_triggered_at: 1794000000000000, condition: { sql: "SELECT secret_query" }, trigger_condition: { period: 5 } },
+        { name: "no id" },
+      ],
+    };
+    const r = g.result("o2__tools_call", { tool: "ListAlerts" }, JSON.stringify(full), false);
+    expect(r.data?.alerts).toEqual([{ alert_id: "k1", name: "Disk Full", folder_id: "f3", folder_name: "Storage", stream_type: "metrics", enabled: true, is_real_time: false, last_triggered_at: 1794000000000000 }]);
+    expect(r.text).not.toContain("secret_query");
+    expect(JSON.parse(r.text)).toEqual({ total: 1, items: r.data?.alerts });
+  });
+
+  it("allows 30 days by default and says so in days", () => {
+    const cfg = loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", LLM_MODEL: "m" });
+    expect(cfg.agent.queryLimits.maxRangeSec).toBe(30 * 86_400);
+    const g = new McpGuard({ servers: [o2Policy], maxArgChars: 2000, outputChars: 16_000, limits: cfg.agent.queryLimits, now: () => NOW });
+    const sql = (days: number) => ({ request_body: { query: { sql: "SELECT 1 FROM t LIMIT 1", start_time: NOW_US - days * 24 * HOUR_US, end_time: NOW_US } } });
+    expect(g.check({ name: "o2__SearchSQL", args: sql(30) })).toEqual({ ok: true });
+    expect(g.check({ name: "o2__SearchSQL", args: sql(31) })).toEqual({ ok: false, reason: "the time range is 31d; one query covers at most 30d: narrow it or split it" });
+  });
+
   it("parses LIMIT forms and durations", () => {
     expect(trailingLimit("SELECT * FROM t LIMIT 10")).toBe(10);
     expect(trailingLimit("select * from t limit 10 offset 20;")).toBe(10);
@@ -477,7 +552,7 @@ describe("mcp config", () => {
     const cfg = load("");
     expect(cfg.mcp.servers).toEqual([]);
     expect(cfg.agent.toolOutputChars).toBe(16_000);
-    expect(cfg.agent.queryLimits).toEqual(limits);
+    expect(cfg.agent.queryLimits).toEqual({ ...limits, maxRangeSec: 30 * 86_400 });
   });
 
   it("refuses duplicate names, names with underscores and servers without an allowlist", () => {

@@ -1,4 +1,4 @@
-import { isObj, splitToolName } from "../guardrails/tools.js";
+import { isObj, LIST_ALERTS, LIST_DASHBOARDS, splitToolName, type ListedAlert, type ListedDashboard } from "../guardrails/tools.js";
 import type { AnswerLang } from "../lang.js";
 import { redact } from "../tools/redact.js";
 
@@ -19,6 +19,9 @@ export type O2Event =
       error_type?: string;
     }
   | { type: "navigation_action"; resource_type: "logs" | "traces"; action: "load_query"; label: string; target: Record<string, unknown> }
+  | { type: "navigation_action"; resource_type: "dashboard"; action: "navigate_direct"; label: string; target: { dashboard_id: string; folder: string; name?: string } }
+  // Not `alert`: the panel opens an alert of that type in its editor.
+  | { type: "navigation_action"; resource_type: "alerts"; action: "navigate_direct"; label: string; target: { path: string; query?: Record<string, string> } }
   | { type: "complete"; trace_id: string }
   | { type: "error"; error: string; error_type?: string; suggestion?: string }
   | { type: "cancelled" };
@@ -89,7 +92,7 @@ const card = (v: string) => cap(redact(v).text, CARD_STRING_CHARS);
 export function cardContext(t: PanelTool): Record<string, unknown> {
   const a = t.args;
   const out: Record<string, unknown> = {};
-  for (const k of ["stream_name", "type", "query", "name", "file", "start", "end", "step"]) {
+  for (const k of ["stream_name", "type", "query", "name", "file", "start", "end", "step", "title", "folder", "alert_name_substring"]) {
     const v = a[k];
     if (typeof v === "string") out[k] = card(v);
     else if (typeof v === "number") out[k] = v;
@@ -125,6 +128,14 @@ export function callMessage(t: PanelTool, lang: AnswerLang, other?: string): str
         return { zh: "查看最近的 trace", en: "Fetching recent traces" };
       case "GetIncident":
         return { zh: "读取 incident", en: "Reading the incident" };
+      case LIST_ALERTS: {
+        const name = s(t.args.alert_name_substring);
+        return { zh: name ? `查找 alert「${name}」` : "列出 alerts", en: name ? `Looking up alerts matching "${name}"` : "Listing alerts" };
+      }
+      case LIST_DASHBOARDS: {
+        const name = s(t.args.title);
+        return { zh: name ? `查找 dashboard「${name}」` : "列出 dashboards", en: name ? `Looking up dashboards matching "${name}"` : "Listing dashboards" };
+      }
       case "tool_search":
         return { zh: "查找可用的工具", en: "Looking up tools" };
       case "read_skill":
@@ -165,11 +176,13 @@ export function resultSummary(output: string): { count?: number; took?: number }
 const ERROR_MESSAGE_CHARS = 300;
 
 /** The card line of a finished call. A failure shows the start of the error, redacted. */
-export function resultMessage(ok: boolean, output: string, summary: { count?: number } | undefined, lang: AnswerLang): string {
+export function resultMessage(ok: boolean, output: string, summary: { count?: number } | undefined, lang: AnswerLang, tool?: string): string {
   if (!ok) {
     const text = cap(redact(output.trim()).text.replace(/\s+/g, " "), ERROR_MESSAGE_CHARS);
     return text || (lang === "zh" ? "调用失败" : "The call failed");
   }
+  if (summary?.count !== undefined && tool === LIST_DASHBOARDS) return lang === "zh" ? `找到 ${summary.count} 个 dashboard` : `Found ${summary.count} dashboard${summary.count === 1 ? "" : "s"}`;
+  if (summary?.count !== undefined && tool === LIST_ALERTS) return lang === "zh" ? `找到 ${summary.count} 个 alert` : `Found ${summary.count} alert${summary.count === 1 ? "" : "s"}`;
   if (summary?.count !== undefined) return lang === "zh" ? `返回 ${summary.count} 行` : `Returned ${summary.count} rows`;
   return lang === "zh" ? "完成" : "Done";
 }
@@ -192,6 +205,40 @@ export function navigation(args: SqlCallArgs, lang: AnswerLang): Extract<O2Event
     action: "load_query",
     label: label[lang][type],
     target: { query: q.sql, sql_mode: true, stream: args.stream_name.split(","), from: q.start_time, to: q.end_time },
+  };
+}
+
+const NAME_CHARS = 200;
+
+/** `navigate_direct` for the panel: opens the dashboard on its own page, in its folder (the page checks access by it). */
+export function dashboardNavigation(d: ListedDashboard & { folder_id: string }, lang: AnswerLang): Extract<O2Event, { resource_type: "dashboard" }> {
+  const name = cap(redact(d.title).text, NAME_CHARS);
+  return {
+    type: "navigation_action",
+    resource_type: "dashboard",
+    action: "navigate_direct",
+    label: lang === "zh" ? (name ? `打开 dashboard ${name}` : "打开 dashboard") : name ? `Open the ${name} dashboard` : "Open the dashboard",
+    target: { dashboard_id: d.dashboard_id, folder: d.folder_id, ...(name && { name }) },
+  };
+}
+
+/** The alert pages the assistant can open: the list, the history of all alerts, and one alert's status page. */
+export type AlertsPage = { page: "list" } | { page: "history" } | { page: "alert"; alert: ListedAlert & { folder_id: string } };
+
+/**
+ * `navigate_direct` to an alerts page by path. An alert opens on its status page (read-only), never in the editor,
+ * which is where the panel's own `alert` navigation goes.
+ */
+export function alertsNavigation(p: AlertsPage, lang: AnswerLang): Extract<O2Event, { resource_type: "alerts" }> {
+  const base = { type: "navigation_action", resource_type: "alerts", action: "navigate_direct" } as const;
+  if (p.page === "list") return { ...base, label: lang === "zh" ? "打开 alerts 列表" : "Open the alerts list", target: { path: "/alerts" } };
+  if (p.page === "history") return { ...base, label: lang === "zh" ? "打开 alert 历史" : "Open the alert history", target: { path: "/alerts/history" } };
+  const name = cap(redact(p.alert.name).text, NAME_CHARS);
+  return {
+    ...base,
+    label: lang === "zh" ? (name ? `打开 alert ${name}` : "打开 alert") : name ? `Open the ${name} alert` : "Open the alert",
+    // The status page reads the alert without its folder, which the folder-scoped access check needs.
+    target: { path: `/alerts/detail/${encodeURIComponent(p.alert.alert_id)}`, query: { folder: p.alert.folder_id } },
   };
 }
 

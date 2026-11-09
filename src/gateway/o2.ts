@@ -201,7 +201,7 @@ export function createO2Gateway(o: O2GatewayOptions) {
       history,
       context,
       notes,
-      tools: [turn.navigationTool()],
+      tools: [turn.navigationTool(), turn.dashboardTool(), turn.alertsTool()],
       ...(trace && { traceparent: traceparent! }),
     };
     // The user may have pressed Stop while the body was still arriving: no run for a turn nobody reads.
