@@ -5,4 +5,4 @@ metadata:
   labels: {{- include "neotags.labels" . | nindent 4 }}
 data:
   neotags.yaml: |
-    {{- toYaml .Values.config | nindent 4 }}
+    {{- include "neotags.config" . | nindent 4 }}

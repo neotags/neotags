@@ -40,13 +40,71 @@ config:
     # maxTokens: 8192             # ceiling for one reply
     # outputTokens: { router: 200, summary: 3000, fileSummary: 1200, answer: 1200 }   # raise for reasoning models
     # extraBody: { chat_template_kwargs: { enable_thinking: false } }                 # gateway-specific switch
+  # The OpenObserve AI assistant entry (README "OpenObserve AI assistant"). Needs O2_AGENT_API_KEY in the Secret and
+  # an LLM. The chart adds the container port, the Service port and (networkPolicy.o2Gateway) who may reach it.
+  o2Gateway:
+    enabled: false
+    port: 3001
+    orgs: {}                      # O2 org identifier -> mcp.servers name, one server per org, e.g. { default: o2 }
+  # agent: { entries: { o2: [o2-query-assistant] }, drainSec: 640, ... }   # agent runs; see config example
+  # mcp: { servers: [...] }       # MCP tools of agent runs; header values come from Secret env vars (headersFromEnv)
+  # skillPacks.dir and sandbox.* are set by the chart from skillPacks and executor below.
+  skillPacks:
+    packs: []                     # whole packs mounted from skillPacks.configMap (each needs <pack>/SKILL.md)
+    refs: {}                      # single reference files of other packs
   telemetry:
     captureContent: false   # true: prompts/replies on trace spans (see config example)
   logLevel: info
 
-# Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional).
-# Create it out of band (External Secrets, sealed secrets, ...) and reference it here.
+# Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional), O2_AGENT_API_KEY (with
+# config.o2Gateway.enabled) and the MCP header values named in config.mcp.servers[].headersFromEnv.
+# Create it out of band (External Secrets, sealed secrets, ...) and reference it here. Only the neotags container gets it.
 existingSecret: neotags-secrets
+
+# Skill packs (Agent Skills) mounted read-only at /etc/neotags/skills. The ConfigMap is made outside the chart (its keys
+# are paths, which ConfigMap keys cannot hold, so it is mapped with `items`): one item per file, key -> path, e.g.
+#   items: [{ key: o2-query-assistant.SKILL.md, path: o2-query-assistant/SKILL.md }, ...]
+skillPacks:
+  configMap: ""      # empty: no packs mounted
+  items: []
+  # Packs are read once at startup. helm upgrade rolls the Pod when the ConfigMap's data changed (it is read with
+  # lookup); with helm template or a GitOps tool lookup sees nothing, so change this (e.g. to the packs' git ref)
+  # whenever the ConfigMap changes.
+  revision: ""
+
+# Command execution for skill packs (executor/README.md "Deploy as a sidecar"). When enabled it runs as a native
+# sidecar (an init container with restartPolicy: Always: up before neotags, stopped after it), the Pod runs in its own
+# user namespace (hostUsers: false, Kubernetes >= 1.33 with user namespaces on the nodes), the service account token
+# is mounted into the neotags container only, and config.sandbox is set to the local backend on the shared socket.
+executor:
+  enabled: false
+  image:
+    repository: ghcr.io/neotags/neotags-executor
+    tag: ""          # required when enabled: a tag pushed by build-executor-image.yml
+    pullPolicy: IfNotPresent
+  socketDir: /run/executor
+  # Execution credentials only (never the neotags Secret), mounted read-only at /etc/executor/credentials.
+  credentialsSecret: ""
+  tmpSizeLimit: 1Gi  # per-call directories of sandboxed commands (emptyDir sizeLimit)
+  # Every sandboxed command runs inside the container's limits below. maxConcurrency x maxMemMib plus 256Mi for the
+  # executor itself must fit the memory limit (the chart checks): past it the kernel kills the whole sidecar. The check
+  # covers each command's address space only, not files a command writes to its in-memory /tmp, nor resident workers
+  # (EXECUTOR_WORKERS); leave headroom for those.
+  maxConcurrency: 2  # EXECUTOR_MAX_CONCURRENCY
+  maxMemMib: 768     # EXECUTOR_MAX_MEM_MIB: the most one command may declare
+  env: []            # other EXECUTOR_* settings, e.g. { name: EXECUTOR_MAX_TIMEOUT_SEC, value: "120" }; not the ones the chart sets
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { cpu: "2", memory: 2Gi }
+
+# Rolling update: start the new Pod before stopping the old one, so O2 turns keep a Pod to land on. For a few seconds
+# both Pods receive Slack events; event dedupe is per Pod, so an event Slack retries in that window can run twice.
+strategy:
+  maxSurge: 1
+  maxUnavailable: 0
+# Empty: with config.o2Gateway.enabled, config.agent.drainSec + 20 (660 with the default drain: agent runs drain, then
+# the last events and traces go out), else 30. With the O2 gateway on it must be at least drainSec + 15; the chart checks.
+terminationGracePeriodSeconds: ""
 
 serviceAccount:
   create: true
@@ -56,6 +114,29 @@ serviceAccount:
 service:
   type: ClusterIP
   port: 80
+  o2Port: ""         # the O2 gateway's Service port; empty: config.o2Gateway.port. In-cluster only, never on the Ingress
+
+# Ingress NetworkPolicy for the Pod (off: the cluster's own policies apply). Only the listed peers reach each port.
+networkPolicy:
+  enabled: false
+  # Peers of the Slack port (also the health probes), e.g. the ingress controller:
+  # [{ namespaceSelector: {...}, podSelector: {...} }]. Required when enabled: an empty list would block Slack events.
+  slack: []
+  o2Gateway:         # peers of the O2 gateway port: OpenObserve
+    - namespaceSelector:
+        matchLabels: { kubernetes.io/metadata.name: openobserve }
+  # Egress of the Pod, one list for all its containers (a NetworkPolicy cannot tell containers apart): the executor's
+  # sandboxes reach only their declared hosts through its proxy, and that proxy's own reach is what this allows.
+  # Empty: egress is not restricted by this chart. Set it to the LLM gateway, MCP servers, Onyx, the OTLP collector
+  # and the hosts skill packs declare, e.g. [{ to: [{ namespaceSelector: {...} }], ports: [{ port: 443 }] }].
+  # DNS (port 53 to networkPolicy.dns) is added when this list is set.
+  egress: []
+  # Where DNS goes when egress is restricted: CoreDNS pods in any namespace by default. With NodeLocal DNSCache add
+  # its address, e.g. - ipBlock: { cidr: 169.254.20.10/32 }
+  dns:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels: { k8s-app: kube-dns }
 
 # Slack Events API needs a public HTTPS URL routed to /slack/events.
 ingress:
@@ -73,6 +154,11 @@ podAnnotations: {}
 nodeSelector: {}
 tolerations: []
 affinity: {}
-# e.g. LLM traces (README "LLM traces"); put OTEL_EXPORTER_OTLP_HEADERS (the auth header) in the Secret instead:
-# - { name: OTEL_EXPORTER_OTLP_TRACES_ENDPOINT, value: "https://o2.example.com/api/default/v1/traces" }
+# LLM traces (README "LLM traces"): OTLP/HTTP, off without an endpoint. An auth header (OTEL_EXPORTER_OTLP_HEADERS)
+# belongs in the Secret. config.telemetry.captureContent decides whether prompts and replies are recorded.
+otel:
+  endpoint: ""       # e.g. http://otel-collector.monitoring.svc:4318 (OTEL_EXPORTER_OTLP_ENDPOINT)
+  serviceName: ""    # OTEL_SERVICE_NAME; default neotags. Collectors often route on it
+  resourceAttributes: ""   # OTEL_RESOURCE_ATTRIBUTES, e.g. deployment.environment=staging
+# More env for the neotags container.
 extraEnv: []

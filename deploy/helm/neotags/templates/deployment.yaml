@@ -1,3 +1,56 @@
+{{- $o2 := include "neotags.o2Enabled" . -}}
+{{- $exec := .Values.executor -}}
+{{- $grace := include "neotags.grace" . -}}
+{{- /* After the drain the process still closes the O2 server and MCP and flushes traces (up to 5 s): keep a margin. */}}
+{{- $need := addf (ceil (float64 (include "neotags.drainSec" .))) 15 -}}
+{{- if and $o2 (lt (float64 $grace) $need) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%s) must be at least config.agent.drainSec + 15 (%.0f) so agent runs can finish on shutdown" $grace $need) -}}
+{{- end -}}
+{{- if and $o2 (ne .Values.service.type "ClusterIP") -}}
+{{- fail (printf "service.type %s would expose the O2 gateway port outside the cluster; it is in-cluster only (use the Ingress for Slack)" .Values.service.type) -}}
+{{- end -}}
+{{- $sp := default dict .Values.config.skillPacks -}}
+{{- if or $sp.packs $sp.refs -}}
+{{- if not .Values.skillPacks.configMap -}}
+{{- fail "config.skillPacks.packs or refs is set but skillPacks.configMap is not: the packs would not be mounted, and runs would start without them" -}}
+{{- end -}}
+{{- /* ConfigMap keys cannot hold "/": without items the files land flat, and no <pack>/SKILL.md exists. */}}
+{{- if not .Values.skillPacks.items -}}
+{{- fail "skillPacks.items is empty: map each ConfigMap key to its <pack>/... path, or no pack can be loaded" -}}
+{{- end -}}
+{{- end -}}
+{{- if $exec.enabled -}}
+{{- range $exec.env -}}
+{{- if has .name (list "EXECUTOR_SOCKET" "EXECUTOR_REQUIRE_PROCFS" "EXECUTOR_CREDENTIALS_DIR" "EXECUTOR_MAX_CONCURRENCY" "EXECUTOR_MAX_MEM_MIB" "EXECUTOR_SKILLS_DIR") -}}
+{{- fail (printf "executor.env sets %s, which the chart owns (use the executor.* value): a later duplicate would silently win" .name) -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- if and $exec.enabled $exec.resources.limits $exec.resources.limits.memory -}}
+{{- /* Every sandboxed command runs inside the sidecar's limit: past it the kernel kills the sidecar, not the command. */}}
+{{- $want := addf (mulf (float64 $exec.maxConcurrency) (float64 $exec.maxMemMib)) 256 -}}
+{{- $have := float64 (include "neotags.mib" $exec.resources.limits.memory) -}}
+{{- if gt $want $have -}}
+{{- fail (printf "executor.maxConcurrency x executor.maxMemMib + 256Mi (%.0fMi) is over executor.resources.limits.memory (%s): one command could get the whole sidecar killed" $want (toString $exec.resources.limits.memory)) -}}
+{{- end -}}
+{{- end -}}
+{{- $annotations := deepCopy (default dict .Values.podAnnotations) -}}
+{{- if $exec.enabled -}}
+{{- /* EKS IRSA and Pod Identity inject AWS credentials into every container not listed here; never the sandbox's. */}}
+{{- $skip := get $annotations "eks.amazonaws.com/skip-containers" -}}
+{{- $_ := set $annotations "eks.amazonaws.com/skip-containers" (ternary (printf "%s,executor" $skip) "executor" (ne (toString $skip) "")) -}}
+{{- end -}}
+{{- with .Values.skillPacks.revision -}}
+{{- $_ := set $annotations "neotags/skill-packs-revision" (toString .) -}}
+{{- end -}}
+{{- with .Values.skillPacks.configMap -}}
+{{- /* Packs are read at startup: roll the Pod when they change. lookup is empty under helm template and
+dry-runs; there skillPacks.revision is the only trigger. */}}
+{{- $cm := lookup "v1" "ConfigMap" $.Release.Namespace . -}}
+{{- if $cm -}}
+{{- $_ := set $annotations "checksum/skill-packs" (toJson (default dict $cm.data) | sha256sum) -}}
+{{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -5,6 +58,11 @@ metadata:
   labels: {{- include "neotags.labels" . | nindent 4 }}
 spec:
   replicas: {{ .Values.replicaCount }}
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: {{ .Values.strategy.maxSurge }}
+      maxUnavailable: {{ .Values.strategy.maxUnavailable }}
   selector:
     matchLabels: {{- include "neotags.selectorLabels" . | nindent 6 }}
   template:
@@ -12,11 +70,19 @@ spec:
       labels: {{- include "neotags.selectorLabels" . | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- with .Values.podAnnotations }}
+        {{- with $annotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
       serviceAccountName: {{ include "neotags.serviceAccountName" . }}
+      terminationGracePeriodSeconds: {{ $grace }}
+      {{- if $exec.enabled }}
+      # The executor runs untrusted skill-pack code: no service account token in the Pod by default (the projected
+      # volume below gives one to the neotags container only), and its own user namespace, so root in a sandbox maps
+      # to an unprivileged host UID and the sidecar may mount a private /proc.
+      automountServiceAccountToken: false
+      hostUsers: false
+      {{- end }}
       {{- with .Values.imagePullSecrets }}
       imagePullSecrets: {{- toYaml . | nindent 8 }}
       {{- end }}
@@ -24,6 +90,10 @@ spec:
         runAsNonRoot: true
         runAsUser: 1000
         seccompProfile: { type: RuntimeDefault }
+        {{- if $exec.enabled }}
+        # The executor's socket (mode 660) is shared through this group.
+        fsGroup: 65532
+        {{- end }}
       containers:
         - name: neotags
           image: "{{ required "image.repository is required (e.g. ghcr.io/<owner>/<repo>)" .Values.image.repository }}:{{ required "image.tag is required (a tag pushed by build-image.yml)" .Values.image.tag }}"
@@ -35,9 +105,25 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.config.slack.port }}
+            {{- if $o2 }}
+            - name: o2
+              containerPort: {{ include "neotags.o2Port" . }}
+            {{- end }}
           env:
             - name: NEOTAGS_CONFIG
               value: /etc/neotags/neotags.yaml
+            {{- with .Values.otel.endpoint }}
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.otel.serviceName }}
+            - name: OTEL_SERVICE_NAME
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.otel.resourceAttributes }}
+            - name: OTEL_RESOURCE_ATTRIBUTES
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
@@ -53,14 +139,120 @@ spec:
             periodSeconds: 20
           resources: {{- toYaml .Values.resources | nindent 12 }}
           volumeMounts:
-            - { name: config, mountPath: /etc/neotags, readOnly: true }
+            # The file, not the directory: the skill packs mount below /etc/neotags, and a mount point cannot be made
+            # inside a ConfigMap volume. A config change still rolls the Pod (checksum/config).
+            - { name: config, mountPath: /etc/neotags/neotags.yaml, subPath: neotags.yaml, readOnly: true }
             - { name: tmp, mountPath: /tmp }
+            {{- if .Values.skillPacks.configMap }}
+            - { name: skills, mountPath: /etc/neotags/skills, readOnly: true }
+            {{- end }}
+            {{- if $exec.enabled }}
+            - { name: executor-run, mountPath: {{ $exec.socketDir }} }
+            - { name: sa-token, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
+            {{- end }}
+      {{- if $exec.enabled }}
+      initContainers:
+        # A native sidecar: started (socket up) before neotags, and stopped only after neotags has exited, so agent
+        # runs still draining on shutdown can run commands. A plain container would get SIGTERM with neotags and drop
+        # its socket at once.
+        - name: executor
+          restartPolicy: Always
+          image: "{{ $exec.image.repository }}:{{ required "executor.image.tag is required when executor.enabled (a tag pushed by build-executor-image.yml)" $exec.image.tag }}"
+          imagePullPolicy: {{ $exec.image.pullPolicy }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 65532
+            runAsGroup: 65532
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: [ALL] }
+            # RuntimeDefault blocks the user namespaces bubblewrap needs; the executor applies its own seccomp
+            # filter inside every sandbox. Unmasked lets it mount a private /proc per sandbox (with hostUsers: false).
+            seccompProfile: { type: Unconfined }
+            procMount: Unmasked
+          env:
+            - name: EXECUTOR_SOCKET
+              value: "{{ $exec.socketDir }}/exec.sock"
+            # Refuse executions rather than run in a weaker sandbox when the Pod loses a setting above.
+            - name: EXECUTOR_REQUIRE_PROCFS
+              value: "1"
+            # Outside the shared socket directory, which the neotags container can write: only the Secret's files
+            # count, and without one the path does not exist (read-only root filesystem).
+            - name: EXECUTOR_CREDENTIALS_DIR
+              value: /etc/executor/credentials
+            - name: EXECUTOR_MAX_CONCURRENCY
+              value: {{ $exec.maxConcurrency | quote }}
+            - name: EXECUTOR_MAX_MEM_MIB
+              value: {{ $exec.maxMemMib | quote }}
+            {{- if .Values.skillPacks.configMap }}
+            - name: EXECUTOR_SKILLS_DIR
+              value: /skills
+            {{- end }}
+            {{- with $exec.env }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          startupProbe:
+            exec:
+              command: [python3, -c, "import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])", "{{ $exec.socketDir }}/exec.sock"]
+            periodSeconds: 1
+            failureThreshold: 30
+          # A wedged executor is restarted rather than failing every command for the rest of the Pod's life.
+          livenessProbe:
+            exec:
+              command: [python3, -c, "import socket, sys; s = socket.socket(socket.AF_UNIX); s.settimeout(5); s.connect(sys.argv[1]); s.sendall(b'GET /healthz HTTP/1.0\\r\\n\\r\\n'); sys.exit(0 if s.recv(12).startswith(b'HTTP/1.') else 1)", "{{ $exec.socketDir }}/exec.sock"]
+            periodSeconds: 30
+            timeoutSeconds: 10
+            failureThreshold: 3
+          resources: {{- toYaml $exec.resources | nindent 12 }}
+          # No envFrom and no service account token: the sidecar never sees the neotags Secret.
+          volumeMounts:
+            - { name: executor-run, mountPath: {{ $exec.socketDir }} }
+            - { name: executor-tmp, mountPath: /tmp }
+            {{- if .Values.skillPacks.configMap }}
+            - { name: skills, mountPath: /skills, readOnly: true }
+            {{- end }}
+            {{- if $exec.credentialsSecret }}
+            - { name: executor-credentials, mountPath: /etc/executor/credentials, readOnly: true }
+            {{- end }}
+      {{- end }}
       volumes:
         - name: config
           configMap:
             name: {{ include "neotags.fullname" . }}
         - name: tmp
           emptyDir: {}
+        {{- with .Values.skillPacks.configMap }}
+        - name: skills
+          configMap:
+            name: {{ . }}
+            {{- with $.Values.skillPacks.items }}
+            items: {{- toYaml . | nindent 14 }}
+            {{- end }}
+        {{- end }}
+        {{- if $exec.enabled }}
+        - name: executor-run
+          emptyDir: {}
+        - name: executor-tmp
+          # Per-call directories of untrusted commands. Over the limit the kubelet evicts the Pod (emptyDir has no
+          # "fail the write" mode): a bounded failure, chosen over a command filling the node's disk.
+          emptyDir: { sizeLimit: {{ $exec.tmpSizeLimit }} }
+        - name: sa-token
+          projected:
+            sources:
+              - serviceAccountToken: { path: token, expirationSeconds: 3607 }
+              - configMap:
+                  name: kube-root-ca.crt
+                  items: [{ key: ca.crt, path: ca.crt }]
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef: { fieldPath: metadata.namespace }
+        {{- with $exec.credentialsSecret }}
+        - name: executor-credentials
+          secret:
+            secretName: {{ . }}
+        {{- end }}
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector: {{- toYaml . | nindent 8 }}
       {{- end }}

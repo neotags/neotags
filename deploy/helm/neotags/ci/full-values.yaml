@@ -1,0 +1,14 @@
+# Every optional part on: rendered by CI (.github/workflows/ci.yml) so the templates are checked beyond the defaults.
+image: { repository: ghcr.io/neotags/neotags, tag: lint }
+config:
+  llm: { baseUrl: "http://gw.example.com/v1", model: m }
+  o2Gateway: { enabled: true, orgs: { default: o2 } }
+  mcp: { servers: [{ name: o2, url: "http://o2.example.com/api/default/mcp", allowTools: [SearchSQL], headersFromEnv: { Authorization: O2_MCP_AUTH_DEFAULT } }] }
+  agent: { entries: { o2: [o2-query-assistant] } }
+  skillPacks: { packs: [o2-query-assistant] }
+skillPacks:
+  configMap: neotags-skills
+  items: [{ key: o2-query-assistant.SKILL.md, path: o2-query-assistant/SKILL.md }]
+executor: { enabled: true, image: { tag: v0.0.0-abc1234 }, credentialsSecret: executor-creds }
+networkPolicy: { enabled: true, slack: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress } } }] }
+otel: { endpoint: "http://otel.example.com:4318", serviceName: moose }

@@ -6,7 +6,7 @@ Guidance for AI coding agents (and humans) working in this repo.
 
 neotags is a self-hosted agent teammate for Slack (GitHub/GitLab later). Mention it (`@moose ...`, name is configurable) to delegate work. The first feature in progress is **knowledge collection**: summarize a Slack thread and store it in an Onyx knowledge base.
 
-Read first: docs/design/*.md (architecture, decisions, open questions). `docs/architecture.html` is the current architecture diagram; update it (source: `docs/architecture.json`) when components or flows change. Treat recorded "Decisions" as settled; don't re-litigate them.
+Read first: docs/design/*.md (architecture, decisions, open questions). `docs/architecture.html` is the current architecture diagram; update it (source: `docs/architecture.json`) when components or flows change. It is rendered by [archify](https://github.com/tt-a1i/archify) 3.2.0 (commit `a4065941f1` reproduces the committed HTML byte for byte): `node <archify>/archify/bin/archify.mjs finalize architecture architecture.json architecture.html --quality showcase --json`, run in a scratch directory on a copy whose `meta.output` is `architecture.html`, then copy the HTML back. Every gate must pass. Treat recorded "Decisions" as settled; don't re-litigate them.
 
 ## Commands
 

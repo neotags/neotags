@@ -226,7 +226,7 @@ All settings are environment variables.
 | `EXECUTOR_SOCKET` | `/run/executor/exec.sock` | Unix socket to listen on |
 | `EXECUTOR_SOCKET_MODE` | `660` | Socket permissions (octal) |
 | `EXECUTOR_WORK_ROOT` | `/tmp/executor` | Parent of the per-call directories |
-| `EXECUTOR_CREDENTIALS_DIR` | `/run/executor/credentials` | One file per credential name |
+| `EXECUTOR_CREDENTIALS_DIR` | `/run/executor/credentials` | One file per credential name. As a sidecar, set it outside the socket directory the other container shares (the chart uses `/etc/executor/credentials`) |
 | `EXECUTOR_SKILLS_DIR` | empty | Mounted read-only at `/skills` in the sandbox |
 | `EXECUTOR_RO_BINDS` | empty | Extra read-only paths, colon-separated, for example CLI tool directories |
 | `EXECUTOR_TOOL_PATH` | empty | Directories prepended to `PATH` in the sandbox |
@@ -241,8 +241,9 @@ All settings are environment variables.
 
 ## Deploy as a sidecar
 
-The Helm chart doesn't add the executor yet. To run it as a sidecar of the
-neotags Pod, give it the following settings:
+The neotags Helm chart adds it with `executor.enabled: true` and every
+setting below (README "CI / deploy"). To run it as a sidecar of the neotags
+Pod in some other way, give it the following settings:
 
 - **Image:** this image, built for `linux/amd64` and `linux/arm64`.
 - **Pod user namespace:** `hostUsers: false` on the Pod. The Pod gets its own
@@ -267,14 +268,21 @@ neotags Pod, give it the following settings:
   - an `emptyDir` at `/run/executor`, shared with the neotags container, for the
     socket. Set `fsGroup` so both containers can use the socket (mode `660`);
   - an `emptyDir` at `/tmp` for per-call directories;
-  - optionally, the executor's own Secret at `/run/executor/credentials`,
-    holding only execution credentials. Never mount the neotags Secrets (bot
-    token, aigw key, MCP credentials).
+  - optionally, the executor's own Secret, holding only execution
+    credentials, mounted read-only outside the shared socket directory (the
+    neotags container can write there), for example at
+    `/etc/executor/credentials` with `EXECUTOR_CREDENTIALS_DIR` pointing to
+    it, as the chart does. Never mount the neotags Secrets (bot token, LLM
+    gateway key, MCP credentials).
 - **Service account token:** set `automountServiceAccountToken: false` on the
   Pod, and mount a projected token volume into the neotags container only.
 - **Network:** with `net` declared, the sidecar's own egress is what the
   proxy uses. Limit it with a NetworkPolicy to the hosts that skill packs
-  declare.
+  declare (the chart's `networkPolicy.egress`; a NetworkPolicy applies to the
+  whole Pod, so the list also covers what neotags itself needs).
+- **Lifecycle:** run it as a native sidecar (an init container with
+  `restartPolicy: Always`), so its socket is up before neotags starts and it
+  keeps serving while neotags drains agent runs on shutdown.
 
 ### Measured on EKS
 
@@ -413,10 +421,3 @@ These gaps are known and accepted for now:
 - **Contents:** the image ships only the executor and the Python runtime. It
   has no CLI tools for skill packs; see
   [Publish the image](#publish-the-image) for adding them.
-
-## Next steps
-
-These pieces build on the executor and are planned:
-
-- An executor sidecar option in the Helm chart with the settings in
-  [Deploy as a sidecar](#deploy-as-a-sidecar).

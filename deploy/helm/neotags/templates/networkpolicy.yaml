@@ -1,0 +1,35 @@
+{{- if .Values.networkPolicy.enabled }}
+# Ingress to the Pod: each port only from its peers. The O2 gateway answers agent runs on the agent's own
+# credentials, so only OpenObserve may reach it; the x-o2-agent-key check is the second layer.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "neotags.fullname" . }}
+  labels: {{- include "neotags.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels: {{- include "neotags.selectorLabels" . | nindent 6 }}
+  policyTypes: [Ingress{{ if .Values.networkPolicy.egress }}, Egress{{ end }}]
+  ingress:
+    {{- /* The Slack port also carries the health probes; without peers the Pod gets no events (and, where the CNI
+    applies policy to node traffic, never becomes Ready). */}}
+    {{- if not .Values.networkPolicy.slack }}{{ fail "networkPolicy.slack needs at least one peer (the ingress controller that forwards Slack events)" }}{{ end }}
+    - from: {{- toYaml .Values.networkPolicy.slack | nindent 8 }}
+      ports:
+        - { port: {{ .Values.config.slack.port }}, protocol: TCP }
+    {{- if include "neotags.o2Enabled" . }}
+    {{- /* An empty `from` would let every source in. */}}
+    {{- if not .Values.networkPolicy.o2Gateway }}{{ fail "networkPolicy.o2Gateway needs at least one peer" }}{{ end }}
+    - from: {{- toYaml .Values.networkPolicy.o2Gateway | nindent 8 }}
+      ports:
+        - { port: {{ include "neotags.o2Port" . }}, protocol: TCP }
+    {{- end }}
+    {{- with .Values.networkPolicy.egress }}
+  egress:
+    - to: {{- toYaml $.Values.networkPolicy.dns | nindent 8 }}
+      ports:
+        - { port: 53, protocol: UDP }
+        - { port: 53, protocol: TCP }
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- end }}
