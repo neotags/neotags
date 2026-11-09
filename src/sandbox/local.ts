@@ -1,6 +1,7 @@
 import { request } from "node:http";
 import { isObj } from "../guardrails/tools.js";
 import type { SandboxSpec } from "../tools/skillpacks.js";
+import { abortableSleep } from "../sleep.js";
 import { Slots } from "./slots.js";
 import { SandboxError, type ExecEntry, type ExecResult, type Sandbox, type SlotWait } from "./types.js";
 
@@ -78,28 +79,43 @@ export class LocalSandbox implements Sandbox {
       if (why === "aborted") throw notRun("aborted", "the execution was cancelled while waiting for a free slot");
       throw notRun("busy", `no free execution slot within ${Math.round(this.queueTimeoutMs / 1000)}s`);
     }
+    // When the outcome is unknown (no answer, cancelled after sending) the executor may still be running the
+    // command, holding its own slot until it ends, at the latest when this call's deadline would have passed.
+    let holdUntil = 0;
     try {
       for (let backoff = this.busyBackoffMs; ; backoff = Math.min(backoff * 2, BUSY_BACKOFF_MAX_MS)) {
         wait.queueMs = Date.now() - started;
+        const sentAt = Date.now();
         let res: { status: number; body: unknown };
         try {
           res = await this.call("POST", "/v1/exec", body, waitMs, signal);
         } catch (err) {
-          if (err instanceof SandboxError) err.wait = wait;
+          if (err instanceof SandboxError) {
+            err.wait = wait;
+            if (err.kind === "unknown") holdUntil = sentAt + waitMs;
+          }
           throw err;
         }
         if (res.status === 200 && isResult(res.body)) return { ...res.body, wait };
         const failure = this.failure(res.status, res.body);
-        // The executor refuses before it runs anything when it has no slot (its own limit, resident workers): safe
-        // to send again until the wait runs out.
-        if (failure.code !== "busy") throw Object.assign(failure, { wait });
+        // /v1/exec answers busy only from its EXECUTOR_MAX_CONCURRENCY semaphore, before it runs anything: safe to
+        // send again until the wait runs out. It happens when the limits are out of step, or while a command whose
+        // call ended without an answer still runs there.
+        if (failure.code !== "busy") {
+          if (failure.kind === "unknown") holdUntil = sentAt + waitMs;
+          throw Object.assign(failure, { wait });
+        }
         const delay = backoff / 2 + Math.random() * (backoff / 2);
-        if (Date.now() + delay > until) throw notRun("busy", `the executor stayed at its concurrency limit for ${Math.round(this.queueTimeoutMs / 1000)}s`);
-        if (!(await sleep(delay, signal))) throw notRun("aborted", "the execution was cancelled while waiting for a free slot");
+        if (Date.now() + delay > until) {
+          throw notRun("busy", `no free execution slot within ${Math.round(this.queueTimeoutMs / 1000)}s (the executor answered busy ${wait.busyRetries + 1} times)`);
+        }
+        if (!(await abortableSleep(delay, signal))) throw notRun("aborted", "the execution was cancelled while waiting for a free slot");
         wait.busyRetries++;
       }
     } finally {
-      this.slots.release();
+      const hold = holdUntil - Date.now();
+      if (hold > 0) setTimeout(() => this.slots.release(), hold).unref?.();
+      else this.slots.release();
     }
   }
 
@@ -202,22 +218,6 @@ export class DisabledSandbox implements Sandbox {
   async exec(): Promise<ExecResult> {
     throw new SandboxError("denied", "execution_disabled", "command execution is disabled (sandbox.backend is none)");
   }
-}
-
-/** Resolves true after `ms`, or false as soon as `signal` aborts. */
-function sleep(ms: number, signal?: AbortSignal): Promise<boolean> {
-  if (signal?.aborted) return Promise.resolve(false);
-  return new Promise((resolve) => {
-    const onAbort = () => {
-      clearTimeout(t);
-      resolve(false);
-    };
-    const t = setTimeout(() => {
-      signal?.removeEventListener("abort", onAbort);
-      resolve(true);
-    }, ms);
-    signal?.addEventListener("abort", onAbort, { once: true });
-  });
 }
 
 function isResult(v: unknown): v is ExecResult {

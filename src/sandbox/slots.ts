@@ -14,11 +14,6 @@ export class Slots {
     this.free = size;
   }
 
-  /** Holders plus waiters, for tests and logs. */
-  get pending(): number {
-    return this.size - this.free + this.waiters.length;
-  }
-
   /** Resolves once a slot is held; rejects with the {@link SlotWaitEnd} when `timeoutMs` passes or `signal` aborts first. */
   acquire(timeoutMs: number, signal?: AbortSignal): Promise<void> {
     if (signal?.aborted) return Promise.reject("aborted" satisfies SlotWaitEnd);
@@ -49,10 +44,11 @@ export class Slots {
     });
   }
 
-  /** Hands the slot to the longest waiter, or frees it. */
+  /** Hands the slot to the longest waiter, or frees it. Releasing more than was acquired is a bug: it throws. */
   release(): void {
     const next = this.waiters.shift();
-    if (next) next.grant();
-    else this.free = Math.min(this.size, this.free + 1);
+    if (next) return next.grant();
+    if (this.free >= this.size) throw new Error("slots: released more slots than were acquired");
+    this.free++;
   }
 }

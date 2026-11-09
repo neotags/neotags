@@ -288,7 +288,7 @@ const fileSchema = z.object({
       maxConcurrency: z.number().int().positive().default(4),
       // Longest wait for a slot; then the call fails as busy without running. The command's own deadline starts
       // only when it is sent.
-      queueTimeoutSec: z.number().positive().default(30),
+      queueTimeoutSec: z.number().positive().max(3600).default(30),
     })
     .prefault({}),
   // The OpenObserve AI assistant entry (docs/design/002-o2-gateway-contract.md): O2 forwards each chat turn here and

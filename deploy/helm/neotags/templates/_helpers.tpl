@@ -36,6 +36,9 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $sb := default dict $cfg.sandbox -}}
 {{- $_ := set $sb "backend" "local" -}}
 {{- $_ := set $sb "socket" (printf "%s/exec.sock" .Values.executor.socketDir) -}}
+{{- if lt (int .Values.executor.maxConcurrency) 1 -}}
+{{- fail "executor.maxConcurrency must be a positive integer" -}}
+{{- end -}}
 {{- $_ := set $sb "maxConcurrency" (int .Values.executor.maxConcurrency) -}}
 {{- $_ := set $cfg "sandbox" $sb -}}
 {{- end -}}

@@ -8,6 +8,7 @@ import {
 import { isTransientError, mergeBody } from "../agent/llm.js";
 import type { ChainStep } from "../agent/models.js";
 import type { Effort } from "../config/index.js";
+import { abortableSleep } from "../sleep.js";
 
 export interface ResilientStreamOptions {
   /** Abort and retry a request that sent nothing (no text, thinking or tool call) by then. */
@@ -38,16 +39,9 @@ export function effortOf(level: SimpleStreamOptions["reasoning"]): Effort {
   return level === "minimal" ? "low" : level === "xhigh" ? "max" : level;
 }
 
-const defaultSleep = (ms: number, signal?: AbortSignal) =>
-  new Promise<void>((resolve) => {
-    const done = () => {
-      clearTimeout(t);
-      signal?.removeEventListener("abort", done);
-      resolve();
-    };
-    const t = setTimeout(done, ms);
-    signal?.addEventListener("abort", done, { once: true });
-  });
+const defaultSleep = async (ms: number, signal?: AbortSignal): Promise<void> => {
+  await abortableSleep(ms, signal);
+};
 
 /**
  * Wraps the agent's stream function: retries a request that failed transiently or sent no first token in time

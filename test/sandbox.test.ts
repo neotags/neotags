@@ -19,6 +19,7 @@ import {
   skillExecTool,
   type Sandbox,
 } from "../src/sandbox/index.js";
+import { Slots } from "../src/sandbox/slots.js";
 import { SkillPackIndex, type SandboxSpec, type SkillPack } from "../src/tools/skillpacks.js";
 import { callTool, say, scripted, transcriptText } from "./fake-stream.js";
 
@@ -476,9 +477,81 @@ describe("LocalSandbox queueing (executor at its concurrency limit)", () => {
     expect(spanAttributes(out)).toEqual({ "neotags.sandbox.queue_ms": expect.any(Number), "neotags.sandbox.busy_retries": 1 });
   });
 
-  it("config: sandbox.maxConcurrency and queueTimeoutSec default to 4 and 30s", () => {
+  it("a failed call reports its wait too: run_skill_command returns the error with the span attributes", async () => {
+    const f = await slowExecutor(0, () => busy);
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, queueTimeoutMs: 60, busyBackoffMs: 10 }), index, log: memLog().log });
+    const tool = skillExecTool(ex, ["runner"], 200)!;
+    const out = await tool.execute("call-1", { pack: "runner", argv: ["example-cli"] } as never);
+    expect(out).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringContaining("did not run") }] });
+    expect(spanAttributes(out)).toEqual({ "neotags.sandbox.queue_ms": expect.any(Number), "neotags.sandbox.busy_retries": f.bodies.length - 1 });
+  });
+
+  it("a call that ended without an answer keeps its slot until its deadline: the executor may still run it", async () => {
+    // The first request is never answered and is cancelled after 30ms; its deadline is timeoutSec 0.1 + grace 0.1.
+    const dir = mkdtempSync(path.join(tmpdir(), "nt-exec-"));
+    const socketPath = path.join(dir, "exec.sock");
+    const sent: number[] = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        sent.push(Date.now());
+        if (sent.length === 1) return; // hangs
+        const body = JSON.parse(Buffer.concat(chunks).toString());
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(okResult(body.id)));
+      });
+    });
+    await new Promise<void>((r) => server.listen(socketPath, r));
+    cleanup.push(async () => {
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const quick = new SkillPackIndex(new Map([["runner", pack("runner", { ...spec, limits: { timeoutSec: 0.1 } })]]));
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath, maxConcurrency: 1, graceMs: 100 }), index: quick, log: memLog().log });
+    const ac = new AbortController();
+    const first = ex.exec({ pack: "runner", argv: ["example-cli"] }, { signal: ac.signal }).catch((e: unknown) => e);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const second = ex.exec({ pack: "runner", argv: ["example-cli"] });
+    setTimeout(() => ac.abort(), 30);
+    await expect(first).resolves.toMatchObject({ kind: "unknown", code: "aborted" });
+    await expect(second).resolves.toMatchObject({ exitCode: 0 });
+    expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190);
+  });
+
+  it("config: sandbox.maxConcurrency and queueTimeoutSec default to 4 and 30s; the wait is capped at an hour", () => {
     const cfg = loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y" });
     expect(cfg.sandbox).toMatchObject({ maxConcurrency: 4, queueTimeoutSec: 30 });
+    // setTimeout fires at once past 2^31-1 ms, so an over-long wait would mean no wait at all.
+    expect(() => loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", NEOTAGS_CONFIG: "f" }, () => "sandbox: { queueTimeoutSec: 99999999 }\n")).toThrow();
+  });
+});
+
+describe("Slots", () => {
+  it("grants in arrival order; a waiter that times out or is aborted leaves without taking a slot", async () => {
+    const s = new Slots(1);
+    await s.acquire(1000);
+    const order: string[] = [];
+    const ac = new AbortController();
+    const a = s.acquire(1000).then(() => order.push("a"));
+    const gone = s.acquire(1000, ac.signal).catch((why: unknown) => order.push(`b:${why}`));
+    const late = s.acquire(10).catch((why: unknown) => order.push(`c:${why}`));
+    const d = s.acquire(1000).then(() => order.push("d"));
+    ac.abort();
+    await gone;
+    await late;
+    s.release(); // to a
+    await a;
+    s.release(); // to d, skipping the two that left
+    await d;
+    expect(order).toEqual(["b:aborted", "c:timeout", "a", "d"]);
+  });
+
+  it("throws on a release without an acquire instead of handing out an extra slot", async () => {
+    const s = new Slots(2);
+    await s.acquire(10);
+    s.release();
+    expect(() => s.release()).toThrow(/more slots than were acquired/);
   });
 });
 

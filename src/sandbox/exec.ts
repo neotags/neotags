@@ -14,6 +14,11 @@ export const EXEC_TOOL = "run_skill_command";
 // The executor's request id pattern; other characters are replaced.
 const ID_CHARS = /[^A-Za-z0-9._:/-]/g;
 
+/** `execute_tool` span attributes of a call's wait for a slot, as tool result details. */
+function waitDetails(w: SlotWait | undefined) {
+  return w && { [SPAN_ATTRIBUTES]: { "neotags.sandbox.queue_ms": w.queueMs, "neotags.sandbox.busy_retries": w.busyRetries } };
+}
+
 /** Audit fields of a call's wait for a slot, when the backend queued it. */
 function waited(w: SlotWait | undefined): { queueMs?: number; busyRetries?: number } {
   return w ? { queueMs: w.queueMs, busyRetries: w.busyRetries } : {};
@@ -135,15 +140,22 @@ export function skillExecTool(executor: SkillExecutor, packs: readonly string[],
     parameters: params,
     executionMode: "sequential",
     execute: async (toolCallId, { pack, argv, stdin }, signal) => {
-      const r = await executor.exec({ id: `neotags/${toolCallId}`, pack, argv, ...(stdin !== undefined && { stdin }) }, { ...(signal && { signal }), packs });
+      let r: ExecResult;
+      try {
+        r = await executor.exec({ id: `neotags/${toolCallId}`, pack, argv, ...(stdin !== undefined && { stdin }) }, { ...(signal && { signal }), packs });
+      } catch (err) {
+        // The same error result the agent loop makes of a throw, plus the wait for the span (a busy timeout is
+        // exactly the call worth finding there).
+        if (!(err instanceof SandboxError)) throw err;
+        return { content: [{ type: "text", text: err.message }], details: waitDetails(err.wait), isError: true };
+      }
       const status = r.timedOut ? "timed out" : r.signal ? `killed by ${r.signal}` : `exit code ${r.exitCode}`;
       const parts = [`[${status}]`];
       if (r.stdout) parts.push(`stdout:\n${r.stdout}${r.truncated?.stdout ? "\n[stdout truncated by the executor]" : ""}`);
       if (r.stderr) parts.push(`stderr:\n${r.stderr}${r.truncated?.stderr ? "\n[stderr truncated by the executor]" : ""}`);
       const text = boundedOutput(parts.join("\n\n"), outputChars, "Narrow the command (filters, fewer rows) to see the rest.");
       // A non-zero exit is often an answer (grep: no match), so only a command that did not finish is an error.
-      const details = r.wait && { [SPAN_ATTRIBUTES]: { "neotags.sandbox.queue_ms": r.wait.queueMs, "neotags.sandbox.busy_retries": r.wait.busyRetries } };
-      return { content: [{ type: "text", text }], details, ...((r.timedOut || r.signal) && { isError: true }) };
+      return { content: [{ type: "text", text }], details: waitDetails(r.wait), ...((r.timedOut || r.signal) && { isError: true }) };
     },
   };
   return tool as AgentTool<any>;
