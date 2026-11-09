@@ -241,8 +241,9 @@ All settings are environment variables.
 
 ## Deploy as a sidecar
 
-The Helm chart doesn't add the executor yet. To run it as a sidecar of the
-neotags Pod, give it the following settings:
+The neotags Helm chart adds it with `executor.enabled: true` and every
+setting below (README "CI / deploy"). To run it as a sidecar of the neotags
+Pod in some other way, give it the following settings:
 
 - **Image:** this image, built for `linux/amd64` and `linux/arm64`.
 - **Pod user namespace:** `hostUsers: false` on the Pod. The Pod gets its own

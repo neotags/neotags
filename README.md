@@ -96,7 +96,13 @@ Run `make hooks` once after cloning: `.githooks/pre-commit` runs `gitleaks git -
 - `.github/workflows/ci.yml`: typecheck, tests, build, helm lint/template, docker build, gitleaks.
 - `.github/workflows/build-image.yml`: builds a multi-arch (amd64 + arm64) image on free GitHub-hosted runners and pushes it to GHCR (`ghcr.io/<owner>/<repo>`, tag `<git tag>-<sha7>`) with the built-in `GITHUB_TOKEN`; runs on push to `main` and manual dispatch; also reusable via `workflow_call`. Make the package public so the cluster pulls it without credentials.
 
-Deploy (manual): `helm upgrade --install neotags deploy/helm/neotags --set image.repository=ghcr.io/<owner>/<repo> --set image.tag=<tag> -f my-values.yaml`. The Secret `neotags-secrets` (SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY) must already exist in the namespace.
+Deploy (manual): `helm upgrade --install neotags deploy/helm/neotags --set image.repository=ghcr.io/<owner>/<repo> --set image.tag=<tag> -f my-values.yaml`. The Secret `neotags-secrets` (SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY; O2_AGENT_API_KEY and the MCP header values for agent runs) must already exist in the namespace. `deploy/helm/neotags/ci/full-values.yaml` shows every optional part switched on:
+
+- **O2 assistant** (`config.o2Gateway.enabled`): a container and Service port `o2` (3001), never on the Ingress. `networkPolicy.enabled` renders an ingress policy that lets only `networkPolicy.o2Gateway` (OpenObserve's namespace by default) reach it.
+- **Skill packs** (`skillPacks.configMap`, `skillPacks.items`): a ConfigMap made outside the chart, mounted read-only at `/etc/neotags/skills` (and at `/skills` in the executor); the chart sets `config.skillPacks.dir`.
+- **Executor sidecar** (`executor.enabled`, executor/README.md "Deploy as a sidecar"): its own image, non-root, read-only root filesystem, without the neotags Secret or a service account token (the Pod's token is mounted into the neotags container only, and EKS credential injection skips the sidecar). The Pod runs with `hostUsers: false` (Kubernetes 1.33+ with user namespaces on the nodes); the sidecar has `seccompProfile: Unconfined`, `procMount: Unmasked` and `EXECUTOR_REQUIRE_PROCFS=1`, so a Pod missing any of them refuses executions rather than running a weaker sandbox. The socket is shared on an `emptyDir` at `/run/executor` (`fsGroup` 65532); the chart sets `config.sandbox` to the local backend.
+- **Rollout**: `maxSurge: 1`, `maxUnavailable: 0`, and `terminationGracePeriodSeconds: 660`, which must exceed `config.agent.drainSec` (640) when the O2 gateway is on; the chart refuses to render otherwise.
+- **Traces**: `otel.endpoint`, `otel.serviceName`, `otel.resourceAttributes` set the standard `OTEL_*` variables; `config.telemetry.captureContent` decides whether content is recorded.
 
 ## License
 

@@ -10,3 +10,9 @@ spec:
     - name: http
       port: {{ .Values.service.port }}
       targetPort: http
+    {{- if include "neotags.o2Enabled" . }}
+    # In-cluster only: the Ingress routes /slack/events to the http port, never this one.
+    - name: o2
+      port: {{ .Values.service.o2Port }}
+      targetPort: o2
+    {{- end }}

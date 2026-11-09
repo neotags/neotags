@@ -22,3 +22,25 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if .Values.serviceAccount.create -}}{{ default (include "neotags.fullname" .) .Values.serviceAccount.name }}
 {{- else -}}{{ default "default" .Values.serviceAccount.name }}{{- end -}}
 {{- end }}
+
+{{/* The neotags config file: .Values.config plus what the chart owns (the skill pack dir, the sandbox backend). */}}
+{{- define "neotags.config" -}}
+{{- $cfg := deepCopy .Values.config -}}
+{{- if .Values.skillPacks.configMap -}}
+{{- $sp := default dict $cfg.skillPacks -}}
+{{- $_ := set $sp "dir" "/etc/neotags/skills" -}}
+{{- $_ := set $cfg "skillPacks" $sp -}}
+{{- end -}}
+{{- if .Values.executor.enabled -}}
+{{- $_ := set $cfg "sandbox" (dict "backend" "local" "socket" (printf "%s/exec.sock" .Values.executor.socketDir)) -}}
+{{- end -}}
+{{- toYaml $cfg -}}
+{{- end }}
+
+{{- define "neotags.o2Enabled" -}}
+{{- if and .Values.config.o2Gateway .Values.config.o2Gateway.enabled -}}true{{- end -}}
+{{- end }}
+
+{{- define "neotags.o2Port" -}}
+{{- (and .Values.config.o2Gateway .Values.config.o2Gateway.port) | default 3001 -}}
+{{- end }}
