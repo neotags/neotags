@@ -87,6 +87,8 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 # sandbox:                        # where skill-pack commands run (executor/README.md); nothing runs in this process
 #   backend: none                 # none (default): every execution is refused. local: the executor sidecar
 #   socket: /run/executor/exec.sock
+#   maxConcurrency: 4             # calls in flight; the executor's EXECUTOR_MAX_CONCURRENCY (the chart sets it)
+#   queueTimeoutSec: 30           # longest wait for a slot, then the call fails as busy (not run)
 telemetry:               # LLM traces over OTLP/HTTP (OpenObserve, Langfuse, an OTel collector): one trace per
   #                      # request, one span per LLM call with model, tokens, latency, retries. Off unless
   #                      # OTEL_EXPORTER_OTLP_TRACES_ENDPOINT (or OTEL_EXPORTER_OTLP_ENDPOINT) is set; auth via

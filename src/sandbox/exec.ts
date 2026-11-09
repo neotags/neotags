@@ -4,14 +4,25 @@ import { arr, obj, opt, str } from "@earendil-works/pi-schema";
 import type { Logger } from "pino";
 import type { Decision } from "../guardrails/policy.js";
 import { checkExec, execDecision } from "../guardrails/sandbox.js";
+import { SPAN_ATTRIBUTES } from "../agent/executed.js";
 import { boundedOutput, isObj } from "../guardrails/tools.js";
 import type { SkillPack, SkillPackIndex } from "../tools/skillpacks.js";
-import { SandboxError, type ExecEntry, type ExecResult, type Sandbox } from "./types.js";
+import { SandboxError, type ExecEntry, type ExecResult, type Sandbox, type SlotWait } from "./types.js";
 
 export const EXEC_TOOL = "run_skill_command";
 
 // The executor's request id pattern; other characters are replaced.
 const ID_CHARS = /[^A-Za-z0-9._:/-]/g;
+
+/** `execute_tool` span attributes of a call's wait for a slot, as tool result details. */
+function waitDetails(w: SlotWait | undefined) {
+  return w && { [SPAN_ATTRIBUTES]: { "neotags.sandbox.queue_ms": w.queueMs, "neotags.sandbox.busy_retries": w.busyRetries } };
+}
+
+/** Audit fields of a call's wait for a slot, when the backend queued it. */
+function waited(w: SlotWait | undefined): { queueMs?: number; busyRetries?: number } {
+  return w ? { queueMs: w.queueMs, busyRetries: w.busyRetries } : {};
+}
 
 export interface SkillExecutorOptions {
   sandbox: Sandbox;
@@ -76,8 +87,11 @@ export class SkillExecutor {
       const e = err instanceof SandboxError ? err : new SandboxError("unknown", "error", `${(err as Error).message}; the command may have run`);
       // An executor refusal can echo the request (file paths, env names), so only its code is kept; the other
       // messages are this client's own.
-      const reason = e.kind === "refused" ? undefined : e.message;
-      this.o.log.warn({ ...audit, ...declared, outcome: e.kind, code: e.code, ...(reason && { reason }), durationMs: Date.now() - started }, "sandbox exec failed");
+      const reason = e.kind === "refused" && e.code !== "busy" && e.code !== "aborted" ? undefined : e.message;
+      this.o.log.warn(
+        { ...audit, ...declared, outcome: e.kind, code: e.code, ...(reason && { reason }), ...waited(e.wait), durationMs: Date.now() - started },
+        "sandbox exec failed",
+      );
       throw e;
     }
     {
@@ -92,6 +106,7 @@ export class SkillExecutor {
           signal: r.signal,
           timedOut: r.timedOut,
           durationMs: r.durationMs,
+          ...waited(r.wait),
           ...(denied.length && { egressDenied: denied }),
           ...(injected.length && { injected }),
         },
@@ -125,14 +140,22 @@ export function skillExecTool(executor: SkillExecutor, packs: readonly string[],
     parameters: params,
     executionMode: "sequential",
     execute: async (toolCallId, { pack, argv, stdin }, signal) => {
-      const r = await executor.exec({ id: `neotags/${toolCallId}`, pack, argv, ...(stdin !== undefined && { stdin }) }, { ...(signal && { signal }), packs });
+      let r: ExecResult;
+      try {
+        r = await executor.exec({ id: `neotags/${toolCallId}`, pack, argv, ...(stdin !== undefined && { stdin }) }, { ...(signal && { signal }), packs });
+      } catch (err) {
+        // The same error result the agent loop makes of a throw, plus the wait for the span (a busy timeout is
+        // exactly the call worth finding there). exec() only throws SandboxErrors.
+        const e = err as SandboxError;
+        return { content: [{ type: "text", text: e.message }], details: waitDetails(e.wait), isError: true };
+      }
       const status = r.timedOut ? "timed out" : r.signal ? `killed by ${r.signal}` : `exit code ${r.exitCode}`;
       const parts = [`[${status}]`];
       if (r.stdout) parts.push(`stdout:\n${r.stdout}${r.truncated?.stdout ? "\n[stdout truncated by the executor]" : ""}`);
       if (r.stderr) parts.push(`stderr:\n${r.stderr}${r.truncated?.stderr ? "\n[stderr truncated by the executor]" : ""}`);
       const text = boundedOutput(parts.join("\n\n"), outputChars, "Narrow the command (filters, fewer rows) to see the rest.");
       // A non-zero exit is often an answer (grep: no match), so only a command that did not finish is an error.
-      return { content: [{ type: "text", text }], details: undefined, ...((r.timedOut || r.signal) && { isError: true }) };
+      return { content: [{ type: "text", text }], details: waitDetails(r.wait), ...((r.timedOut || r.signal) && { isError: true }) };
     },
   };
   return tool as AgentTool<any>;

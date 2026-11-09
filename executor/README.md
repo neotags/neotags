@@ -185,8 +185,16 @@ The endpoint can return these status codes:
 | --- | --- | --- |
 | 400 | `invalid_*`, `tool_not_declared` | The request fails validation |
 | 422 | `credential_unavailable` | A declared credential isn't configured in the executor |
-| 429 | `busy` | The executor is at `EXECUTOR_MAX_CONCURRENCY` |
+| 429 | `busy` | The executor is at `EXECUTOR_MAX_CONCURRENCY`; it ran nothing |
 | 503 | `sandbox_unavailable` | The startup self-check failed; the reason is in `message` |
+
+The executor does not queue: a request beyond its limit gets `429 busy` at
+once. neotags queues instead. It holds at most `sandbox.maxConcurrency` calls
+in flight (the chart sets it from `executor.maxConcurrency`), and the rest
+wait in arrival order. A `429 busy` it still gets is sent again with backoff.
+The wait is capped by `sandbox.queueTimeoutSec`; after that the call fails as
+`busy` and the command did not run. The command's own deadline starts only
+when the request is sent.
 
 ### `POST /v1/call`
 
@@ -233,7 +241,7 @@ All settings are environment variables.
 | `EXECUTOR_REQUIRE_PROCFS` | empty | `1` accepts only the strongest sandbox mode (private `/proc` and `--disable-userns`) and refuses execution otherwise |
 | `EXECUTOR_MAX_CONCURRENCY` | `4` | Concurrent `/v1/exec` calls |
 | `EXECUTOR_MAX_OUTPUT_BYTES` | `1048576` | Limit for each of stdout and stderr |
-| `EXECUTOR_DEFAULT_CPU`, `_MEM_MIB`, `_TIMEOUT_SEC` | `1`, `512`, `60` | Limits when a request omits them |
+| `EXECUTOR_DEFAULT_CPU`, `_MEM_MIB`, `_TIMEOUT_SEC` | `1`, `512`, `60` | Limits when a request omits them; each must be valid for a request (cpu and timeout above 0, mem at least 16) and not above its `EXECUTOR_MAX_*`, or the executor logs `config_invalid` and exits. Lowering a maximum below a default needs the default lowered too |
 | `EXECUTOR_MAX_CPU`, `_MEM_MIB`, `_TIMEOUT_SEC` | `4`, `4096`, `300` | Highest limits a request can ask for |
 | `EXECUTOR_WORKERS` | `0` | Resident worker count; `0` disables `/v1/call` |
 | `EXECUTOR_WORKER_ROOT` | `EXECUTOR_SKILLS_DIR` | Root for `/v1/call` entries |

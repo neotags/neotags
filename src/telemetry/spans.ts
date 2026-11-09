@@ -366,13 +366,17 @@ export class ToolSpans {
     if (t) t.denied = reason;
   }
 
-  /** `args`: the arguments that ran, when the tool changed the model's (the MCP tool guard's defaults). */
-  end(call: { id: string; isError: boolean; output: string; args?: unknown }): void {
+  /**
+   * `args`: the arguments that ran, when the tool changed the model's (the MCP tool guard's defaults).
+   * `attributes`: metadata the tool reported (no content), e.g. `neotags.sandbox.queue_ms`.
+   */
+  end(call: { id: string; isError: boolean; output: string; args?: unknown; attributes?: Attributes }): void {
     const t = this.open.get(call.id);
     if (!t) return;
     this.open.delete(call.id);
     guarded(() => {
       try {
+        if (call.attributes) t.span.setAttributes(call.attributes);
         if (this.o.captureContent) {
           if (call.args !== undefined) t.span.setAttribute("gen_ai.tool.call.arguments", recorded(JSON.stringify(call.args)));
           t.span.setAttribute("gen_ai.tool.call.result", recorded(call.output));

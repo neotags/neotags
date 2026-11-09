@@ -1,7 +1,9 @@
 import { request } from "node:http";
 import { isObj } from "../guardrails/tools.js";
 import type { SandboxSpec } from "../tools/skillpacks.js";
-import { SandboxError, type ExecEntry, type ExecResult, type Sandbox } from "./types.js";
+import { abortableSleep } from "../sleep.js";
+import { Slots } from "./slots.js";
+import { SandboxError, type ExecEntry, type ExecResult, type Sandbox, type SlotWait } from "./types.js";
 
 export interface LocalSandboxOptions {
   /** The executor sidecar's unix socket, shared through an emptyDir in the Pod. */
@@ -12,7 +14,18 @@ export interface LocalSandboxOptions {
   defaultTimeoutSec?: number;
   /** Largest response body; the executor caps stdout and stderr at 1 MiB each by default. */
   maxResponseBytes?: number;
+  /** Calls in flight at once: the executor's EXECUTOR_MAX_CONCURRENCY. More wait here, in arrival order. */
+  maxConcurrency?: number;
+  /**
+   * Longest wait for a slot, in this queue and retrying the executor's `429 busy`. Counted apart from the command's
+   * own deadline, which starts when the request is sent: a long wait must not leave the command less time.
+   */
+  queueTimeoutMs?: number;
+  /** First backoff after `429 busy`; doubles up to {@link BUSY_BACKOFF_MAX_MS}, with jitter. */
+  busyBackoffMs?: number;
 }
+
+const BUSY_BACKOFF_MAX_MS = 2000;
 
 /** Errors that mean nothing is listening (or allowed to connect) on the socket. */
 const DOWN = new Set(["ENOENT", "ECONNREFUSED", "EACCES", "ECONNRESET", "EPIPE", "ENOTSOCK"]);
@@ -29,11 +42,17 @@ export class LocalSandbox implements Sandbox {
   private graceMs: number;
   private defaultTimeoutSec: number;
   private maxResponseBytes: number;
+  private queueTimeoutMs: number;
+  private busyBackoffMs: number;
+  private slots: Slots;
 
   constructor(private o: LocalSandboxOptions) {
     this.graceMs = o.graceMs ?? 15_000;
     this.defaultTimeoutSec = o.defaultTimeoutSec ?? 300;
     this.maxResponseBytes = o.maxResponseBytes ?? 8 * 1024 * 1024;
+    this.queueTimeoutMs = o.queueTimeoutMs ?? 30_000;
+    this.busyBackoffMs = o.busyBackoffMs ?? 250;
+    this.slots = new Slots(o.maxConcurrency ?? 4);
   }
 
   async exec(entry: ExecEntry & { id: string }, constraints: SandboxSpec, signal?: AbortSignal): Promise<ExecResult> {
@@ -46,9 +65,64 @@ export class LocalSandbox implements Sandbox {
       constraints,
     };
     const waitMs = (constraints.limits?.timeoutSec ?? this.defaultTimeoutSec) * 1000 + this.graceMs;
-    const res = await this.call("POST", "/v1/exec", body, waitMs, signal);
-    if (res.status === 200 && isResult(res.body)) return res.body;
-    throw this.failure(res.status, res.body);
+    const started = Date.now();
+    const until = started + this.queueTimeoutMs;
+    const wait: SlotWait = { queueMs: 0, busyRetries: 0 };
+    // Nothing is sent before a slot is held, so any failure on the way is "did not run", never "unknown".
+    const notRun = (code: string, message: string) => {
+      wait.queueMs = Date.now() - started;
+      return Object.assign(new SandboxError("refused", code, `${message}; the command did not run`), { wait });
+    };
+    try {
+      await this.slots.acquire(this.queueTimeoutMs, signal);
+    } catch (why) {
+      if (why === "aborted") throw notRun("aborted", "the execution was cancelled while waiting for a free slot");
+      throw notRun("busy", `no free execution slot within ${Math.round(this.queueTimeoutMs / 1000)}s`);
+    }
+    // No answer (deadline, cancelled or broken after sending): the executor may still be running the command,
+    // which it does not stop when the client goes away, and holds its own slot until the command ends, at the
+    // latest when this call's deadline would have passed. It reports no in-flight count to release on sooner.
+    let holdUntil = 0;
+    try {
+      for (let backoff = this.busyBackoffMs; ; backoff = Math.min(backoff * 2, BUSY_BACKOFF_MAX_MS)) {
+        wait.queueMs = Date.now() - started;
+        const sentAt = Date.now();
+        let res: { status: number; body: unknown };
+        try {
+          res = await this.call("POST", "/v1/exec", body, waitMs, signal);
+        } catch (err) {
+          if (err instanceof SandboxError) {
+            err.wait = wait;
+            if (err.kind === "unknown") holdUntil = sentAt + waitMs;
+          }
+          throw err;
+        }
+        if (res.status === 200 && isResult(res.body)) return { ...res.body, wait };
+        const failure = this.failure(res.status, res.body);
+        // /v1/exec answers busy only from its EXECUTOR_MAX_CONCURRENCY semaphore, before it runs anything: safe to
+        // send again until the wait runs out. It happens when the limits are out of step, or while a command whose
+        // call ended without an answer still runs there.
+        // An answer, even a 500 or a broken result, means the executor is done with the request and its slot.
+        if (failure.code !== "busy") throw Object.assign(failure, { wait });
+        const delay = backoff / 2 + Math.random() * (backoff / 2);
+        if (Date.now() + delay > until) {
+          throw notRun("busy", `no free execution slot within ${Math.round(this.queueTimeoutMs / 1000)}s (the executor answered busy ${wait.busyRetries + 1} times)`);
+        }
+        if (!(await abortableSleep(delay, signal, { unref: true }))) throw notRun("aborted", "the execution was cancelled while waiting for a free slot");
+        wait.busyRetries++;
+      }
+    } finally {
+      const hold = holdUntil - Date.now();
+      if (hold <= 0) this.slots.release();
+      else {
+        setTimeout(() => {
+          // An accounting bug must not become an uncaught exception that ends every run in the process.
+          try {
+            this.slots.release();
+          } catch {}
+        }, hold).unref?.();
+      }
+    }
   }
 
   /** The executor's `/healthz`: whether per-call execution is available, and why not. */

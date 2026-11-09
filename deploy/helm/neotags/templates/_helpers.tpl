@@ -23,7 +23,7 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- else -}}{{ default "default" .Values.serviceAccount.name }}{{- end -}}
 {{- end }}
 
-{{/* The neotags config file: .Values.config plus what the chart owns (the skill pack dir, the sandbox backend). */}}
+{{/* The neotags config file: .Values.config plus what the chart owns (the skill pack dir, the sandbox backend and slots). */}}
 {{- define "neotags.config" -}}
 {{- $cfg := deepCopy .Values.config -}}
 {{- if .Values.skillPacks.configMap -}}
@@ -32,7 +32,15 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- $_ := set $cfg "skillPacks" $sp -}}
 {{- end -}}
 {{- if .Values.executor.enabled -}}
-{{- $_ := set $cfg "sandbox" (dict "backend" "local" "socket" (printf "%s/exec.sock" .Values.executor.socketDir)) -}}
+{{- /* Merged over config.sandbox (keeps e.g. queueTimeoutSec); the client's slots follow the executor's limit. */}}
+{{- $sb := default dict $cfg.sandbox -}}
+{{- $_ := set $sb "backend" "local" -}}
+{{- $_ := set $sb "socket" (printf "%s/exec.sock" .Values.executor.socketDir) -}}
+{{- if lt (int .Values.executor.maxConcurrency) 1 -}}
+{{- fail "executor.maxConcurrency must be a positive integer" -}}
+{{- end -}}
+{{- $_ := set $sb "maxConcurrency" (int .Values.executor.maxConcurrency) -}}
+{{- $_ := set $cfg "sandbox" $sb -}}
 {{- end -}}
 {{- toYaml $cfg -}}
 {{- end }}

@@ -1,9 +1,9 @@
-export { EXECUTED_ARGS, executedArgs } from "./executed.js";
+export { EXECUTED_ARGS, executedArgs, SPAN_ATTRIBUTES, spanAttributes } from "./executed.js";
 import { Agent, type AgentTool, type BeforeToolCallResult, type StreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Config, Effort } from "../config/index.js";
 import type { Decision } from "../guardrails/policy.js";
 import { endChatSpan, guarded, startChatSpan, ToolSpans, type ChatRequest } from "../telemetry/spans.js";
-import { executedArgs } from "./executed.js";
+import { executedArgs, spanAttributes } from "./executed.js";
 import { promptMessages } from "./message.js";
 import { createGateway, type Gateway } from "./models.js";
 
@@ -36,7 +36,8 @@ export function traceToolCalls(agent: Pick<Agent, "subscribe">, spans: ToolSpans
     if (ev.type === "tool_execution_start") spans.start({ id: ev.toolCallId, name: ev.toolName, args: ev.args });
     else if (ev.type === "tool_execution_end") {
       const args = executedArgs(ev.result);
-      spans.end({ id: ev.toolCallId, isError: ev.isError, output: toolOutput(ev.result), ...(args !== undefined && { args }) });
+      const attributes = spanAttributes(ev.result);
+      spans.end({ id: ev.toolCallId, isError: ev.isError, output: toolOutput(ev.result), ...(args !== undefined && { args }), ...(attributes && { attributes }) });
     }
     else if (ev.type === "agent_end") spans.closeAll("the agent stopped before the tool finished");
   });

@@ -3,6 +3,7 @@ import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { spanAttributes } from "../src/agent/index.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 import { checkExec } from "../src/guardrails/sandbox.js";
@@ -18,6 +19,7 @@ import {
   skillExecTool,
   type Sandbox,
 } from "../src/sandbox/index.js";
+import { Slots } from "../src/sandbox/slots.js";
 import { SkillPackIndex, type SandboxSpec, type SkillPack } from "../src/tools/skillpacks.js";
 import { callTool, say, scripted, transcriptText } from "./fake-stream.js";
 
@@ -171,7 +173,7 @@ describe("SkillExecutor", () => {
 
   it("is off by default: backend none refuses every execution and offers no tool", async () => {
     const cfg = loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y" });
-    expect(cfg.sandbox).toEqual({ backend: "none", socket: "/run/executor/exec.sock" });
+    expect(cfg.sandbox).toEqual({ backend: "none", socket: "/run/executor/exec.sock", maxConcurrency: 4, queueTimeoutSec: 30 });
     const { lines, log } = memLog();
     const ex = createSkillExecutor(cfg, index, log);
     expect(ex.enabled).toBe(false);
@@ -311,7 +313,7 @@ describe("LocalSandbox (executor over a unix socket)", () => {
         ? { status: 429, body: { error: { code: "busy", message: "executor is at its concurrency limit (4)" } } }
         : { status: 200, body: { hello: "world" } },
     );
-    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath }), index, log: memLog().log });
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, queueTimeoutMs: 50, busyBackoffMs: 10 }), index, log: memLog().log });
     await expect(ex.exec({ pack: "runner", argv: ["example-cli", "busy"] })).rejects.toMatchObject({ kind: "refused", code: "busy" });
     await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unknown", code: "invalid_response" });
   });
@@ -357,6 +359,208 @@ describe("LocalSandbox (executor over a unix socket)", () => {
     const f = await fakeExecutor(() => ({ status: 200, body: { exec: { available: true, mode: "procfs=on, disable-userns=on" } } }));
     await expect(new LocalSandbox({ socketPath: f.socketPath }).health()).resolves.toMatchObject({ exec: { available: true } });
     expect(f.bodies[0]).toMatchObject({ method: "GET", url: "/healthz" });
+  });
+});
+
+/** A fake executor that answers after `delayMs`, records the bodies, and tracks how many calls were in flight at once. */
+async function slowExecutor(delayMs: number, answer: (body: unknown, n: number) => { status: number; body: unknown } = (b) => ({ status: 200, body: okResult((b as { id: string }).id) })) {
+  const dir = mkdtempSync(path.join(tmpdir(), "nt-exec-"));
+  const socketPath = path.join(dir, "exec.sock");
+  const bodies: unknown[] = [];
+  const stats = { inFlight: 0, maxInFlight: 0 };
+  const timers: NodeJS.Timeout[] = [];
+  const server: Server = createServer((req, res) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (c: Buffer) => chunks.push(c));
+    req.on("end", () => {
+      const body = JSON.parse(Buffer.concat(chunks).toString());
+      bodies.push(body);
+      const a = answer(body, bodies.length);
+      stats.inFlight++;
+      stats.maxInFlight = Math.max(stats.maxInFlight, stats.inFlight);
+      timers.push(
+        setTimeout(() => {
+          stats.inFlight--;
+          res.writeHead(a.status, { "content-type": "application/json" }).end(JSON.stringify(a.body));
+        }, a.status === 429 ? 0 : delayMs),
+      );
+    });
+  });
+  await new Promise<void>((r) => server.listen(socketPath, r));
+  cleanup.push(async () => {
+    timers.forEach(clearTimeout);
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
+    rmSync(dir, { recursive: true, force: true });
+  });
+  return { socketPath, bodies, stats };
+}
+
+const busy = { status: 429, body: { error: { code: "busy", message: "executor is at its concurrency limit (2)" } } };
+
+describe("LocalSandbox queueing (executor at its concurrency limit)", () => {
+  it("queues calls beyond maxConcurrency in this process; they all run, never more than the limit at once", async () => {
+    const f = await slowExecutor(60);
+    const { lines, log } = memLog();
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, maxConcurrency: 2 }), index, log });
+    const results = await Promise.all(Array.from({ length: 5 }, (_, i) => ex.exec({ id: `c${i}`, pack: "runner", argv: ["example-cli"] })));
+    expect(results.map((r) => r.exitCode)).toEqual([0, 0, 0, 0, 0]);
+    expect(f.bodies).toHaveLength(5);
+    expect(f.stats.maxInFlight).toBe(2);
+    const queued = lines.map((l) => l.obj.queueMs as number);
+    expect(queued.filter((ms) => ms >= 50)).toHaveLength(3);
+    expect(lines.every((l) => l.obj.outcome === "ran" && l.obj.busyRetries === 0)).toBe(true);
+  });
+
+  it("sends again after the executor's 429 busy (it ran nothing), and audits the retry", async () => {
+    const f = await slowExecutor(0, (b, n) => (n === 1 ? busy : { status: 200, body: okResult((b as { id: string }).id) }));
+    const { lines, log } = memLog();
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, busyBackoffMs: 10 }), index, log });
+    const r = await ex.exec({ pack: "runner", argv: ["example-cli"] });
+    expect(r.exitCode).toBe(0);
+    expect(r.wait).toMatchObject({ busyRetries: 1 });
+    expect(f.bodies).toHaveLength(2);
+    expect(lines[0]!.obj).toMatchObject({ outcome: "ran", busyRetries: 1, queueMs: expect.any(Number) });
+  });
+
+  it("an executor that stays busy past queueTimeoutMs fails as busy and not run, never as unknown", async () => {
+    const f = await slowExecutor(0, () => busy);
+    const { lines, log } = memLog();
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, queueTimeoutMs: 150, busyBackoffMs: 10 }), index, log });
+    const started = Date.now();
+    const err = await ex.exec({ pack: "runner", argv: ["example-cli"] }).catch((e: unknown) => e);
+    expect(err).toMatchObject({ kind: "refused", code: "busy", message: expect.stringContaining("did not run") });
+    expect(Date.now() - started).toBeLessThan(1000);
+    expect(f.bodies.length).toBeGreaterThan(1);
+    expect(lines[0]!.obj).toMatchObject({ outcome: "refused", code: "busy", reason: expect.stringContaining("did not run"), busyRetries: f.bodies.length - 1 });
+  });
+
+  it("a call still waiting for a local slot after queueTimeoutMs is refused as busy without being sent", async () => {
+    const f = await slowExecutor(300);
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, maxConcurrency: 1, queueTimeoutMs: 50 }), index, log: memLog().log });
+    const first = ex.exec({ pack: "runner", argv: ["example-cli"] });
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "refused", code: "busy", message: expect.stringContaining("no free execution slot") });
+    await expect(first).resolves.toMatchObject({ exitCode: 0 });
+    expect(f.bodies).toHaveLength(1);
+  });
+
+  it("a run cancelled while its call waits for a slot leaves the queue at once, and nothing is sent", async () => {
+    const f = await slowExecutor(300);
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, maxConcurrency: 1 }), index, log: memLog().log });
+    const first = ex.exec({ pack: "runner", argv: ["example-cli"] });
+    const ac = new AbortController();
+    const second = ex.exec({ pack: "runner", argv: ["example-cli"] }, { signal: ac.signal });
+    setTimeout(() => ac.abort(), 30);
+    const started = Date.now();
+    await expect(second).rejects.toMatchObject({ kind: "refused", code: "aborted", message: expect.stringContaining("did not run") });
+    expect(Date.now() - started).toBeLessThan(200);
+    await first;
+    expect(f.bodies).toHaveLength(1);
+  });
+
+  it("the wait for a slot does not eat into the command's own deadline", async () => {
+    // Each command answers in 150ms; the deadline is timeoutSec 0.1 + grace 0.1 = 200ms. The second call waits 150ms
+    // for the first, so a shared deadline would give up on it (unknown) after 50ms of running.
+    const f = await slowExecutor(150);
+    const quick = new SkillPackIndex(new Map([["runner", pack("runner", { ...spec, limits: { timeoutSec: 0.1 } })]]));
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, maxConcurrency: 1, graceMs: 100 }), index: quick, log: memLog().log });
+    const [a, b] = await Promise.all([ex.exec({ pack: "runner", argv: ["example-cli"] }), ex.exec({ pack: "runner", argv: ["example-cli"] })]);
+    expect([a.exitCode, b.exitCode]).toEqual([0, 0]);
+    expect(b.wait!.queueMs).toBeGreaterThanOrEqual(140);
+  });
+
+  it("run_skill_command reports the wait as execute_tool span attributes", async () => {
+    const f = await slowExecutor(0, (b, n) => (n === 1 ? busy : { status: 200, body: okResult((b as { id: string }).id) }));
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, busyBackoffMs: 10 }), index, log: memLog().log });
+    const tool = skillExecTool(ex, ["runner"], 200)!;
+    const out = await tool.execute("call-1", { pack: "runner", argv: ["example-cli"] } as never);
+    expect(spanAttributes(out)).toEqual({ "neotags.sandbox.queue_ms": expect.any(Number), "neotags.sandbox.busy_retries": 1 });
+  });
+
+  it("a failed call reports its wait too: run_skill_command returns the error with the span attributes", async () => {
+    const f = await slowExecutor(0, () => busy);
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, queueTimeoutMs: 60, busyBackoffMs: 10 }), index, log: memLog().log });
+    const tool = skillExecTool(ex, ["runner"], 200)!;
+    const out = await tool.execute("call-1", { pack: "runner", argv: ["example-cli"] } as never);
+    expect(out).toMatchObject({ isError: true, content: [{ type: "text", text: expect.stringContaining("did not run") }] });
+    expect(spanAttributes(out)).toEqual({ "neotags.sandbox.queue_ms": expect.any(Number), "neotags.sandbox.busy_retries": f.bodies.length - 1 });
+  });
+
+  it("a call that ended without an answer keeps its slot until its deadline: the executor may still run it", async () => {
+    // The first request is never answered and is cancelled after 30ms; its deadline is timeoutSec 0.1 + grace 0.1.
+    const dir = mkdtempSync(path.join(tmpdir(), "nt-exec-"));
+    const socketPath = path.join(dir, "exec.sock");
+    const sent: number[] = [];
+    const server = createServer((req, res) => {
+      const chunks: Buffer[] = [];
+      req.on("data", (c: Buffer) => chunks.push(c));
+      req.on("end", () => {
+        sent.push(Date.now());
+        if (sent.length === 1) return; // hangs
+        const body = JSON.parse(Buffer.concat(chunks).toString());
+        res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(okResult(body.id)));
+      });
+    });
+    await new Promise<void>((r) => server.listen(socketPath, r));
+    cleanup.push(async () => {
+      server.closeAllConnections();
+      await new Promise((r) => server.close(r));
+      rmSync(dir, { recursive: true, force: true });
+    });
+    const quick = new SkillPackIndex(new Map([["runner", pack("runner", { ...spec, limits: { timeoutSec: 0.1 } })]]));
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath, maxConcurrency: 1, graceMs: 100 }), index: quick, log: memLog().log });
+    const ac = new AbortController();
+    const first = ex.exec({ pack: "runner", argv: ["example-cli"] }, { signal: ac.signal }).catch((e: unknown) => e);
+    await vi.waitFor(() => expect(sent).toHaveLength(1));
+    const second = ex.exec({ pack: "runner", argv: ["example-cli"] });
+    setTimeout(() => ac.abort(), 30);
+    await expect(first).resolves.toMatchObject({ kind: "unknown", code: "aborted" });
+    await expect(second).resolves.toMatchObject({ exitCode: 0 });
+    expect(sent[1]! - sent[0]!).toBeGreaterThanOrEqual(190);
+  });
+
+  it("an answer, even a 500, frees the slot at once: only a call without an answer keeps it", async () => {
+    const f = await slowExecutor(0, (b, n) => (n === 1 ? { status: 500, body: { error: { code: "internal_error", message: "boom" } } } : { status: 200, body: okResult((b as { id: string }).id) }));
+    const ex = new SkillExecutor({ sandbox: new LocalSandbox({ socketPath: f.socketPath, maxConcurrency: 1 }), index, log: memLog().log });
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).rejects.toMatchObject({ kind: "unknown", code: "internal_error" });
+    const started = Date.now();
+    await expect(ex.exec({ pack: "runner", argv: ["example-cli"] })).resolves.toMatchObject({ exitCode: 0 });
+    expect(Date.now() - started).toBeLessThan(1000);
+  });
+
+  it("config: sandbox.maxConcurrency and queueTimeoutSec default to 4 and 30s; the wait is capped at an hour", () => {
+    const cfg = loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y" });
+    expect(cfg.sandbox).toMatchObject({ maxConcurrency: 4, queueTimeoutSec: 30 });
+    // setTimeout fires at once past 2^31-1 ms, so an over-long wait would mean no wait at all.
+    expect(() => loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", NEOTAGS_CONFIG: "f" }, () => "sandbox: { queueTimeoutSec: 99999999 }\n")).toThrow();
+  });
+});
+
+describe("Slots", () => {
+  it("grants in arrival order; a waiter that times out or is aborted leaves without taking a slot", async () => {
+    const s = new Slots(1);
+    await s.acquire(1000);
+    const order: string[] = [];
+    const ac = new AbortController();
+    const a = s.acquire(1000).then(() => order.push("a"));
+    const gone = s.acquire(1000, ac.signal).catch((why: unknown) => order.push(`b:${why}`));
+    const late = s.acquire(10).catch((why: unknown) => order.push(`c:${why}`));
+    const d = s.acquire(1000).then(() => order.push("d"));
+    ac.abort();
+    await gone;
+    await late;
+    s.release(); // to a
+    await a;
+    s.release(); // to d, skipping the two that left
+    await d;
+    expect(order).toEqual(["b:aborted", "c:timeout", "a", "d"]);
+  });
+
+  it("throws on a release without an acquire instead of handing out an extra slot", async () => {
+    const s = new Slots(2);
+    await s.acquire(10);
+    s.release();
+    expect(() => s.release()).toThrow(/more slots than were acquired/);
   });
 });
 

@@ -3,7 +3,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { SpanStatusCode, trace, TraceFlags } from "@opentelemetry/api";
 import { InMemorySpanExporter, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { beforeEach, describe, expect, it } from "vitest";
-import { traceToolCalls } from "../src/agent/index.js";
+import { SPAN_ATTRIBUTES, traceToolCalls } from "../src/agent/index.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 import { RunManager } from "../src/runs/manager.js";
@@ -102,6 +102,20 @@ describe("agent run traces", () => {
   beforeEach(async () => {
     await telemetry.flush();
     exporter.reset();
+  });
+
+  it("puts the neotags.* attributes a tool reports in its result details on its execute_tool span, and nothing else", async () => {
+    const reporting: AgentTool<any> = {
+      ...search,
+      execute: async () => ({
+        content: [{ type: "text", text: "rows: 3" }],
+        details: { [SPAN_ATTRIBUTES]: { "neotags.sandbox.queue_ms": 42, "neotags.sandbox.busy_retries": 1, "gen_ai.usage.input_tokens": 9, "neotags.bad": { x: 1 } } },
+      }),
+    };
+    const { tools } = await run([callTool("o2__SearchSQL", { sql: "SELECT 1" }, "call-1"), say("draft"), say("final")], { runner: { tools: [reporting] } });
+    expect(tools[0]!.attributes).toMatchObject({ "neotags.sandbox.queue_ms": 42, "neotags.sandbox.busy_retries": 1 });
+    expect(tools[0]!.attributes).not.toHaveProperty("gen_ai.usage.input_tokens");
+    expect(tools[0]!.attributes).not.toHaveProperty("neotags.bad");
   });
 
   it("makes one invoke_agent per run with a chat span per request and an execute_tool span per call", async () => {
