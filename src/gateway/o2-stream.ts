@@ -1,6 +1,6 @@
 import type { ServerResponse } from "node:http";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
+import { obj } from "@earendil-works/pi-schema";
 import type { Logger } from "pino";
 import type { AnswerLang } from "../lang.js";
 import type { RunHandle, RunObserver, RunResult } from "../runs/index.js";
@@ -118,7 +118,7 @@ export class O2Turn {
 
   /** This turn's navigation tool: queues opening the last current-org SearchSQL, sent right before `complete`. */
   navigationTool(): AgentTool<any> {
-    const params = Type.Object({});
+    const params = obj({});
     return {
       name: NAVIGATE_TOOL,
       label: "Open the query in O2",

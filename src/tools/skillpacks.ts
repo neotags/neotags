@@ -1,7 +1,7 @@
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
 import path from "node:path";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
+import { obj, str } from "@earendil-works/pi-schema";
 import { parse } from "yaml";
 import { z } from "zod";
 
@@ -258,7 +258,7 @@ const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], de
 /** read_skill / read_skill_ref over the loaded index. Unknown names fail with the list of what exists. */
 export function skillPackTools(index: SkillPackIndex): AgentTool<any>[] {
   const withBody = () => index.list().filter((p) => p.body !== undefined).map((p) => p.name);
-  const readSkillParams = Type.Object({ name: Type.String({ description: "Skill pack name" }) });
+  const readSkillParams = obj({ name: str({ description: "Skill pack name" }) });
   const readSkill: AgentTool<typeof readSkillParams> = {
     name: "read_skill",
     label: "Read skill pack",
@@ -271,9 +271,9 @@ export function skillPackTools(index: SkillPackIndex): AgentTool<any>[] {
       return text(body);
     },
   };
-  const readRefParams = Type.Object({
-    name: Type.String({ description: "Skill pack name" }),
-    file: Type.String({ description: "Reference file, relative to the pack's references/" }),
+  const readRefParams = obj({
+    name: str({ description: "Skill pack name" }),
+    file: str({ description: "Reference file, relative to the pack's references/" }),
   });
   const readRef: AgentTool<typeof readRefParams> = {
     name: "read_skill_ref",

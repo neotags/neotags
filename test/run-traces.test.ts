@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { obj, str } from "@earendil-works/pi-schema";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { SpanStatusCode, trace, TraceFlags } from "@opentelemetry/api";
 import { InMemorySpanExporter, type ReadableSpan } from "@opentelemetry/sdk-trace";
@@ -47,7 +47,7 @@ const search: AgentTool<any> = {
   name: "o2__SearchSQL",
   label: "search",
   description: "run SQL",
-  parameters: Type.Object({ sql: Type.String() }),
+  parameters: obj({ sql: str() }),
   execute: async () => ({ content: [{ type: "text", text: `rows: 3; header ${BEARER}` }], details: undefined }),
 };
 

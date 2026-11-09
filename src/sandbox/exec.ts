@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
-import { Type } from "@earendil-works/pi-ai";
+import { arr, obj, opt, str } from "@earendil-works/pi-schema";
 import type { Logger } from "pino";
 import type { Decision } from "../guardrails/policy.js";
 import { checkExec, execDecision } from "../guardrails/sandbox.js";
@@ -111,10 +111,10 @@ export function skillExecTool(executor: SkillExecutor, packs: readonly string[],
   const runnable = executor.runnable(packs);
   if (runnable.length === 0) return undefined;
   const listed = runnable.map((p) => `${p.name} (${p.sandbox!.tools.join(", ")})`);
-  const params = Type.Object({
-    pack: Type.String({ description: "Skill pack whose instructions call for the command" }),
-    argv: Type.Array(Type.String(), { minItems: 1, description: "Command and arguments; argv[0] is one of the pack's tools" }),
-    stdin: Type.Optional(Type.String({ description: "Standard input" })),
+  const params = obj({
+    pack: str({ description: "Skill pack whose instructions call for the command" }),
+    argv: arr(str(), { minItems: 1, description: "Command and arguments; argv[0] is one of the pack's tools" }),
+    stdin: opt(str({ description: "Standard input" })),
   });
   const tool: AgentTool<typeof params> = {
     name: EXEC_TOOL,

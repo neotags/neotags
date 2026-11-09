@@ -1,5 +1,4 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
-import type { TSchema } from "@earendil-works/pi-ai";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
@@ -173,7 +172,7 @@ export class McpHub {
       name: full,
       label: t.title ?? t.annotations?.title ?? t.name,
       description: t.description ?? "",
-      parameters: { ...schema, type: "object" } as unknown as TSchema,
+      parameters: { ...schema, type: "object" },
       executionMode: "parallel",
       prepareArguments: (args: unknown) => this.o.guard.prepare(full, args) as never,
       execute: (_id, params, signal) => this.call(s, t.name, params, signal),
