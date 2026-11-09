@@ -24,16 +24,38 @@ import { redact } from "../tools/redact.js";
 const tracer = trace.getTracer("neotags");
 const NOOP_SPAN = trace.wrapSpanContext(INVALID_SPAN_CONTEXT);
 
+/** What every span of a task or run repeats from its root: the conversation and the agent (entry). */
+export interface TraceScope {
+  conversation?: string;
+  /** The entry (o2, slack, job). */
+  agent?: string;
+}
+
 /**
- * The conversation of the task or run in progress. OpenObserve's session list sums tokens over the spans that carry
- * `gen_ai.conversation.id`, so every chat and tool span repeats it, not only the root.
+ * The scope of the task or run in progress. OpenObserve reads each span on its own: its session list sums tokens over
+ * the spans that carry `gen_ai.conversation.id`, and its agent registry and agent graph take the agent from the span
+ * itself (a tool or model span without one is an orphan). So every chat and tool span repeats both, not only the root.
  */
-const CONVERSATION = createContextKey("neotags.conversation");
-const conversationOf = (ctx: Context = context.active()) => ctx.getValue(CONVERSATION) as string | undefined;
-const conversationAttrs = (ctx?: Context): Attributes => {
-  const id = conversationOf(ctx);
-  return id ? { "gen_ai.conversation.id": id } : {};
+const SCOPE = createContextKey("neotags.scope");
+const scopeAttrs = (ctx: Context = context.active()): Attributes => {
+  const s = ctx.getValue(SCOPE) as TraceScope | undefined;
+  return {
+    ...(s?.conversation && { "gen_ai.conversation.id": s.conversation }),
+    ...(s?.agent && agentAttrs(s.agent)),
+  };
 };
+/** Fields `scope` leaves out (or undefined) are inherited from the enclosing scope. */
+const withScope = (ctx: Context, scope: TraceScope | undefined): Context => {
+  if (!scope) return ctx;
+  const outer = ctx.getValue(SCOPE) as TraceScope | undefined;
+  return ctx.setValue(SCOPE, { conversation: scope.conversation ?? outer?.conversation, agent: scope.agent ?? outer?.agent });
+};
+
+/**
+ * Agent identity. The id is the entry, like the name, never the bot name: that is a display name (configuration),
+ * and renaming the bot would split one agent's history in two.
+ */
+export const agentAttrs = (entry: string): Attributes => ({ "gen_ai.agent.name": entry, "gen_ai.agent.id": entry });
 
 let reported = false;
 /**
@@ -54,16 +76,15 @@ export function guarded<T>(fn: () => T, fallback: T): T {
 
 /**
  * Run `fn` in an active span (so LLM calls inside it become children); errors mark the span failed and rethrow.
- * `conversation` (the root's `gen_ai.conversation.id`) is passed on to the spans inside.
+ * `scope` (the root's conversation and agent) is passed on to the spans inside.
  */
 export async function inSpan<T>(
   name: string,
   attributes: Attributes,
   fn: (span: Span) => Promise<T>,
-  conversation?: string,
+  scope?: TraceScope,
 ): Promise<T> {
-  const ctx = conversation ? context.active().setValue(CONVERSATION, conversation) : context.active();
-  return tracer.startActiveSpan(name, { attributes }, ctx, async (span) => {
+  return tracer.startActiveSpan(name, { attributes }, withScope(context.active(), scope), async (span) => {
     try {
       return await fn(span);
     } catch (err) {
@@ -144,7 +165,7 @@ function chatSpan(req: ChatRequest): Span {
     ...(req.maxTokens !== undefined && { "gen_ai.request.max_tokens": req.maxTokens }),
     ...(req.temperature !== undefined && { "gen_ai.request.temperature": req.temperature }),
     ...(req.json && { "gen_ai.output.type": "json" }),
-    ...conversationAttrs(),
+    ...scopeAttrs(),
   };
   if (req.captureContent) {
     const messages = typeof req.messages === "function" ? req.messages() : req.messages;
@@ -196,14 +217,18 @@ function closeChatSpan(span: Span, outcome: ChatOutcome) {
   if (msg.stopReason === "error" || msg.stopReason === "aborted") fail(span, msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`);
 }
 
-/** Run `fn` with `span` as the active span, so the spans started inside it are its children (and share its conversation). */
-export function withSpan<T>(span: Span, fn: () => T, conversation?: string): T {
+/**
+ * Run `fn` with `span` as the active span, so the spans started inside it are its children (and share its scope).
+ * `scope` replaces the active one rather than adding to it: a queued run starts in the context of the work that
+ * finished before it, and must not pick up that work's conversation or agent.
+ */
+export function withSpan<T>(span: Span, fn: () => T, scope?: TraceScope): T {
   const ctx = trace.setSpan(context.active(), span);
-  return context.with(conversation ? ctx.setValue(CONVERSATION, conversation) : ctx, fn);
+  return context.with(scope ? ctx.setValue(SCOPE, scope) : ctx, fn);
 }
 
 export interface AgentRunSpan {
-  /** Entry the run came from (o2, slack, job): `gen_ai.agent.name`, so entries can be told apart. */
+  /** Entry the run came from (o2, slack, job): `gen_ai.agent.name` and `.id`, so entries can be told apart. */
   agent: string;
   botName?: string;
   runId: string;
@@ -247,7 +272,7 @@ export function startRunSpan(run: AgentRunSpan): Span {
         ...(caller.link && { links: [{ context: caller.link }] }),
         attributes: {
           "gen_ai.operation.name": "invoke_agent",
-          "gen_ai.agent.name": run.agent,
+          ...agentAttrs(run.agent),
           ...(run.botName && { "neotags.bot.name": run.botName }),
           "neotags.run.id": run.runId,
           "gen_ai.conversation.id": run.sessionId,
@@ -327,7 +352,7 @@ export class ToolSpans {
         "gen_ai.tool.name": call.name,
         "gen_ai.tool.call.id": call.id,
         "gen_ai.tool.type": "function",
-        ...conversationAttrs(this.o.parent),
+        ...scopeAttrs(this.o.parent),
       };
       if (this.o.captureContent) attributes["gen_ai.tool.call.arguments"] = recorded(JSON.stringify(call.args ?? null));
       const span = tracer.startSpan(`execute_tool ${call.name}`, { kind: SpanKind.INTERNAL, attributes }, this.o.parent ?? context.active());

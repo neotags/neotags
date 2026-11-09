@@ -6,7 +6,7 @@ import type { LlmClient } from "../agent/llm.js";
 import { sharedFiles } from "../skills/kb-files/collect.js";
 import type { Skill, SkillAction, SkillContext } from "../skills/types.js";
 import type { Notifier, Task } from "../task.js";
-import { inSpan } from "../telemetry/spans.js";
+import { agentAttrs, inSpan } from "../telemetry/spans.js";
 
 const decisionSchema = z.object({
   skill: z.string(),
@@ -110,7 +110,7 @@ export class Router {
       `invoke_agent ${task.source}`,
       {
         "gen_ai.operation.name": "invoke_agent",
-        "gen_ai.agent.name": task.source,
+        ...agentAttrs(task.source),
         "neotags.bot.name": this.d.botName,
         "neotags.task.id": task.id,
         "neotags.task.source": task.source,
@@ -120,7 +120,7 @@ export class Router {
         ...(session && { "gen_ai.conversation.id": session, "session.id": session }),
       },
       (span) => this.route(task, (skill) => span.setAttribute("neotags.skill", skill)),
-      session || undefined,
+      { conversation: session || undefined, agent: task.source },
     );
   }
 
