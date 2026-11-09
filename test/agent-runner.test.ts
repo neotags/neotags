@@ -1,4 +1,4 @@
-import { Type } from "@earendil-works/pi-ai";
+import { obj, str } from "@earendil-works/pi-schema";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { describe, expect, it } from "vitest";
 import { createGateway } from "../src/agent/models.js";
@@ -154,7 +154,7 @@ describe("PiAgentRunner", () => {
       name: "o2__SearchSQL",
       label: "search",
       description: "search",
-      parameters: Type.Object({ sql: Type.String() }),
+      parameters: obj({ sql: str() }),
       execute: async () => ({ content: [{ type: "text", text: "rows" }], details: undefined }),
     };
     const { runner } = setup(

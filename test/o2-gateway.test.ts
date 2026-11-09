@@ -1,7 +1,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
-import { Type } from "@earendil-works/pi-ai";
+import { obj } from "@earendil-works/pi-schema";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Logger } from "pino";
 import { afterEach, describe, expect, it } from "vitest";
@@ -117,7 +117,7 @@ function mcpTool(name: string, output: string, ran?: (args: Record<string, unkno
     name,
     label: name,
     description: name,
-    parameters: Type.Object({}, { additionalProperties: true }),
+    parameters: obj({}, { open: true }),
     execute: async (_id, args) => ({ content: [{ type: "text", text: output }], details: { [EXECUTED_ARGS]: ran ? ran(args as Record<string, unknown>) : args } }),
   };
 }
