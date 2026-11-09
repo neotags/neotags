@@ -1,12 +1,22 @@
 {{- $o2 := include "neotags.o2Enabled" . -}}
 {{- $exec := .Values.executor -}}
 {{- $grace := include "neotags.grace" . -}}
-{{- $drain := 640.0 -}}
-{{- if and .Values.config.agent .Values.config.agent.drainSec -}}{{- $drain = float64 .Values.config.agent.drainSec -}}{{- end -}}
 {{- /* After the drain the process still closes the O2 server and MCP and flushes traces (up to 5 s): keep a margin. */}}
-{{- $need := addf (ceil $drain) 15 -}}
+{{- $need := addf (ceil (float64 (include "neotags.drainSec" .))) 15 -}}
 {{- if and $o2 (lt (float64 $grace) $need) -}}
 {{- fail (printf "terminationGracePeriodSeconds (%s) must be at least config.agent.drainSec + 15 (%.0f) so agent runs can finish on shutdown" $grace $need) -}}
+{{- end -}}
+{{- $packs := and .Values.config.skillPacks .Values.config.skillPacks.packs -}}
+{{- if and $packs (not .Values.skillPacks.configMap) -}}
+{{- fail "config.skillPacks.packs is set but skillPacks.configMap is not: the packs would not be mounted, and runs would start without them" -}}
+{{- end -}}
+{{- if and $exec.enabled $exec.resources.limits $exec.resources.limits.memory -}}
+{{- /* Every sandboxed command runs inside the sidecar's limit: past it the kernel kills the sidecar, not the command. */}}
+{{- $want := addf (mulf (float64 $exec.maxConcurrency) (float64 $exec.maxMemMib)) 256 -}}
+{{- $have := float64 (include "neotags.mib" $exec.resources.limits.memory) -}}
+{{- if gt $want $have -}}
+{{- fail (printf "executor.maxConcurrency x executor.maxMemMib + 256Mi (%.0fMi) is over executor.resources.limits.memory (%s): one command could get the whole sidecar killed" $want (toString $exec.resources.limits.memory)) -}}
+{{- end -}}
 {{- end -}}
 {{- $annotations := deepCopy (default dict .Values.podAnnotations) -}}
 {{- if $exec.enabled -}}
@@ -116,8 +126,13 @@ spec:
             - { name: executor-run, mountPath: {{ $exec.socketDir }} }
             - { name: sa-token, mountPath: /var/run/secrets/kubernetes.io/serviceaccount, readOnly: true }
             {{- end }}
-        {{- if $exec.enabled }}
+      {{- if $exec.enabled }}
+      initContainers:
+        # A native sidecar: started (socket up) before neotags, and stopped only after neotags has exited, so agent
+        # runs still draining on shutdown can run commands. A plain container would get SIGTERM with neotags and drop
+        # its socket at once.
         - name: executor
+          restartPolicy: Always
           image: "{{ $exec.image.repository }}:{{ required "executor.image.tag is required when executor.enabled (a tag pushed by build-executor-image.yml)" $exec.image.tag }}"
           imagePullPolicy: {{ $exec.image.pullPolicy }}
           securityContext:
@@ -137,8 +152,10 @@ spec:
             # Refuse executions rather than run in a weaker sandbox when the Pod loses a setting above.
             - name: EXECUTOR_REQUIRE_PROCFS
               value: "1"
+            # Outside the shared socket directory, which the neotags container can write: only the Secret's files
+            # count, and without one the path does not exist (read-only root filesystem).
             - name: EXECUTOR_CREDENTIALS_DIR
-              value: "{{ $exec.socketDir }}/credentials"
+              value: /etc/executor/credentials
             - name: EXECUTOR_MAX_CONCURRENCY
               value: {{ $exec.maxConcurrency | quote }}
             - name: EXECUTOR_MAX_MEM_MIB
@@ -150,6 +167,11 @@ spec:
             {{- with $exec.env }}
             {{- toYaml . | nindent 12 }}
             {{- end }}
+          startupProbe:
+            exec:
+              command: [python3, -c, "import socket, sys; socket.socket(socket.AF_UNIX).connect(sys.argv[1])", "{{ $exec.socketDir }}/exec.sock"]
+            periodSeconds: 1
+            failureThreshold: 30
           resources: {{- toYaml $exec.resources | nindent 12 }}
           # No envFrom and no service account token: the sidecar never sees the neotags Secret.
           volumeMounts:
@@ -159,9 +181,9 @@ spec:
             - { name: skills, mountPath: /skills, readOnly: true }
             {{- end }}
             {{- if $exec.credentialsSecret }}
-            - { name: executor-credentials, mountPath: {{ $exec.socketDir }}/credentials, readOnly: true }
+            - { name: executor-credentials, mountPath: /etc/executor/credentials, readOnly: true }
             {{- end }}
-        {{- end }}
+      {{- end }}
       volumes:
         - name: config
           configMap:
@@ -180,7 +202,8 @@ spec:
         - name: executor-run
           emptyDir: {}
         - name: executor-tmp
-          emptyDir: {}
+          # Per-call directories of untrusted commands: bounded, so a command cannot fill the node's disk.
+          emptyDir: { sizeLimit: {{ $exec.tmpSizeLimit }} }
         - name: sa-token
           projected:
             sources:

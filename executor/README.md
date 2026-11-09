@@ -275,7 +275,11 @@ Pod in some other way, give it the following settings:
   Pod, and mount a projected token volume into the neotags container only.
 - **Network:** with `net` declared, the sidecar's own egress is what the
   proxy uses. Limit it with a NetworkPolicy to the hosts that skill packs
-  declare.
+  declare (the chart's `networkPolicy.egress`; a NetworkPolicy applies to the
+  whole Pod, so the list also covers what neotags itself needs).
+- **Lifecycle:** run it as a native sidecar (an init container with
+  `restartPolicy: Always`), so its socket is up before neotags starts and it
+  keeps serving while neotags drains agent runs on shutdown.
 
 ### Measured on EKS
 
@@ -414,10 +418,3 @@ These gaps are known and accepted for now:
 - **Contents:** the image ships only the executor and the Python runtime. It
   has no CLI tools for skill packs; see
   [Publish the image](#publish-the-image) for adding them.
-
-## Next steps
-
-These pieces build on the executor and are planned:
-
-- An executor sidecar option in the Helm chart with the settings in
-  [Deploy as a sidecar](#deploy-as-a-sidecar).

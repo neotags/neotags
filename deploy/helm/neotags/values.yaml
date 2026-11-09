@@ -71,7 +71,8 @@ skillPacks:
   # Pod rolls and loads them. Without it, an updated ConfigMap is ignored until the Pod restarts.
   revision: ""
 
-# Command execution for skill packs (executor/README.md "Deploy as a sidecar"). When enabled the Pod runs in its own
+# Command execution for skill packs (executor/README.md "Deploy as a sidecar"). When enabled it runs as a native
+# sidecar (an init container with restartPolicy: Always: up before neotags, stopped after it), the Pod runs in its own
 # user namespace (hostUsers: false, Kubernetes >= 1.33 with user namespaces on the nodes), the service account token
 # is mounted into the neotags container only, and config.sandbox is set to the local backend on the shared socket.
 executor:
@@ -81,10 +82,11 @@ executor:
     tag: ""          # required when enabled: a tag pushed by build-executor-image.yml
     pullPolicy: IfNotPresent
   socketDir: /run/executor
-  # Execution credentials only (never the neotags Secret), mounted at /run/executor/credentials.
+  # Execution credentials only (never the neotags Secret), mounted read-only at /etc/executor/credentials.
   credentialsSecret: ""
-  # Every sandboxed command runs inside the container's limits below. Keep maxConcurrency x maxMemMib plus ~256Mi for
-  # the executor itself under the memory limit: past it the kernel kills the whole sidecar, not the one command.
+  tmpSizeLimit: 1Gi  # per-call directories of sandboxed commands (emptyDir sizeLimit)
+  # Every sandboxed command runs inside the container's limits below. maxConcurrency x maxMemMib plus 256Mi for the
+  # executor itself must fit the memory limit (the chart checks): past it the kernel kills the whole sidecar.
   maxConcurrency: 2  # EXECUTOR_MAX_CONCURRENCY
   maxMemMib: 768     # EXECUTOR_MAX_MEM_MIB: the most one command may declare
   env: []            # other EXECUTOR_* settings, e.g. { name: EXECUTOR_MAX_TIMEOUT_SEC, value: "120" }
@@ -96,8 +98,8 @@ executor:
 strategy:
   maxSurge: 1
   maxUnavailable: 0
-# Empty: 660 with config.o2Gateway.enabled (agent runs drain for config.agent.drainSec, default 640, then the last
-# events and traces go out), else 30. With the O2 gateway on it must be at least drainSec + 15; the chart checks.
+# Empty: with config.o2Gateway.enabled, config.agent.drainSec + 20 (660 with the default drain: agent runs drain, then
+# the last events and traces go out), else 30. With the O2 gateway on it must be at least drainSec + 15; the chart checks.
 terminationGracePeriodSeconds: ""
 
 serviceAccount:
@@ -119,6 +121,12 @@ networkPolicy:
   o2Gateway:         # peers of the O2 gateway port: OpenObserve
     - namespaceSelector:
         matchLabels: { kubernetes.io/metadata.name: openobserve }
+  # Egress of the Pod, one list for all its containers (a NetworkPolicy cannot tell containers apart): the executor's
+  # sandboxes reach only their declared hosts through its proxy, and that proxy's own reach is what this allows.
+  # Empty: egress is not restricted by this chart. Set it to the LLM gateway, MCP servers, Onyx, the OTLP collector
+  # and the hosts skill packs declare, e.g. [{ to: [{ namespaceSelector: {...} }], ports: [{ port: 443 }] }].
+  # DNS (port 53 to kube-system) is added when this list is set.
+  egress: []
 
 # Slack Events API needs a public HTTPS URL routed to /slack/events.
 ingress:
