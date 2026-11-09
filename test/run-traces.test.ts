@@ -113,6 +113,8 @@ describe("agent run traces", () => {
     expect(root.attributes).toMatchObject({
       "gen_ai.operation.name": "invoke_agent",
       "gen_ai.agent.name": "o2",
+      // The entry, not the bot name: renaming the bot must not split the agent.
+      "gen_ai.agent.id": "o2",
       "neotags.bot.name": "moose",
       "gen_ai.conversation.id": "sess-1",
       "session.id": "sess-1",
@@ -156,6 +158,8 @@ describe("agent run traces", () => {
     expect(spans.every((s) => typeof s.attributes["gen_ai.operation.name"] === "string")).toBe(true);
     // OpenObserve's session list sums tokens over the spans carrying the conversation, so all of them do.
     expect(spans.every((s) => s.attributes["gen_ai.conversation.id"] === "sess-1")).toBe(true);
+    // OpenObserve takes the agent from each span; a chat or tool span without one is an orphan in its agent views.
+    expect(spans.every((s) => s.attributes["gen_ai.agent.name"] === "o2" && s.attributes["gen_ai.agent.id"] === "o2")).toBe(true);
     expect(spans.flatMap(contentKeys)).toEqual([]);
   });
 
@@ -321,6 +325,21 @@ describe("tool spans of createAgent agents", () => {
       ["b", "aborted"],
     ]);
     expect(out.flatMap(contentKeys)).toEqual([]);
+  });
+
+  it("gives tool and chat spans the agent and conversation of the enclosing task, a nested scope overriding only what it sets", async () => {
+    await inSpan("invoke_agent slack", {}, async () => {
+      const tools = new ToolSpans({ captureContent: false });
+      tools.start({ id: "a", name: "kb__search", args: {} });
+      tools.end({ id: "a", isError: false, output: "ok" });
+      await inSpan("inner", {}, async () => {
+        endChatSpan(startChatSpan({ model: "m1", messages: [], captureContent: false }), { error: "x" });
+      }, { conversation: "C1:200" });
+    }, { conversation: "C1:100", agent: "slack" });
+    const out = await flushed();
+    const agent = { "gen_ai.agent.name": "slack", "gen_ai.agent.id": "slack" };
+    expect(out.find((s) => s.name.startsWith("execute_tool"))!.attributes).toMatchObject({ ...agent, "gen_ai.conversation.id": "C1:100" });
+    expect(out.find((s) => s.name === "chat m1")!.attributes).toMatchObject({ ...agent, "gen_ai.conversation.id": "C1:200" });
   });
 });
 

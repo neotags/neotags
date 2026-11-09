@@ -103,7 +103,7 @@ function routeDiagnostics(log: Log) {
 
 /**
  * `service.name` neotags, overridden by OTEL_SERVICE_NAME; OTEL_RESOURCE_ATTRIBUTES adds the rest, e.g.
- * `deployment.environment=prod` to tell environments apart in OpenObserve or Langfuse.
+ * `deployment.environment.name=prod` to tell environments apart in OpenObserve or Langfuse.
  */
 export function telemetryResource(): Resource {
   return resourceFromAttributes({ "service.name": "neotags" }).merge(detectResources({ detectors: [envDetector] }));

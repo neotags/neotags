@@ -159,6 +159,6 @@ affinity: {}
 otel:
   endpoint: ""       # e.g. http://otel-collector.monitoring.svc:4318 (OTEL_EXPORTER_OTLP_ENDPOINT)
   serviceName: ""    # OTEL_SERVICE_NAME; default neotags. Collectors often route on it
-  resourceAttributes: ""   # OTEL_RESOURCE_ATTRIBUTES, e.g. deployment.environment=staging
+  resourceAttributes: ""   # OTEL_RESOURCE_ATTRIBUTES, e.g. deployment.environment.name=staging
 # More env for the neotags container.
 extraEnv: []
