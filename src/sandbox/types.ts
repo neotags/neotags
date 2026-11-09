@@ -24,18 +24,30 @@ export interface ExecResult {
   stderr: string;
   truncated: { stdout: boolean; stderr: boolean };
   egress: { method?: string; host: string; port?: number; decision: string; injected?: string[] }[];
+  /** Set by the client backend, not the executor: how long the call waited for a slot. */
+  wait?: SlotWait;
+}
+
+/** Time a call spent before the executor took it: in this process's queue and retrying `429 busy`. */
+export interface SlotWait {
+  queueMs: number;
+  busyRetries: number;
 }
 
 /**
  * Why an execution did not run:
  * - `denied`: the tool guard refused it (no declaration, undeclared tool, reserved env, execution disabled, ...);
  * - `unavailable`: no executor answered, or its self-check failed. Never a reason to run the command another way;
- * - `refused`: the executor refused the request (validation, missing credential, busy) or failed on it;
+ * - `refused`: the executor refused the request (validation, missing credential), or no slot freed up in time
+ *   (`busy`: the command did not run);
  * - `unknown`: the request was sent but no answer came (deadline, cancelled): the command may have run.
  */
 export type SandboxErrorKind = "denied" | "unavailable" | "refused" | "unknown";
 
 export class SandboxError extends Error {
+  /** The wait for a slot before the failure, when the backend queued the call. */
+  wait?: SlotWait;
+
   constructor(
     readonly kind: SandboxErrorKind,
     readonly code: string,

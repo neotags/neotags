@@ -15,7 +15,7 @@ export * from "./types.js";
 export function createSkillExecutor(cfg: Config, index: SkillPackIndex, log: Pick<Logger, "info" | "warn">): SkillExecutor {
   const s = cfg.sandbox;
   if (s.backend === "none") return new SkillExecutor({ sandbox: new DisabledSandbox(), index, log });
-  const sandbox = new LocalSandbox({ socketPath: s.socket });
+  const sandbox = new LocalSandbox({ socketPath: s.socket, maxConcurrency: s.maxConcurrency, queueTimeoutMs: s.queueTimeoutSec * 1000 });
   sandbox.health().then(
     (h) => {
       // The executor answers /healthz with 200 also when its self-check failed.

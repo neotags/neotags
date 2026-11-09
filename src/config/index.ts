@@ -283,6 +283,12 @@ const fileSchema = z.object({
       backend: z.enum(["none", "local"]).default("none"),
       // The executor's unix socket, on an emptyDir shared with the sidecar.
       socket: z.string().min(1).default("/run/executor/exec.sock"),
+      // Executions in flight at once: the executor's EXECUTOR_MAX_CONCURRENCY (the chart sets it from
+      // executor.maxConcurrency). More wait here in arrival order instead of getting the executor's 429 busy.
+      maxConcurrency: z.number().int().positive().default(4),
+      // Longest wait for a slot; then the call fails as busy without running. The command's own deadline starts
+      // only when it is sent.
+      queueTimeoutSec: z.number().positive().default(30),
     })
     .prefault({}),
   // The OpenObserve AI assistant entry (docs/design/002-o2-gateway-contract.md): O2 forwards each chat turn here and

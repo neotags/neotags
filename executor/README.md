@@ -185,8 +185,16 @@ The endpoint can return these status codes:
 | --- | --- | --- |
 | 400 | `invalid_*`, `tool_not_declared` | The request fails validation |
 | 422 | `credential_unavailable` | A declared credential isn't configured in the executor |
-| 429 | `busy` | The executor is at `EXECUTOR_MAX_CONCURRENCY` |
+| 429 | `busy` | The executor is at `EXECUTOR_MAX_CONCURRENCY`; it ran nothing |
 | 503 | `sandbox_unavailable` | The startup self-check failed; the reason is in `message` |
+
+The executor does not queue: a request beyond its limit gets `429 busy` at
+once. neotags queues instead. It holds at most `sandbox.maxConcurrency` calls
+in flight (the chart sets it from `executor.maxConcurrency`), and the rest
+wait in arrival order. A `429 busy` it still gets is sent again with backoff.
+The wait is capped by `sandbox.queueTimeoutSec`; after that the call fails as
+`busy` and the command did not run. The command's own deadline starts only
+when the request is sent.
 
 ### `POST /v1/call`
 
