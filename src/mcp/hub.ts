@@ -3,7 +3,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Logger } from "pino";
-import { EXECUTED_ARGS } from "../agent/executed.js";
+import { EXECUTED_ARGS, RESULT_DATA } from "../agent/executed.js";
 import type { Config } from "../config/index.js";
 import { mcpToolName, type McpGuard } from "../guardrails/tools.js";
 
@@ -175,11 +175,11 @@ export class McpHub {
       parameters: { ...schema, type: "object" },
       executionMode: "parallel",
       prepareArguments: (args: unknown) => this.o.guard.prepare(full, args) as never,
-      execute: (_id, params, signal) => this.call(s, t.name, params, signal),
+      execute: (_id, params, signal) => this.call(s, t.name, full, params, signal),
     };
   }
 
-  private async call(s: ServerState, tool: string, args: unknown, signal?: AbortSignal): Promise<AgentToolResult<McpCallDetails>> {
+  private async call(s: ServerState, tool: string, full: string, args: unknown, signal?: AbortSignal): Promise<AgentToolResult<McpCallDetails>> {
     // Within the backoff a down server fails at once: a run making many calls must not wait on a connect each time.
     if (!s.client && (s.connecting || Date.now() >= s.retryAt)) await abortable(this.connect(s), signal);
     if (!s.client) throw new Error(unavailableMessage(s.cfg.name, s.down));
@@ -207,10 +207,14 @@ export class McpHub {
         ({ client, gen } = next);
       }
     }
-    const text = this.o.guard.output(resultText(res));
+    const { text, data } = this.o.guard.result(full, args, resultText(res), res.isError === true);
     // The arguments that ran, after the guard's defaults, for traces and the entry (evidence links): pi reports the
-    // model's own arguments on tool events.
-    return { content: [{ type: "text", text }], details: { [EXECUTED_ARGS]: args }, ...(res.isError && { isError: true }) };
+    // model's own arguments on tool events. `data` is what the entry needs of a result the model sees cut.
+    return {
+      content: [{ type: "text", text }],
+      details: { [EXECUTED_ARGS]: args, ...(data !== undefined && { [RESULT_DATA]: data }) },
+      ...(res.isError && { isError: true }),
+    };
   }
 
   /**
@@ -231,7 +235,7 @@ export class McpHub {
   }
 }
 
-export type McpCallDetails = { [EXECUTED_ARGS]: unknown };
+export type McpCallDetails = { [EXECUTED_ARGS]: unknown; [RESULT_DATA]?: unknown };
 
 /** `p`, or a rejection as soon as `signal` aborts; `p` itself keeps running (a reconnect others may share). */
 function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {

@@ -1,4 +1,4 @@
-export { EXECUTED_ARGS, executedArgs, SPAN_ATTRIBUTES, spanAttributes } from "./executed.js";
+export { EXECUTED_ARGS, executedArgs, RESULT_DATA, resultData, SPAN_ATTRIBUTES, spanAttributes } from "./executed.js";
 import { Agent, type AgentTool, type BeforeToolCallResult, type StreamFn, type ThinkingLevel } from "@earendil-works/pi-agent-core";
 import type { Config, Effort } from "../config/index.js";
 import type { Decision } from "../guardrails/policy.js";

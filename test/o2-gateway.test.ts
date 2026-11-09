@@ -5,7 +5,7 @@ import { obj } from "@earendil-works/pi-schema";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Logger } from "pino";
 import { afterEach, describe, expect, it } from "vitest";
-import { EXECUTED_ARGS } from "../src/agent/executed.js";
+import { EXECUTED_ARGS, RESULT_DATA } from "../src/agent/executed.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 import { boundedContext, boundedHistory, createO2Gateway, orgNotes, type O2Gateway } from "../src/gateway/o2.js";
@@ -121,6 +121,23 @@ function mcpTool(name: string, output: string, ran?: (args: Record<string, unkno
     execute: async (_id, args) => ({ content: [{ type: "text", text: output }], details: { [EXECUTED_ARGS]: ran ? ran(args as Record<string, unknown>) : args } }),
   };
 }
+
+/** A ListDashboards or ListAlerts through tools_call, as the tool guard reports it: the cut-down list, and the whole list to code. */
+function listTool(name: string, key: "dashboards" | "alerts", items: Record<string, unknown>[]): AgentTool<any> {
+  return {
+    name,
+    label: name,
+    description: name,
+    parameters: obj({}, { open: true }),
+    execute: async (_id, args) => ({
+      content: [{ type: "text", text: JSON.stringify({ total: items.length, items }) }],
+      details: { [EXECUTED_ARGS]: args, [RESULT_DATA]: { [key]: items } },
+    }),
+  };
+}
+const dashTool = (name: string, dashboards: Record<string, unknown>[]) => listTool(name, "dashboards", dashboards);
+const L1 = { dashboard_id: "d1", title: "L1 Overview", folder_id: "f7", folder_name: "Network" };
+const L1B = { dashboard_id: "d2", title: "L1 Links", folder_id: "default", folder_name: "default" };
 
 const SQL = `SELECT namespace, count(*) AS errors FROM "app_logs" WHERE level = 'error' GROUP BY namespace ORDER BY errors DESC`;
 const T0 = 1793869200000000;
@@ -316,6 +333,109 @@ describe("O2 gateway: a full turn", () => {
     expect(ev.some((e) => e.type === "navigation_action")).toBe(false);
     const toolText = JSON.stringify(stream.calls.at(-1)!.context.messages);
     expect(toolText).toContain("no SearchSQL has succeeded against the current org (o2__ tools)");
+  });
+
+  it("opens a listed dashboard of the current org in its folder, right before complete", async () => {
+    const list = { tool: "ListDashboards", args: { title: "L1" } };
+    const { runner, stream } = piRunner(
+      [callTool("o2__tools_call", list, "l1"), callTool("open_dashboard_in_o2", { dashboard_id: "d1" }, "n1"), say("Opening L1 Overview.")],
+      [dashTool("o2__tools_call", [L1, L1B])],
+    );
+    const { url } = await serve(runner);
+    const ev = data(parse(await (await post(url, { body: firstTurn("take me to the L1 dashboard") })).text()));
+    expectContract(ev);
+    expect(ev.map((e) => e.type)).toEqual(["title", "tool_call", "tool_result", "message_delta", "navigation_action", "complete"]);
+    expect(ev[1]).toMatchObject({ tool: "ListDashboards", message: 'Looking up dashboards matching "L1"', context: { title: "L1" } });
+    expect(ev[2]).toMatchObject({ tool: "ListDashboards", success: true, summary: { count: 2 }, message: "Found 2 dashboards" });
+    expect(ev[2]).not.toHaveProperty("call_args");
+    expect(ev.at(-2)).toEqual({
+      type: "navigation_action",
+      resource_type: "dashboard",
+      action: "navigate_direct",
+      label: "Open the L1 Overview dashboard",
+      target: { dashboard_id: "d1", folder: "f7", name: "L1 Overview" },
+    });
+    expect(JSON.stringify(stream.calls.at(-1)!.context.messages)).toContain('opens the dashboard \\"L1 Overview\\" (folder Network)');
+  });
+
+  it("opens only dashboards listed from the current org with a folder id; the last navigation asked for wins", async () => {
+    const searchArgs = { request_body: { query: { sql: SQL, start_time: T0, end_time: T1 } } };
+    const noFolder = { dashboard_id: "d9", title: "Lost" };
+    const { runner, stream } = piRunner(
+      [
+        callTool("open_dashboard_in_o2", { dashboard_id: "d1" }, "n0"),
+        callTool("o2prod__tools_call", { tool: "ListDashboards", args: {} }, "p1"),
+        callTool("open_dashboard_in_o2", { dashboard_id: "p1" }, "n1"),
+        callTool("o2__tools_call", { tool: "ListDashboards", args: {} }, "l1"),
+        callTool("open_dashboard_in_o2", { dashboard_id: "d9" }, "n2"),
+        callTool("open_dashboard_in_o2", { dashboard_id: "d2" }, "n3"),
+        callTool("o2__SearchSQL", searchArgs, "s1"),
+        callTool("open_query_in_o2", {}, "n4"),
+        callTool("open_dashboard_in_o2", { dashboard_id: "d2" }, "n5"),
+        say("在这里。"),
+      ],
+      [dashTool("o2prod__tools_call", [{ ...L1, dashboard_id: "p1" }]), dashTool("o2__tools_call", [L1, L1B, noFolder]), mcpTool("o2__SearchSQL", searchResult, withLimit)],
+    );
+    const { url } = await serve(runner);
+    const ev = data(parse(await (await post(url, { body: firstTurn("打开 L1 Links") })).text()));
+    expectContract(ev);
+    const results = (id: number) => JSON.stringify(stream.calls[id]!.context.messages.at(-1));
+    expect(results(1)).toContain("no ListDashboards has succeeded against the current org (o2__tools_call)");
+    // Another org's dashboard is not openable: the panel opens the user's org.
+    expect(results(3)).toContain("no ListDashboards has succeeded against the current org");
+    expect(results(5)).toContain('dashboard_id \\"d9\\" is not one');
+    expect(ev.filter((e) => e.type === "tool_result" && e.tool === "ListDashboards").map((e) => e.message)).toEqual(["找到 1 个 dashboard", "找到 3 个 dashboard"]);
+    expect(ev.at(-2)).toEqual({
+      type: "navigation_action",
+      resource_type: "dashboard",
+      action: "navigate_direct",
+      label: "打开 dashboard L1 Links",
+      target: { dashboard_id: "d2", folder: "default", name: "L1 Links" },
+    });
+  });
+
+  it("opens an alert's status page in its folder, never the editor", async () => {
+    const disk = { alert_id: "2abcKsuid", name: "Disk Full", folder_id: "f3", folder_name: "Storage", enabled: true };
+    const { runner, stream } = piRunner(
+      [
+        callTool("open_alerts_in_o2", { page: "alert", alert_id: "2abcKsuid" }, "n0"),
+        callTool("o2__tools_call", { tool: "ListAlerts", args: { alert_name_substring: "disk" } }, "l1"),
+        callTool("open_alerts_in_o2", { page: "alert", alert_id: "nope" }, "n1"),
+        callTool("open_alerts_in_o2", { page: "settings" }, "n2"),
+        callTool("open_alerts_in_o2", { page: "alert", alert_id: "2abcKsuid" }, "n3"),
+        say("Opening Disk Full."),
+      ],
+      [listTool("o2__tools_call", "alerts", [disk])],
+    );
+    const { url } = await serve(runner);
+    const ev = data(parse(await (await post(url, { body: firstTurn("take me to the disk full alert") })).text()));
+    expectContract(ev);
+    const results = (id: number) => JSON.stringify(stream.calls[id]!.context.messages.at(-1));
+    expect(results(1)).toContain("no ListAlerts has succeeded against the current org (o2__tools_call)");
+    expect(results(3)).toContain('alert_id \\"nope\\" is not one ListAlerts returned');
+    expect(results(4)).toContain('page must be \\"list\\", \\"history\\" or \\"alert\\", not \\"settings\\"');
+    expect(ev.find((e) => e.type === "tool_call")).toMatchObject({ tool: "ListAlerts", message: 'Looking up alerts matching "disk"', context: { alert_name_substring: "disk" } });
+    expect(ev.find((e) => e.type === "tool_result")).toMatchObject({ tool: "ListAlerts", summary: { count: 1 }, message: "Found 1 alert" });
+    expect(ev.at(-2)).toEqual({
+      type: "navigation_action",
+      resource_type: "alerts",
+      action: "navigate_direct",
+      label: "Open the Disk Full alert",
+      target: { path: "/alerts/detail/2abcKsuid", query: { folder: "f3" } },
+    });
+  });
+
+  it("opens the alerts list and the alert history without listing", async () => {
+    for (const [page, path, label] of [
+      ["list", "/alerts", "打开 alerts 列表"],
+      ["history", "/alerts/history", "打开 alert 历史"],
+    ] as const) {
+      const { runner } = piRunner([callTool("open_alerts_in_o2", { page }, "n1"), say("好的。")], []);
+      const { url } = await serve(runner);
+      const ev = data(parse(await (await post(url, { body: firstTurn("带我去 alerts 页面") })).text()));
+      expectContract(ev);
+      expect(ev.at(-2)).toEqual({ type: "navigation_action", resource_type: "alerts", action: "navigate_direct", label, target: { path } });
+    }
   });
 
   it("pings while a run is quiet", async () => {

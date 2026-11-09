@@ -213,7 +213,7 @@ const fileSchema = z.object({
         .object({
           // A query without a time range gets the last `defaultRangeSec`; one longer than `maxRangeSec` is refused.
           defaultRangeSec: z.number().int().positive().default(3600),
-          maxRangeSec: z.number().int().positive().default(86_400),
+          maxRangeSec: z.number().int().positive().default(30 * 86_400),
           // SQL without a LIMIT gets `sqlDefaultLimit`; a LIMIT above `sqlMaxLimit` is refused.
           sqlDefaultLimit: z.number().int().positive().default(100),
           sqlMaxLimit: z.number().int().positive().default(1000),
