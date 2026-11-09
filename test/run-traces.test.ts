@@ -10,7 +10,7 @@ import { RunManager } from "../src/runs/manager.js";
 import { PiAgentRunner, type PiRunnerOptions } from "../src/runs/pi-runner.js";
 import type { RunInput } from "../src/runs/types.js";
 import { startTelemetry } from "../src/telemetry/index.js";
-import { endChatSpan, inSpan, MAX_CONTENT_CHARS, recorded, spanTraceId, startChatSpan, ToolSpans } from "../src/telemetry/spans.js";
+import { endChatSpan, inSpan, MAX_CONTENT_CHARS, recorded, spanTraceId, startChatSpan, ToolSpans, withSpan } from "../src/telemetry/spans.js";
 import { SkillPackIndex } from "../src/tools/skillpacks.js";
 import { callTool, fail, say, scripted, type Reply } from "./fake-stream.js";
 
@@ -340,6 +340,24 @@ describe("tool spans of createAgent agents", () => {
     const agent = { "gen_ai.agent.name": "slack", "gen_ai.agent.id": "slack" };
     expect(out.find((s) => s.name.startsWith("execute_tool"))!.attributes).toMatchObject({ ...agent, "gen_ai.conversation.id": "C1:100" });
     expect(out.find((s) => s.name === "chat m1")!.attributes).toMatchObject({ ...agent, "gen_ai.conversation.id": "C1:200" });
+  });
+
+  it("lets a nested scope override only the agent, and gives withSpan (a run) only its own scope", async () => {
+    const chat = (model: string) => endChatSpan(startChatSpan({ model, messages: [], captureContent: false }), { error: "x" });
+    await inSpan("outer", {}, async () => {
+      await inSpan("inner", {}, async () => chat("m-inner"), { agent: "job" });
+      // A run dequeued in this context: none of the outer scope may leak into it.
+      const runSpan = startChatSpan({ model: "run", messages: [], captureContent: false });
+      withSpan(runSpan, () => chat("m-run"), { agent: "o2" });
+      runSpan.end();
+    }, { conversation: "C1:100", agent: "slack" });
+    const out = await flushed();
+    expect(out.find((s) => s.name === "chat m-inner")!.attributes).toMatchObject({
+      "gen_ai.agent.id": "job", "gen_ai.agent.name": "job", "gen_ai.conversation.id": "C1:100",
+    });
+    const run = out.find((s) => s.name === "chat m-run")!.attributes;
+    expect(run["gen_ai.agent.id"]).toBe("o2");
+    expect(run["gen_ai.conversation.id"]).toBeUndefined();
   });
 });
 

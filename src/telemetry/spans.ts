@@ -217,9 +217,14 @@ function closeChatSpan(span: Span, outcome: ChatOutcome) {
   if (msg.stopReason === "error" || msg.stopReason === "aborted") fail(span, msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`);
 }
 
-/** Run `fn` with `span` as the active span, so the spans started inside it are its children (and share its scope). */
+/**
+ * Run `fn` with `span` as the active span, so the spans started inside it are its children (and share its scope).
+ * `scope` replaces the active one rather than adding to it: a queued run starts in the context of the work that
+ * finished before it, and must not pick up that work's conversation or agent.
+ */
 export function withSpan<T>(span: Span, fn: () => T, scope?: TraceScope): T {
-  return context.with(withScope(trace.setSpan(context.active(), span), scope), fn);
+  const ctx = trace.setSpan(context.active(), span);
+  return context.with(scope ? ctx.setValue(SCOPE, scope) : ctx, fn);
 }
 
 export interface AgentRunSpan {
