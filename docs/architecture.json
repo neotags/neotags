@@ -144,8 +144,7 @@
       "id": "pobs",
       "type": "external",
       "label": "MCP servers",
-      "sublabel": "O2 MCP (per org) · Onyx search",
-      "tag": "planned",
+      "sublabel": "O2 MCP (per org) · Onyx MCP",
       "pos": [
         1340,
         240
