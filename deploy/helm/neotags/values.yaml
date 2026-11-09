@@ -67,6 +67,9 @@ existingSecret: neotags-secrets
 skillPacks:
   configMap: ""      # empty: no packs mounted
   items: []
+  # Packs are read once at startup: change this (e.g. to the packs' git ref) whenever the ConfigMap changes, so the
+  # Pod rolls and loads them. Without it, an updated ConfigMap is ignored until the Pod restarts.
+  revision: ""
 
 # Command execution for skill packs (executor/README.md "Deploy as a sidecar"). When enabled the Pod runs in its own
 # user namespace (hostUsers: false, Kubernetes >= 1.33 with user namespaces on the nodes), the service account token
@@ -80,18 +83,22 @@ executor:
   socketDir: /run/executor
   # Execution credentials only (never the neotags Secret), mounted at /run/executor/credentials.
   credentialsSecret: ""
-  env: []            # EXECUTOR_* limits, e.g. { name: EXECUTOR_MAX_CONCURRENCY, value: "4" }
+  # Every sandboxed command runs inside the container's limits below. Keep maxConcurrency x maxMemMib plus ~256Mi for
+  # the executor itself under the memory limit: past it the kernel kills the whole sidecar, not the one command.
+  maxConcurrency: 2  # EXECUTOR_MAX_CONCURRENCY
+  maxMemMib: 768     # EXECUTOR_MAX_MEM_MIB: the most one command may declare
+  env: []            # other EXECUTOR_* settings, e.g. { name: EXECUTOR_MAX_TIMEOUT_SEC, value: "120" }
   resources:
     requests: { cpu: 100m, memory: 128Mi }
-    limits: { cpu: "2", memory: 2Gi }   # every sandboxed command runs inside these
+    limits: { cpu: "2", memory: 2Gi }
 
 # Rolling update: start the new Pod before stopping the old one.
 strategy:
   maxSurge: 1
   maxUnavailable: 0
-# Must exceed config.agent.drainSec (default 640) plus a few seconds for the last events and traces, or agent runs
-# are killed before they can tell the O2 panel. With the defaults it is 660.
-terminationGracePeriodSeconds: 660
+# Empty: 660 with config.o2Gateway.enabled (agent runs drain for config.agent.drainSec, default 640, then the last
+# events and traces go out), else 30. With the O2 gateway on it must be at least drainSec + 15; the chart checks.
+terminationGracePeriodSeconds: ""
 
 serviceAccount:
   create: true
@@ -101,13 +108,13 @@ serviceAccount:
 service:
   type: ClusterIP
   port: 80
-  o2Port: 3001       # the O2 gateway, when config.o2Gateway.enabled; in-cluster only, never on the Ingress
+  o2Port: ""         # the O2 gateway's Service port; empty: config.o2Gateway.port. In-cluster only, never on the Ingress
 
 # Ingress NetworkPolicy for the Pod (off: the cluster's own policies apply). Only the listed peers reach each port.
 networkPolicy:
   enabled: false
-  # Peers of the Slack port, e.g. the ingress controller: [{ namespaceSelector: {...}, podSelector: {...} }].
-  # Empty blocks the port (NetworkPolicies add up: another policy in the namespace may still open it).
+  # Peers of the Slack port (also the health probes), e.g. the ingress controller:
+  # [{ namespaceSelector: {...}, podSelector: {...} }]. Required when enabled: an empty list would block Slack events.
   slack: []
   o2Gateway:         # peers of the O2 gateway port: OpenObserve
     - namespaceSelector:

@@ -1,9 +1,21 @@
 {{- $o2 := include "neotags.o2Enabled" . -}}
 {{- $exec := .Values.executor -}}
-{{- $drain := 640 -}}
-{{- if and .Values.config.agent .Values.config.agent.drainSec -}}{{- $drain = int .Values.config.agent.drainSec -}}{{- end -}}
-{{- if and $o2 (le (int .Values.terminationGracePeriodSeconds) $drain) -}}
-{{- fail (printf "terminationGracePeriodSeconds (%d) must exceed config.agent.drainSec (%d) so agent runs can finish on shutdown" (int .Values.terminationGracePeriodSeconds) $drain) -}}
+{{- $grace := include "neotags.grace" . -}}
+{{- $drain := 640.0 -}}
+{{- if and .Values.config.agent .Values.config.agent.drainSec -}}{{- $drain = float64 .Values.config.agent.drainSec -}}{{- end -}}
+{{- /* After the drain the process still closes the O2 server and MCP and flushes traces (up to 5 s): keep a margin. */}}
+{{- $need := addf (ceil $drain) 15 -}}
+{{- if and $o2 (lt (float64 $grace) $need) -}}
+{{- fail (printf "terminationGracePeriodSeconds (%s) must be at least config.agent.drainSec + 15 (%.0f) so agent runs can finish on shutdown" $grace $need) -}}
+{{- end -}}
+{{- $annotations := deepCopy (default dict .Values.podAnnotations) -}}
+{{- if $exec.enabled -}}
+{{- /* EKS IRSA and Pod Identity inject AWS credentials into every container not listed here; never the sandbox's. */}}
+{{- $skip := get $annotations "eks.amazonaws.com/skip-containers" -}}
+{{- $_ := set $annotations "eks.amazonaws.com/skip-containers" (ternary (printf "%s,executor" $skip) "executor" (ne (toString $skip) "")) -}}
+{{- end -}}
+{{- with .Values.skillPacks.revision -}}
+{{- $_ := set $annotations "neotags/skill-packs-revision" (toString .) -}}
 {{- end -}}
 apiVersion: apps/v1
 kind: Deployment
@@ -24,16 +36,12 @@ spec:
       labels: {{- include "neotags.selectorLabels" . | nindent 8 }}
       annotations:
         checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
-        {{- if $exec.enabled }}
-        # EKS IRSA and Pod Identity inject AWS credentials into every container; never into the sandbox's.
-        eks.amazonaws.com/skip-containers: executor
-        {{- end }}
-        {{- with .Values.podAnnotations }}
+        {{- with $annotations }}
         {{- toYaml . | nindent 8 }}
         {{- end }}
     spec:
       serviceAccountName: {{ include "neotags.serviceAccountName" . }}
-      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      terminationGracePeriodSeconds: {{ $grace }}
       {{- if $exec.enabled }}
       # The executor runs untrusted skill-pack code: no service account token in the Pod by default (the projected
       # volume below gives one to the neotags container only), and its own user namespace, so root in a sandbox maps
@@ -129,6 +137,12 @@ spec:
             # Refuse executions rather than run in a weaker sandbox when the Pod loses a setting above.
             - name: EXECUTOR_REQUIRE_PROCFS
               value: "1"
+            - name: EXECUTOR_CREDENTIALS_DIR
+              value: "{{ $exec.socketDir }}/credentials"
+            - name: EXECUTOR_MAX_CONCURRENCY
+              value: {{ $exec.maxConcurrency | quote }}
+            - name: EXECUTOR_MAX_MEM_MIB
+              value: {{ $exec.maxMemMib | quote }}
             {{- if .Values.skillPacks.configMap }}
             - name: EXECUTOR_SKILLS_DIR
               value: /skills

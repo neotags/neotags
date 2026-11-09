@@ -44,3 +44,14 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "neotags.o2Port" -}}
 {{- (and .Values.config.o2Gateway .Values.config.o2Gateway.port) | default 3001 -}}
 {{- end }}
+
+{{/* terminationGracePeriodSeconds: the value, else 660 with the O2 gateway (agent runs drain) and 30 without. */}}
+{{- define "neotags.grace" -}}
+{{- if ne (toString .Values.terminationGracePeriodSeconds) "" -}}{{ .Values.terminationGracePeriodSeconds }}
+{{- else if include "neotags.o2Enabled" . -}}660
+{{- else -}}30{{- end -}}
+{{- end }}
+
+{{- define "neotags.o2ServicePort" -}}
+{{- if ne (toString .Values.service.o2Port) "" -}}{{ .Values.service.o2Port }}{{- else -}}{{ include "neotags.o2Port" . }}{{- end -}}
+{{- end }}

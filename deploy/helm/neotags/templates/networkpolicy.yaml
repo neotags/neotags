@@ -11,11 +11,12 @@ spec:
     matchLabels: {{- include "neotags.selectorLabels" . | nindent 6 }}
   policyTypes: [Ingress]
   ingress:
-    {{- with .Values.networkPolicy.slack }}
-    - from: {{- toYaml . | nindent 8 }}
+    {{- /* The Slack port also carries the health probes; without peers the Pod gets no events (and, where the CNI
+    applies policy to node traffic, never becomes Ready). */}}
+    {{- if not .Values.networkPolicy.slack }}{{ fail "networkPolicy.slack needs at least one peer (the ingress controller that forwards Slack events)" }}{{ end }}
+    - from: {{- toYaml .Values.networkPolicy.slack | nindent 8 }}
       ports:
-        - { port: {{ $.Values.config.slack.port }}, protocol: TCP }
-    {{- end }}
+        - { port: {{ .Values.config.slack.port }}, protocol: TCP }
     {{- if include "neotags.o2Enabled" . }}
     {{- /* An empty `from` would let every source in. */}}
     {{- if not .Values.networkPolicy.o2Gateway }}{{ fail "networkPolicy.o2Gateway needs at least one peer" }}{{ end }}
