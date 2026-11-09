@@ -241,7 +241,7 @@ All settings are environment variables.
 | `EXECUTOR_REQUIRE_PROCFS` | empty | `1` accepts only the strongest sandbox mode (private `/proc` and `--disable-userns`) and refuses execution otherwise |
 | `EXECUTOR_MAX_CONCURRENCY` | `4` | Concurrent `/v1/exec` calls |
 | `EXECUTOR_MAX_OUTPUT_BYTES` | `1048576` | Limit for each of stdout and stderr |
-| `EXECUTOR_DEFAULT_CPU`, `_MEM_MIB`, `_TIMEOUT_SEC` | `1`, `512`, `60` | Limits when a request omits them |
+| `EXECUTOR_DEFAULT_CPU`, `_MEM_MIB`, `_TIMEOUT_SEC` | `1`, `512`, `60` | Limits when a request omits them; each must not exceed its `EXECUTOR_MAX_*`, or the executor logs `config_invalid` and exits |
 | `EXECUTOR_MAX_CPU`, `_MEM_MIB`, `_TIMEOUT_SEC` | `4`, `4096`, `300` | Highest limits a request can ask for |
 | `EXECUTOR_WORKERS` | `0` | Resident worker count; `0` disables `/v1/call` |
 | `EXECUTOR_WORKER_ROOT` | `EXECUTOR_SKILLS_DIR` | Root for `/v1/call` entries |

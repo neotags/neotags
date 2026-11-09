@@ -21,10 +21,15 @@
 {{- end -}}
 {{- if $exec.enabled -}}
 {{- range $exec.env -}}
-{{- if has .name (list "EXECUTOR_SOCKET" "EXECUTOR_REQUIRE_PROCFS" "EXECUTOR_CREDENTIALS_DIR" "EXECUTOR_MAX_CONCURRENCY" "EXECUTOR_MAX_MEM_MIB" "EXECUTOR_SKILLS_DIR") -}}
+{{- if has .name (list "EXECUTOR_SOCKET" "EXECUTOR_REQUIRE_PROCFS" "EXECUTOR_CREDENTIALS_DIR" "EXECUTOR_MAX_CONCURRENCY" "EXECUTOR_MAX_MEM_MIB" "EXECUTOR_DEFAULT_MEM_MIB" "EXECUTOR_SKILLS_DIR") -}}
 {{- fail (printf "executor.env sets %s, which the chart owns (use the executor.* value): a later duplicate would silently win" .name) -}}
 {{- end -}}
 {{- end -}}
+{{- end -}}
+{{- /* The memory a command gets when it declares none; above maxMemMib every such command would be refused. */}}
+{{- $defaultMem := int (ternary (min 512 (int $exec.maxMemMib)) $exec.defaultMemMib (eq (toString $exec.defaultMemMib) "")) -}}
+{{- if and $exec.enabled (gt $defaultMem (int $exec.maxMemMib)) -}}
+{{- fail (printf "executor.defaultMemMib (%d) is over executor.maxMemMib (%d): every command that declares no mem would be refused" $defaultMem (int $exec.maxMemMib)) -}}
 {{- end -}}
 {{- if and $exec.enabled $exec.resources.limits $exec.resources.limits.memory -}}
 {{- /* Every sandboxed command runs inside the sidecar's limit: past it the kernel kills the sidecar, not the command. */}}
@@ -184,6 +189,8 @@ spec:
               value: {{ $exec.maxConcurrency | quote }}
             - name: EXECUTOR_MAX_MEM_MIB
               value: {{ $exec.maxMemMib | quote }}
+            - name: EXECUTOR_DEFAULT_MEM_MIB
+              value: {{ $defaultMem | quote }}
             {{- if .Values.skillPacks.configMap }}
             - name: EXECUTOR_SKILLS_DIR
               value: /skills

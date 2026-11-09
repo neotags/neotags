@@ -16,7 +16,11 @@ from .worker import WorkerPool
 
 
 def main() -> int:
-    cfg = Config.from_env()
+    try:
+        cfg = Config.from_env()
+    except ValueError as exc:
+        log("config_invalid", level="error", reason=str(exc))
+        return 2
     sandbox = Sandbox(cfg)
     if sandbox.self_check():
         log("sandbox_ready", mode=sandbox.mode, note=sandbox.reason)

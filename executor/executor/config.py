@@ -53,6 +53,17 @@ class Config:
     workers: int = 0
     worker_max_timeout_sec: float = 30.0
 
+    def __post_init__(self) -> None:
+        # A default above its maximum would refuse every request that omits the limit, one request at a time;
+        # refuse to start instead.
+        for name, unit in (("cpu", ""), ("mem_mib", " MiB"), ("timeout_sec", "s")):
+            default, maximum = getattr(self.defaults, name), getattr(self.maxima, name)
+            if default > maximum:
+                env = name.upper()
+                raise ValueError(
+                    f"EXECUTOR_DEFAULT_{env} ({default}{unit}) is above EXECUTOR_MAX_{env} ({maximum}{unit})"
+                )
+
     @classmethod
     def from_env(cls, env: Optional[Mapping[str, str]] = None) -> "Config":
         env = os.environ if env is None else env

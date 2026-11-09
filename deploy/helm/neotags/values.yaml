@@ -92,6 +92,7 @@ executor:
   # (EXECUTOR_WORKERS); leave headroom for those.
   maxConcurrency: 2  # EXECUTOR_MAX_CONCURRENCY, and config.sandbox.maxConcurrency: neotags queues calls beyond it
   maxMemMib: 768     # EXECUTOR_MAX_MEM_MIB: the most one command may declare
+  defaultMemMib: ""  # EXECUTOR_DEFAULT_MEM_MIB: a command that declares no mem; empty: min(512, maxMemMib)
   env: []            # other EXECUTOR_* settings, e.g. { name: EXECUTOR_MAX_TIMEOUT_SEC, value: "120" }; not the ones the chart sets
   resources:
     requests: { cpu: 100m, memory: 128Mi }
