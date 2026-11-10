@@ -230,6 +230,8 @@ export async function loadSkillPacks(o: SkillPackOptions): Promise<{ index: Skil
       if (typeof meta.name === "string" && meta.name !== name) warnings.push(`skill pack ${name}: front matter name is "${meta.name}"`);
       const v = meta.metadata && typeof meta.metadata === "object" ? (meta.metadata as Record<string, unknown>).version : undefined;
       if (typeof v === "string" || typeof v === "number") version = String(v).trim() || undefined;
+      // YAML has already turned 1.10 into 1.1: two releases could share a version.
+      if (typeof v === "number") warnings.push(`skill pack ${name}: metadata.version ${v} is a number; quote it, or YAML drops trailing zeros (1.10 is read as 1.1)`);
       if (meta.sandbox !== undefined) {
         const s = sandboxSchema.safeParse(meta.sandbox);
         if (s.success) sandbox = s.data;

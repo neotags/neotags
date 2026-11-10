@@ -38,6 +38,10 @@ describe("redact", () => {
     expect(redact("GET https://example.com:8443/keys/Zx9Qm2Lp7Vb4Nc8Rd1Ts6Yw3Uh5Je0KfGa/meta").text).toBe("GET https://example.com:8443/keys/[REDACTED]/meta");
     // Outside a URL, a key with `/` in it is still one token.
     expect(redact("key Zx9Qm2Lp7Vb4/Nc8Rd1Ts6Yw3+Uh5Je0KfGa end").text).toBe("key [REDACTED] end");
+    // Also right after a URL in a CSV row, and in a URL's query: neither is a path.
+    const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    expect(redact(`2024-01-01,http://localhost:5080/api/x,${secret}`).text).toBe("2024-01-01,http://localhost:5080/api/x,[REDACTED]");
+    expect(redact(`GET https://example.com/cb?sig=${secret}&a=1`).text).toBe("GET https://example.com/cb?[REDACTED]&a=1");
   });
 });
 

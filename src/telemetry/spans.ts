@@ -145,14 +145,16 @@ type Message = { role: string; content: string };
 
 /**
  * The prompt as recorded: each message redacted and capped, and, over MAX_PROMPT_CHARS, the oldest messages after the
- * first two (the system prompt and the question) replaced by one note, so the newest turns are what is kept.
+ * head (any system prompt, then the first other message: the question) replaced by one note, so the newest turns are
+ * what is kept. An agent turn's transcript has no system message; a one-shot call's starts with one.
  */
 export function recordedPrompt(messages: Message[]): Message[] {
   const all = messages.map((m) => ({ role: m.role, content: recorded(m.content) }));
   const size = (ms: Message[]) => ms.reduce((n, m) => n + m.content.length, 0);
   if (size(all) <= MAX_PROMPT_CHARS) return all;
-  // Two capped messages are far below the limit, so the head always fits.
-  const head = all.slice(0, 2);
+  const systems = all.findIndex((m) => m.role !== "system");
+  // A system prompt and a question, each capped, are far below the limit, so the head always fits.
+  const head = all.slice(0, systems < 0 ? all.length : systems + 1);
   let budget = MAX_PROMPT_CHARS - size(head);
   const tail: Message[] = [];
   for (let i = all.length - 1; i >= head.length; i--) {

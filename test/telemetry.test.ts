@@ -203,6 +203,10 @@ describe("traces with content", () => {
     expect(out.slice(3)).toEqual(ms.slice(14));
     expect(out.reduce((n, m) => n + m.content.length, 0)).toBeLessThanOrEqual(MAX_PROMPT_CHARS);
     expect(recordedPrompt(ms.slice(0, 5))).toEqual(ms.slice(0, 5));
+    // An agent turn's transcript has no system message: the question alone is the head.
+    const agent = recordedPrompt(ms.slice(1));
+    expect(agent.slice(0, 2)).toEqual([ms[1], { role: "system", content: "[12 earlier messages omitted from the trace]" }]);
+    expect(agent.slice(2)).toEqual(ms.slice(14));
   });
 });
 

@@ -162,7 +162,8 @@ describe("skill pack loader", () => {
     put("b-pack/SKILL.md", "---\nname: b-pack\ndescription: b\nmetadata:\n  version: \"0.4.0\"\n---\nB");
     put("a-pack/SKILL.md", "---\nname: a-pack\ndescription: a\nmetadata:\n  version: 2\n---\nA");
     put("c-pack/SKILL.md", "---\nname: c-pack\ndescription: c\n---\nC");
-    const { index } = await loadSkillPacks({ dir, packs: ["b-pack", "a-pack", "c-pack"], refs: {}, maxFileBytes: 10_000 });
+    const { index, warnings } = await loadSkillPacks({ dir, packs: ["b-pack", "a-pack", "c-pack"], refs: {}, maxFileBytes: 10_000 });
+    expect(warnings).toEqual([expect.stringMatching(/^skill pack a-pack: metadata.version 2 is a number; quote it/)]);
     expect(["a-pack", "b-pack", "c-pack"].map((n) => index.get(n)?.version)).toEqual(["2", "0.4.0", undefined]);
     expect(packsVersion([index.get("b-pack")!, index.get("a-pack")!, index.get("c-pack")!])).toBe("a-pack@2,b-pack@0.4.0,c-pack");
     expect(packsVersion([])).toBeUndefined();
