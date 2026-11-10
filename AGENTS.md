@@ -40,6 +40,7 @@ src/sandbox/            Sandbox interface; backend local (executor sidecar over 
 src/mcp/                MCP clients (Streamable HTTP): allowlisted tools as pi AgentTools named <server>__<tool>, background reconnect, unavailable servers named in the system prompt
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport
 src/lang.ts             answer language rule (D13), shared by every entry: answerLang() for code-written text, LANGUAGE_RULE for prompts
+src/version.ts          neotags' version (package.json): the agent version of an entry without skill packs
 test/                   vitest
 deploy/helm/neotags/    Helm chart; deploy/slack-app-manifest.yaml
 executor/               executor sidecar image (Python stdlib + bubblewrap): sandboxed /v1/exec over a unix socket, own unittest suite; see executor/README.md

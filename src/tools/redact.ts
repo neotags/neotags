@@ -50,10 +50,15 @@ export function redact(input: string): RedactResult {
       return p.replace.replace(/\$(\d)/g, (_, i) => String(args[Number(i)] ?? ""));
     });
   }
-  text = text.replace(/[A-Za-z0-9+/_=-]{32,}/g, (tok) => {
+  const random = (tok: string) => {
     if (tok === MARK || !looksRandom(tok)) return tok;
     count++;
     return MARK;
-  });
+  };
+  // `/` belongs to base64 keys, but in a URL it joins the port and path into one long mixed token
+  // (`5080/api/<org>/_search`) that reads as random: there, each part between separators is judged alone.
+  text = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>]+|[A-Za-z0-9+/_=-]{32,}/gi, (m) =>
+    m.includes("://") ? m.replace(/[A-Za-z0-9+_=-]{32,}/g, random) : random(m),
+  );
   return { text, count };
 }

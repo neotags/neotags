@@ -109,11 +109,12 @@ export function telemetryResource(): Resource {
   return resourceFromAttributes({ "service.name": "neotags" }).merge(detectResources({ detectors: [envDetector] }));
 }
 
-export function startTelemetry(
-  opts: { env?: NodeJS.ProcessEnv; exporter?: SpanExporter; log?: Log } = {},
-): Telemetry | undefined {
-  const env = opts.env ?? process.env;
-  if (!opts.exporter && !tracingEnabled(env)) return undefined;
+/**
+ * Configured from `process.env` only: the OTLP exporter and the resource detector read it themselves (endpoint,
+ * headers, timeout, certificates, OTEL_RESOURCE_ATTRIBUTES), so an env passed in would gate tracing but not configure it.
+ */
+export function startTelemetry(opts: { exporter?: SpanExporter; log?: Log } = {}): Telemetry | undefined {
+  if (!opts.exporter && !tracingEnabled()) return undefined;
   if (opts.log) routeDiagnostics(opts.log);
   const exporter = opts.exporter ?? new OTLPTraceExporter();
   const provider = new TracerProvider({

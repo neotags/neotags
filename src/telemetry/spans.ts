@@ -19,6 +19,7 @@ import { W3CTraceContextPropagator } from "@opentelemetry/core";
 import type { AssistantMessage } from "@earendil-works/pi-ai";
 import { messageText, thinkingChars } from "../agent/message.js";
 import { redact } from "../tools/redact.js";
+import { PACKAGE_VERSION } from "../version.js";
 
 // A proxy until startTelemetry registers a provider; a no-op when tracing is off.
 const tracer = trace.getTracer("neotags");
@@ -51,11 +52,27 @@ const withScope = (ctx: Context, scope: TraceScope | undefined): Context => {
   return ctx.setValue(SCOPE, { conversation: scope.conversation ?? outer?.conversation, agent: scope.agent ?? outer?.agent });
 };
 
+const agentVersions = new Map<string, string>();
+
+/**
+ * The version of each entry's agent (its skill packs, `packsVersion`), set once at startup. An entry not listed is
+ * neotags' own version. Without one OpenObserve takes the image tag (`service.version`), and every deploy would show
+ * up as a new agent version even when nothing the agent does changed.
+ */
+export function setAgentVersions(versions: Partial<Record<string, string>>): void {
+  agentVersions.clear();
+  for (const [entry, v] of Object.entries(versions)) if (v) agentVersions.set(entry, v);
+}
+
 /**
  * Agent identity. The id is the entry, like the name, never the bot name: that is a display name (configuration),
  * and renaming the bot would split one agent's history in two.
  */
-export const agentAttrs = (entry: string): Attributes => ({ "gen_ai.agent.name": entry, "gen_ai.agent.id": entry });
+export const agentAttrs = (entry: string): Attributes => ({
+  "gen_ai.agent.name": entry,
+  "gen_ai.agent.id": entry,
+  "gen_ai.agent.version": agentVersions.get(entry) ?? PACKAGE_VERSION,
+});
 
 let reported = false;
 /**
@@ -88,10 +105,12 @@ export async function inSpan<T>(
     try {
       return await fn(span);
     } catch (err) {
-      guarded(() => fail(span, err instanceof Error ? err : String(err)), undefined);
+      // A thrown non-Error is not an LLM error, which is what fail() assumes of a bare string.
+      guarded(() => (err instanceof Error ? fail(span, err) : fail(span, String(err), "error")), undefined);
       throw err;
     } finally {
-      span.end();
+      // Never in place of fn's result or error.
+      guarded(() => span.end(), undefined);
     }
   });
 }
@@ -116,6 +135,58 @@ export function recorded(text: string): string {
   return clean.length > MAX_CONTENT_CHARS ? `${clean.slice(0, MAX_CONTENT_CHARS)}… [truncated ${clean.length - MAX_CONTENT_CHARS} chars]` : clean;
 }
 
+/**
+ * Most characters of recorded message content on one span. Every agent turn re-records the transcript so far, so a
+ * long run's prompt grows without bound; the largest seen so far was about 145k.
+ */
+export const MAX_PROMPT_CHARS = 256_000;
+
+type Message = { role: string; content: string };
+
+/**
+ * The prompt as recorded: each message redacted and capped, and, over MAX_PROMPT_CHARS, the oldest messages after the
+ * first two (the system prompt and the question) replaced by one note, so the newest turns are what is kept.
+ */
+export function recordedPrompt(messages: Message[]): Message[] {
+  const all = messages.map((m) => ({ role: m.role, content: recorded(m.content) }));
+  const size = (ms: Message[]) => ms.reduce((n, m) => n + m.content.length, 0);
+  if (size(all) <= MAX_PROMPT_CHARS) return all;
+  // Two capped messages are far below the limit, so the head always fits.
+  const head = all.slice(0, 2);
+  let budget = MAX_PROMPT_CHARS - size(head);
+  const tail: Message[] = [];
+  for (let i = all.length - 1; i >= head.length; i--) {
+    const m = all[i]!;
+    if (m.content.length > budget) break;
+    budget -= m.content.length;
+    tail.unshift(m);
+  }
+  const omitted = all.length - head.length - tail.length;
+  return [...head, { role: "system", content: `[${omitted} earlier messages omitted from the trace]` }, ...tail];
+}
+
+/**
+ * One JSON attribute per direction, in the OTel GenAI shape (`gen_ai.input.messages`, `gen_ai.output.messages`), not
+ * the indexed `gen_ai.prompt.N.*`: two attributes per message ran a long run's chat spans past the SDK's 128 attributes
+ * per span, and the attributes set last (the reply, the token usage) were dropped. Both directions use this form:
+ * OpenObserve reads the indexed one first and would then ignore `gen_ai.input.messages`.
+ */
+const messagesAttr = (ms: (Message & { finish_reason?: string })[]) => JSON.stringify(ms);
+
+/** A prompt's `gen_ai.input.messages`, redacted on first use and then reused. */
+export type RecordedInput = () => string;
+
+export function recordedInput(req: Pick<ChatRequest, "system" | "messages">): RecordedInput {
+  let value: string | undefined;
+  return () => {
+    if (value === undefined) {
+      const messages = typeof req.messages === "function" ? req.messages() : req.messages;
+      value = messagesAttr(recordedPrompt([...(req.system ? [{ role: "system", content: req.system }] : []), ...messages]));
+    }
+    return value;
+  };
+}
+
 export interface ChatRequest {
   model: string;
   /** llm.chains entry the model was picked from, and its reasoning effort. */
@@ -133,7 +204,9 @@ export interface ChatRequest {
   json?: boolean;
   system?: string;
   /** A function is only called when content is recorded, inside the tracing guard (an agent transcript is walked). */
-  messages: { role: string; content: string }[] | (() => { role: string; content: string }[]);
+  messages: Message[] | (() => Message[]);
+  /** `system` and `messages` as recorded, shared by the attempts of one call so each is redacted once. */
+  input?: RecordedInput;
   /** Record prompts and replies. Off by default: they carry (redacted) Slack content. */
   captureContent: boolean;
 }
@@ -143,8 +216,8 @@ const FINISH: Partial<Record<AssistantMessage["stopReason"], string>> = { toolUs
 
 /**
  * One span per gateway request (retries and budget widening each get their own, so every billed call is counted).
- * Attributes follow the OTel GenAI conventions, with prompts in the indexed `gen_ai.prompt.N.*` form that
- * OpenLLMetry emits; OpenObserve and Langfuse both turn such spans into LLM generations with tokens and latency.
+ * Attributes follow the OTel GenAI conventions; OpenObserve turns such spans into LLM generations with tokens and
+ * latency.
  */
 export function startChatSpan(req: ChatRequest): Span {
   return guarded(() => chatSpan(req), NOOP_SPAN);
@@ -167,14 +240,7 @@ function chatSpan(req: ChatRequest): Span {
     ...(req.json && { "gen_ai.output.type": "json" }),
     ...scopeAttrs(),
   };
-  if (req.captureContent) {
-    const messages = typeof req.messages === "function" ? req.messages() : req.messages;
-    const prompt = [...(req.system ? [{ role: "system", content: req.system }] : []), ...messages];
-    prompt.forEach((m, i) => {
-      attributes[`gen_ai.prompt.${i}.role`] = m.role;
-      attributes[`gen_ai.prompt.${i}.content`] = recorded(m.content);
-    });
-  }
+  if (req.captureContent) attributes["gen_ai.input.messages"] = (req.input ?? recordedInput(req))();
   return tracer.startSpan(`chat ${req.model}`, { kind: SpanKind.CLIENT, attributes });
 }
 
@@ -208,11 +274,10 @@ function closeChatSpan(span: Span, outcome: ChatOutcome) {
     ...(thinking > 0 && { "neotags.llm.thinking_chars": thinking }),
   });
   if (outcome.captureContent) {
-    span.setAttributes({
-      "gen_ai.completion.0.role": "assistant",
-      "gen_ai.completion.0.content": recorded(outcome.text ?? messageText(msg)),
-      "gen_ai.completion.0.finish_reason": finish,
-    });
+    span.setAttribute(
+      "gen_ai.output.messages",
+      messagesAttr([{ role: "assistant", content: recorded(outcome.text ?? messageText(msg)), finish_reason: finish }]),
+    );
   }
   if (msg.stopReason === "error" || msg.stopReason === "aborted") fail(span, msg.errorMessage ?? `LLM stopped: ${msg.stopReason}`);
 }
@@ -322,10 +387,8 @@ export function endRunSpan(span: Span, o: RunSpanOutcome) {
       });
       if (o.captureContent) {
         span.setAttributes({
-          "gen_ai.prompt.0.role": "user",
-          "gen_ai.prompt.0.content": recorded(o.question),
-          "gen_ai.completion.0.role": "assistant",
-          "gen_ai.completion.0.content": recorded(o.answer),
+          "gen_ai.input.messages": messagesAttr([{ role: "user", content: recorded(o.question) }]),
+          "gen_ai.output.messages": messagesAttr([{ role: "assistant", content: recorded(o.answer) }]),
         });
       }
       if (o.state === "failed") fail(span, o.reason ?? "run failed", o.errorType ?? "error");

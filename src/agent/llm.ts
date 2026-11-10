@@ -1,6 +1,6 @@
 import type { AssistantMessage, Context } from "@earendil-works/pi-ai";
 import type { ChainName, Config, Effort } from "../config/index.js";
-import { endChatSpan, startChatSpan } from "../telemetry/spans.js";
+import { endChatSpan, recordedInput, startChatSpan } from "../telemetry/spans.js";
 import { thinkingChars } from "./message.js";
 import { createGateway, type ChainStep, type Gateway, type ModelPolicy } from "./models.js";
 
@@ -161,6 +161,8 @@ export class PiLlmClient implements LlmClient {
     let deadline = now() + this.d.timeoutMs;
     const minAttemptMs = Math.min(1000, this.d.timeoutMs / 10);
     let attempts = 0;
+    // Recorded once for all attempts: the prompt is the same, and redacting it is the costly part of the span.
+    const input = recordedInput({ system, messages: userMessages });
     try {
       for (let attempt = 0; attempt <= this.d.maxRetries; attempt++) {
         if (attempt > 0) {
@@ -181,6 +183,7 @@ export class PiLlmClient implements LlmClient {
           ...(opts.json && { json: true }),
           system,
           messages: userMessages,
+          input,
           captureContent: this.d.captureContent ?? false,
         });
         let msg: AssistantMessage;

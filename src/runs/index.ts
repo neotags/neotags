@@ -5,7 +5,7 @@ import type { Gateway } from "../agent/models.js";
 import type { Config } from "../config/index.js";
 import type { McpHub } from "../mcp/index.js";
 import { EXEC_TOOL, skillExecTool, type SkillExecutor } from "../sandbox/index.js";
-import { SkillPackIndex, loadSkillPacks } from "../tools/skillpacks.js";
+import { SkillPackIndex, loadSkillPacks, packsVersion, type SkillPack } from "../tools/skillpacks.js";
 import { RunManager } from "./manager.js";
 import { PiAgentRunner } from "./pi-runner.js";
 
@@ -21,6 +21,13 @@ export async function loadConfiguredSkillPacks(cfg: Config, log: Pick<Logger, "i
   for (const w of warnings) log.warn({ dir: sp.dir }, `skill packs: ${w}`);
   log.info({ packs: index.list().map((p) => ({ name: p.name, refs: p.refs.size })) }, "skill packs loaded");
   return index;
+}
+
+/** Each entry's agent version: the packs from `agent.entries` that loaded. Entries without packs have none. */
+export function entryVersions(cfg: Config, index: SkillPackIndex): Partial<Record<string, string>> {
+  return Object.fromEntries(
+    Object.entries(cfg.agent.entries).map(([entry, names]) => [entry, packsVersion((names ?? []).map((n) => index.get(n)).filter((p): p is SkillPack => !!p))]),
+  );
 }
 
 /** The run manager with the pi-agent-core runner, from config. Entries (O2 gateway, Slack) submit to it. */
