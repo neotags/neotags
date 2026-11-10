@@ -88,6 +88,8 @@ export interface SkillPack {
   refs: ReadonlyMap<string, string>;
   /** Front matter `sandbox`; a pack without one may not execute anything. */
   sandbox?: SandboxSpec;
+  /** Front matter `metadata.version`. */
+  version?: string;
 }
 
 /** Loaded packs. Reads come from this in-memory index only, so a model-chosen path never reaches the filesystem. */
@@ -208,6 +210,7 @@ export async function loadSkillPacks(o: SkillPackOptions): Promise<{ index: Skil
     let description = "";
     let body: string | undefined;
     let sandbox: SandboxSpec | undefined;
+    let version: string | undefined;
     if (whole) {
       const md = await read(`${name}/SKILL.md`);
       if (md === undefined) {
@@ -225,6 +228,10 @@ export async function loadSkillPacks(o: SkillPackOptions): Promise<{ index: Skil
       body = parsed.body.trim();
       description = typeof meta.description === "string" ? meta.description.trim() : "";
       if (typeof meta.name === "string" && meta.name !== name) warnings.push(`skill pack ${name}: front matter name is "${meta.name}"`);
+      const v = meta.metadata && typeof meta.metadata === "object" ? (meta.metadata as Record<string, unknown>).version : undefined;
+      if (typeof v === "string" || typeof v === "number") version = String(v).trim() || undefined;
+      // YAML has already turned 1.10 into 1.1: two releases could share a version.
+      if (typeof v === "number") warnings.push(`skill pack ${name}: metadata.version ${v} is a number; quote it, or YAML drops trailing zeros (1.10 is read as 1.1)`);
       if (meta.sandbox !== undefined) {
         const s = sandboxSchema.safeParse(meta.sandbox);
         if (s.success) sandbox = s.data;
@@ -248,9 +255,21 @@ export async function loadSkillPacks(o: SkillPackOptions): Promise<{ index: Skil
       warnings.push(`skill pack ${name}: none of its listed references could be read, skipped`);
       continue;
     }
-    packs.set(name, { name, description, ...(body !== undefined && { body }), refs, ...(sandbox && { sandbox }) });
+    packs.set(name, { name, description, ...(body !== undefined && { body }), refs, ...(sandbox && { sandbox }), ...(version && { version }) });
   }
   return { index: new SkillPackIndex(packs), warnings };
+}
+
+/**
+ * The agent version of an entry that starts with these packs: `name@version` of each, sorted by name, so only a
+ * change to the packs makes a new version, not a new image. Undefined without packs.
+ */
+export function packsVersion(packs: readonly Pick<SkillPack, "name" | "version">[]): string | undefined {
+  if (packs.length === 0) return undefined;
+  return [...packs]
+    .sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0))
+    .map((p) => (p.version ? `${p.name}@${p.version}` : p.name))
+    .join(",");
 }
 
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], details: undefined });

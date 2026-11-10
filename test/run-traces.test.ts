@@ -1,3 +1,4 @@
+import { readFileSync } from "node:fs";
 import { obj, str } from "@earendil-works/pi-schema";
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { SpanStatusCode, trace, TraceFlags } from "@opentelemetry/api";
@@ -10,7 +11,7 @@ import { RunManager } from "../src/runs/manager.js";
 import { PiAgentRunner, type PiRunnerOptions } from "../src/runs/pi-runner.js";
 import type { RunInput } from "../src/runs/types.js";
 import { startTelemetry } from "../src/telemetry/index.js";
-import { endChatSpan, inSpan, MAX_CONTENT_CHARS, recorded, spanTraceId, startChatSpan, ToolSpans, withSpan } from "../src/telemetry/spans.js";
+import { endChatSpan, inSpan, MAX_CONTENT_CHARS, recorded, setAgentVersions, spanTraceId, startChatSpan, ToolSpans, withSpan } from "../src/telemetry/spans.js";
 import { SkillPackIndex } from "../src/tools/skillpacks.js";
 import { callTool, fail, say, scripted, type Reply } from "./fake-stream.js";
 
@@ -96,7 +97,7 @@ async function run(replies: Reply[], o: Parameters<typeof setup>[1] & { input?: 
 }
 
 const contentKeys = (s: ReadableSpan) =>
-  Object.keys(s.attributes).filter((k) => /^gen_ai\.(prompt|completion)\.|^gen_ai\.tool\.call\.(arguments|result)$/.test(k));
+  Object.keys(s.attributes).filter((k) => /^gen_ai\.(prompt|completion)\.|^gen_ai\.(input|output)\.messages$|^gen_ai\.tool\.call\.(arguments|result)$/.test(k));
 
 describe("agent run traces", () => {
   beforeEach(async () => {
@@ -177,6 +178,22 @@ describe("agent run traces", () => {
     expect(spans.flatMap(contentKeys)).toEqual([]);
   });
 
+  // Not the image tag (service.version), which OpenObserve falls back to: a deploy alone must not make a new version.
+  it("gives every span of a run its entry's agent version: the skill packs, else neotags' own", async () => {
+    setAgentVersions({ o2: "o2-query-assistant@0.4.0" });
+    try {
+      const { spans } = await run([callTool("o2__SearchSQL", { sql: "SELECT 1" }, "call-1"), say("done")]);
+      expect(new Set(spans.map((s) => s.attributes["gen_ai.operation.name"]))).toEqual(new Set(["invoke_agent", "chat", "execute_tool"]));
+      expect(spans.every((s) => s.attributes["gen_ai.agent.version"] === "o2-query-assistant@0.4.0")).toBe(true);
+      setAgentVersions({});
+      exporter.reset();
+      const { root } = await run([say("done")]);
+      expect(root.attributes["gen_ai.agent.version"]).toBe(JSON.parse(readFileSync("package.json", "utf8")).version);
+    } finally {
+      setAgentVersions({});
+    }
+  });
+
   it("gives a retried request its own failed chat span", async () => {
     const { chats } = await run([fail("503 Service Unavailable"), say("ok")]);
     expect(chats.map((s) => [s.attributes["neotags.llm.attempt"], s.status.code])).toEqual([
@@ -208,12 +225,13 @@ describe("agent run traces", () => {
     const all = spans.flatMap((s) => Object.values(s.attributes).map(String)).join("\n");
     for (const secret of [AWS_KEY, PASSWORD, BEARER]) expect(all).not.toContain(secret);
 
-    expect(root.attributes["gen_ai.prompt.0.content"]).toBe("why more errors? key [REDACTED]");
-    expect(root.attributes["gen_ai.completion.0.content"]).toBe("final");
+    const messages = (s: ReadableSpan, key: "input" | "output") => JSON.parse(String(s.attributes[`gen_ai.${key}.messages`])) as { role: string; content: string }[];
+    expect(messages(root, "input")).toEqual([{ role: "user", content: "why more errors? key [REDACTED]" }]);
+    expect(messages(root, "output")).toEqual([{ role: "assistant", content: "final" }]);
     // The first request's transcript: the system prompt, then the user message with the page context.
-    expect(chats[0]!.attributes["gen_ai.prompt.0.role"]).toBe("system");
-    expect(chats[0]!.attributes["gen_ai.prompt.1.content"]).toContain("[REDACTED]");
-    expect(chats[1]!.attributes["gen_ai.completion.0.content"]).toBe("found it, password=[REDACTED]");
+    expect(messages(chats[0]!, "input")[0]!.role).toBe("system");
+    expect(messages(chats[0]!, "input")[1]!.content).toContain("[REDACTED]");
+    expect(messages(chats[1]!, "output")[0]!.content).toBe("found it, password=[REDACTED]");
     expect(tools[0]!.attributes["gen_ai.tool.call.arguments"]).toContain("[REDACTED]");
     expect(tools[0]!.attributes["gen_ai.tool.call.result"]).toBe("rows: 3; header Bearer [REDACTED]");
   });

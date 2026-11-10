@@ -3,7 +3,8 @@ import { tmpdir } from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config/index.js";
-import { loadSkillPacks, parseSkillMd, skillPackTools } from "../src/tools/skillpacks.js";
+import { entryVersions } from "../src/runs/index.js";
+import { loadSkillPacks, packsVersion, parseSkillMd, skillPackTools } from "../src/tools/skillpacks.js";
 
 let dir: string;
 let outside: string;
@@ -155,6 +156,21 @@ describe("skill pack loader", () => {
     expect(index.ref("o2-query-assistant", "o2-sql.md")).toBeUndefined();
     expect(index.get("o2-query-assistant")!.body).toContain("Check StreamSchema first.");
     expect(warnings.join("\n")).toMatch(/o2-sql.md: EACCES/);
+  });
+
+  it("reads metadata.version, and names an entry's agent version by its packs, sorted", async () => {
+    put("b-pack/SKILL.md", "---\nname: b-pack\ndescription: b\nmetadata:\n  version: \"0.4.0\"\n---\nB");
+    put("a-pack/SKILL.md", "---\nname: a-pack\ndescription: a\nmetadata:\n  version: 2\n---\nA");
+    put("c-pack/SKILL.md", "---\nname: c-pack\ndescription: c\n---\nC");
+    const { index, warnings } = await loadSkillPacks({ dir, packs: ["b-pack", "a-pack", "c-pack"], refs: {}, maxFileBytes: 10_000 });
+    expect(warnings).toEqual([expect.stringMatching(/^skill pack a-pack: metadata.version 2 is a number; quote it/)]);
+    expect(["a-pack", "b-pack", "c-pack"].map((n) => index.get(n)?.version)).toEqual(["2", "0.4.0", undefined]);
+    expect(packsVersion([index.get("b-pack")!, index.get("a-pack")!, index.get("c-pack")!])).toBe("a-pack@2,b-pack@0.4.0,c-pack");
+    expect(packsVersion([])).toBeUndefined();
+    const cfg = loadConfig({
+      SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", NEOTAGS_CONFIG: "f",
+    }, () => `skillPacks:\n  dir: ${dir}\n  packs: [a-pack, b-pack, missing]\nagent:\n  entries:\n    o2: [b-pack, a-pack]\n    job: [missing]\n`);
+    expect(entryVersions(cfg, index)).toEqual({ o2: "a-pack@2,b-pack@0.4.0", job: undefined });
   });
 
   it("reports a missing dir instead of throwing", async () => {

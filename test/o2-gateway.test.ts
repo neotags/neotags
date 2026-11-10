@@ -143,6 +143,19 @@ const SQL = `SELECT namespace, count(*) AS errors FROM "app_logs" WHERE level = 
 const T0 = 1793869200000000;
 const T1 = 1793872800000000;
 const searchResult = JSON.stringify({ took: 85, hits: [{ namespace: "payments", errors: 41 }, { namespace: "auth", errors: 9 }, { namespace: "web", errors: 7 }], total: 3 });
+// SearchSQL with `agent_options.output_format: "csv"`, as O2 returns it: `hits` emptied, the rows in `data`.
+const csvResult = JSON.stringify({
+  took: 155,
+  hits: [],
+  total: 3,
+  from: 0,
+  size: 3,
+  columns: ["namespace", "errors"],
+  scan_size: 17,
+  data: "namespace,errors\npayments,41\nauth,9\nweb,7",
+  format: "csv",
+  is_partial: false,
+});
 // The guard adds the LIMIT and the size; the button must open what ran.
 const withLimit = (args: Record<string, unknown>) => {
   const q = (args.request_body as { query: Record<string, unknown> }).query;
@@ -237,7 +250,7 @@ describe("O2 gateway: a full turn", () => {
       [
         mcpTool("o2__StreamSchema", JSON.stringify({ fields: Array(12).fill({ name: "f" }) })),
         mcpTool("o2__tools_call", searchResult, (a) => ({ ...a, args: withLimit(a.args as Record<string, unknown>) })),
-        mcpTool("o2prod__SearchSQL", searchResult, withLimit),
+        mcpTool("o2prod__SearchSQL", csvResult, withLimit),
       ],
     );
     const { url } = await serve(runner);
@@ -271,8 +284,9 @@ describe("O2 gateway: a full turn", () => {
       summary: { count: 3, took: 85 },
       call_args: { stream_name: "app_logs", stream_type: "logs", request_body: { query: { sql: `${SQL}\nLIMIT 100`, start_time: T0, end_time: T1, size: 100 } } },
     });
-    // The other org's does not: the button would open the user's org.
+    // The other org's does not: the button would open the user's org. Its csv rows are counted from `data`.
     expect(other).not.toHaveProperty("call_args");
+    expect(other).toMatchObject({ summary: { count: 3, took: 155 }, message: "Returned 3 rows" });
     expect(ev.find((e) => e.type === "tool_call" && e.call_id === "call_03")!.message).toContain(" (in org o2prod)");
     expect(ev.find((e) => e.type === "tool_call" && e.call_id === "call_02")!.context).toEqual({
       request_body: { query: { sql: SQL, start_time: T0, end_time: T1 } },
@@ -729,6 +743,22 @@ describe("O2 request mapping", () => {
     expect(resultSummary(searchResult)).toEqual({ count: 3, took: 85 });
     expect(resultSummary(`{"took":5,"hits":[{"total":3},`)).toBeUndefined();
     expect(resultSummary("a,b\n1,2")).toBeUndefined();
+  });
+
+  // Shapes and escaping as O2 returns them for agent_options.output_format; values replaced.
+  it("counts the rows of a csv, md_table or ndjson result from data, not total", () => {
+    expect(resultSummary(csvResult)).toEqual({ count: 3, took: 155 });
+    // A cell's newlines and quotes stay on its record's line.
+    const quoted = String.raw`{"took":166,"hits":[],"total":2,"from":0,"size":2,"columns":["_timestamp","trace_id","body"],"scan_size":17,"data":"_timestamp,trace_id,body\n1794349500335000,e2617266e8f7dae91de6d00ae387d72c,\"[{\"\"role\"\":\"\"assistant\"\",\"\"content\"\":\"\"## Conclusion\\n\\n- a, b\\n- c\"\"}]\"\n1794349498445000,e2617266e8f7dae91de6d00ae387d72c,\"[{\"\"content\"\":\"\"done\"\"}]\"","format":"csv","is_partial":false}`;
+    expect((JSON.parse(quoted) as { data: string }).data.split("\n")).toHaveLength(3);
+    expect(resultSummary(quoted)).toEqual({ count: 2, took: 166 });
+    const table = JSON.stringify({ took: 55, hits: [], total: 3, data: "| namespace | errors |\n| --- | --- |\n| payments | 41 |\n| auth | 9 |\n| web | 7 |", format: "md_table", is_partial: false });
+    expect(resultSummary(table)).toEqual({ count: 3, took: 55 });
+    expect(resultSummary(JSON.stringify({ took: 3, hits: [], total: 2, data: '{"a":1}\n{"b":2}\n', format: "ndjson" }))).toEqual({ count: 2, took: 3 });
+    // No rows: O2 sends an empty data and no columns.
+    expect(resultSummary(String.raw`{"took":50,"hits":[],"total":0,"from":0,"size":5,"scan_size":0,"data":"","format":"csv","is_partial":false}`)).toEqual({ count: 0, took: 50 });
+    // total counts rows matched, which can be more than the rows returned.
+    expect(resultSummary(JSON.stringify({ took: 4, hits: [], total: 40, data: "level,n\nerror,1", format: "csv" }))).toEqual({ count: 1, took: 4 });
   });
 
   it("names the current org's tools, or says none queries it", () => {

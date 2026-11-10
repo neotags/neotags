@@ -155,6 +155,32 @@ export function callMessage(t: PanelTool, lang: AnswerLang, other?: string): str
   return other ? `${m[lang]} (${lang === "zh" ? `org ${other}` : `in org ${other}`})` : m[lang];
 }
 
+const nonEmptyLines = (s: string) => s.split("\n").filter((l) => l.trim());
+const MD_SEPARATOR = /^[|\-:\s]+$/;
+
+/**
+ * Rows in `data`, where `agent_options.output_format` moves the hits (and empties `hits`). O2 escapes newlines inside
+ * cells, so one line is one record. Not `total`: O2 can report more rows matched than it returned. Same rules as
+ * upstream O2's `data_rows` (oncall/rca_run/evidence.rs).
+ */
+function dataRows(data: string, format: unknown): number | undefined {
+  const lines = nonEmptyLines(data);
+  const mdRows = () => Math.max(0, lines.map((l) => l.trim()).filter((l) => l.startsWith("|") && !(l.includes("-") && MD_SEPARATOR.test(l))).length - 1);
+  switch (format) {
+    case "csv":
+      return Math.max(0, lines.length - 1);
+    case "md_table":
+      return mdRows();
+    // O2's fallback for sparse results: one JSON object per line, no header.
+    case "ndjson":
+      return lines.length;
+    case undefined:
+      return data.trimStart().startsWith("|") ? mdRows() : Math.max(0, lines.length - 1);
+    default:
+      return undefined;
+  }
+}
+
 /**
  * Rows returned and milliseconds of an O2 search result. Only from a whole JSON result: guessing from a cut one could
  * read a field of a hit as the total.
@@ -167,7 +193,9 @@ export function resultSummary(output: string): { count?: number; took?: number }
     return undefined;
   }
   if (!isObj(v)) return undefined;
-  const count = Array.isArray(v.hits) ? v.hits.length : undefined;
+  const hits = Array.isArray(v.hits) ? v.hits.length : undefined;
+  const data = typeof v.data === "string" && v.data.trim() ? v.data : undefined;
+  const count = !hits && data !== undefined ? dataRows(data, v.format) : hits;
   const took = typeof v.took === "number" ? v.took : undefined;
   if (count === undefined && took === undefined) return undefined;
   return { ...(count !== undefined && { count }), ...(took !== undefined && { took }) };

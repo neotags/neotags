@@ -50,10 +50,19 @@ export function redact(input: string): RedactResult {
       return p.replace.replace(/\$(\d)/g, (_, i) => String(args[Number(i)] ?? ""));
     });
   }
-  text = text.replace(/[A-Za-z0-9+/_=-]{32,}/g, (tok) => {
+  const random = (tok: string) => {
     if (tok === MARK || !looksRandom(tok)) return tok;
     count++;
     return MARK;
+  };
+  // `/` belongs to base64 keys, but in a URL's path it joins the port and path into one long mixed token
+  // (`5080/api/<org>/_search`) that reads as random: there, each path segment is judged alone. Only the path: a URL
+  // ends at `,` or `;` (a CSV row goes on with other fields), and its query is judged like any other text.
+  text = text.replace(/\b[a-z][a-z0-9+.-]*:\/\/[^\s"'`<>,;]+|[A-Za-z0-9+/_=-]{32,}/gi, (m) => {
+    if (!m.includes("://")) return random(m);
+    const q = m.search(/[?#]/);
+    const [path, rest] = q < 0 ? [m, ""] : [m.slice(0, q), m.slice(q)];
+    return path.replace(/[A-Za-z0-9+_=-]{32,}/g, random) + rest.replace(/[A-Za-z0-9+/_=-]{32,}/g, random);
   });
   return { text, count };
 }

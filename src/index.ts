@@ -6,10 +6,11 @@ import { createO2Gateway, type O2Gateway } from "./gateway/o2.js";
 import { createSlack } from "./gateway/slack.js";
 import { startMcp, type McpHub } from "./mcp/index.js";
 import { Router } from "./router/index.js";
-import { createRunManager, loadConfiguredSkillPacks, type RunManager } from "./runs/index.js";
+import { createRunManager, entryVersions, loadConfiguredSkillPacks, type RunManager } from "./runs/index.js";
 import { createSkillExecutor } from "./sandbox/index.js";
 import { allSkills, selectSkills } from "./skills/registry.js";
 import { startTelemetry } from "./telemetry/index.js";
+import { setAgentVersions } from "./telemetry/spans.js";
 import { HttpOnyxClient, type OnyxClient } from "./tools/onyx.js";
 
 // Kubernetes sends SIGTERM then waits terminationGracePeriodSeconds (default 30s) before SIGKILL.
@@ -95,6 +96,9 @@ if (cfg.o2Gateway.enabled) {
   if (!gateway) log.error("o2Gateway is enabled but no LLM is configured; the O2 entry is not started");
   else {
     const index = await loadConfiguredSkillPacks(cfg, log);
+    const versions = entryVersions(cfg, index);
+    setAgentVersions(versions);
+    log.info({ versions }, "agent versions");
     mcp = await startMcp(cfg, log);
     const executor = createSkillExecutor(cfg, index, log);
     runs = createRunManager(cfg, { gateway, index, log, mcp, executor });

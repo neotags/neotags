@@ -4,7 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { diag } from "@opentelemetry/api";
 import { ExportResultCode, type ExportResult } from "@opentelemetry/core";
 import { tracedStreamFn } from "../src/agent/index.js";
-import { endChatSpan, startChatSpan } from "../src/telemetry/spans.js";
+import { endChatSpan, inSpan, MAX_PROMPT_CHARS, recordedPrompt, startChatSpan } from "../src/telemetry/spans.js";
 import { PiLlmClient } from "../src/agent/llm.js";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
@@ -27,6 +27,9 @@ const log = pino({ level: "silent" });
 const base = { SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y" };
 // Single-model setup: every chain runs on m1, without effort.
 const { policy } = createGateway(loadConfig({ ...base, LLM_MODEL: "m1" }));
+/** A span's `gen_ai.input.messages` or `gen_ai.output.messages`, parsed. */
+const messages = (s: ReadableSpan, key: "input" | "output") => JSON.parse(String(s.attributes[`gen_ai.${key}.messages`])) as Record<string, unknown>[];
+
 const msg = (over: object = {}) =>
   ({
     role: "assistant", content: [{ type: "text", text: "ok" }], stopReason: "stop", model: "m1",
@@ -39,6 +42,16 @@ describe("telemetry config", () => {
     expect(tracingEnabled({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://o2.test/api/default" })).toBe(true);
     expect(tracingEnabled({ OTEL_EXPORTER_OTLP_TRACES_ENDPOINT: "http://lf.test/api/public/otel/v1/traces" })).toBe(true);
     expect(tracingEnabled({ OTEL_EXPORTER_OTLP_ENDPOINT: "http://o2.test", OTEL_SDK_DISABLED: "true" })).toBe(false);
+  });
+  it("starts from process.env alone: the exporter and resource read it, so a passed env would only gate tracing", () => {
+    vi.stubEnv("OTEL_EXPORTER_OTLP_ENDPOINT", "");
+    vi.stubEnv("OTEL_EXPORTER_OTLP_TRACES_ENDPOINT", "");
+    try {
+      // @ts-expect-error env is not an option
+      expect(startTelemetry({ env: { OTEL_EXPORTER_OTLP_ENDPOINT: "http://collector.test" } })).toBeUndefined();
+    } finally {
+      vi.unstubAllEnvs();
+    }
   });
   it("captures no content by default; the file or the GenAI env var turns it on", () => {
     expect(loadConfig(base).telemetry.captureContent).toBe(false);
@@ -129,7 +142,7 @@ describe("traces", () => {
       "gen_ai.usage.input_tokens": 30, "gen_ai.usage.output_tokens": 7, "llm.usage.total_tokens": 37,
       "gen_ai.response.finish_reasons": ["stop"],
     });
-    expect(Object.keys(answer!.attributes).some((k) => k.startsWith("gen_ai.prompt") || k.startsWith("gen_ai.completion"))).toBe(false);
+    expect(Object.keys(answer!.attributes).some((k) => /^gen_ai\.(prompt|completion|input\.messages|output\.messages)/.test(k))).toBe(false);
   });
 });
 
@@ -161,11 +174,39 @@ describe("traces with content", () => {
     exporter.reset();
     await llm.chat([{ role: "system", content: "sys" }, { role: "user", content: "hi" }]);
     const [span] = (await flushed()).filter((s) => s.name === "chat m1");
-    expect(span!.attributes).toMatchObject({
-      "gen_ai.prompt.0.role": "system", "gen_ai.prompt.0.content": "sys",
-      "gen_ai.prompt.1.role": "user", "gen_ai.prompt.1.content": "hi",
-      "gen_ai.completion.0.content": "ok",
-    });
+    expect(messages(span!, "input")).toEqual([{ role: "system", content: "sys" }, { role: "user", content: "hi" }]);
+    expect(messages(span!, "output")).toEqual([{ role: "assistant", content: "ok", finish_reason: "stop" }]);
+    expect(Object.keys(span!.attributes).some((k) => k.startsWith("gen_ai.prompt.") || k.startsWith("gen_ai.completion."))).toBe(false);
+  });
+
+  // A 26-step run with 56 tool calls: two attributes per message ran past the SDK's 128 per span, and the reply and
+  // token usage, set when the span ends, were dropped.
+  it("keeps a long transcript, the reply and the usage within the attribute limit", async () => {
+    const long = Array.from({ length: 120 }, (_, i) => ({ role: i % 2 ? "assistant" : "user", content: `turn ${i}` }));
+    exporter.reset();
+    const span = startChatSpan({ model: "m1", system: "sys", messages: long, captureContent: true });
+    endChatSpan(span, { msg: msg(), captureContent: true });
+    const [s] = (await flushed()).filter((x) => x.name === "chat m1");
+    expect(s!.droppedAttributesCount).toBe(0);
+    expect(messages(s!, "input")).toHaveLength(121);
+    expect(messages(s!, "input").at(-1)).toEqual({ role: "assistant", content: "turn 119" });
+    expect(messages(s!, "output")).toEqual([{ role: "assistant", content: "ok", finish_reason: "stop" }]);
+    expect(s!.attributes).toMatchObject({ "gen_ai.usage.input_tokens": 30, "gen_ai.usage.output_tokens": 7, "gen_ai.response.finish_reasons": ["stop"] });
+  });
+
+  it("bounds a recorded prompt: keeps the system prompt, the question and the newest turns", () => {
+    const big = "x".repeat(30_000);
+    const ms = [{ role: "system", content: "sys" }, { role: "user", content: "q" }, ...Array.from({ length: 20 }, (_, i) => ({ role: "tool", content: `${i}${big}` }))];
+    const out = recordedPrompt(ms);
+    expect(out.slice(0, 2)).toEqual(ms.slice(0, 2));
+    expect(out[2]).toEqual({ role: "system", content: "[12 earlier messages omitted from the trace]" });
+    expect(out.slice(3)).toEqual(ms.slice(14));
+    expect(out.reduce((n, m) => n + m.content.length, 0)).toBeLessThanOrEqual(MAX_PROMPT_CHARS);
+    expect(recordedPrompt(ms.slice(0, 5))).toEqual(ms.slice(0, 5));
+    // An agent turn's transcript has no system message: the question alone is the head.
+    const agent = recordedPrompt(ms.slice(1));
+    expect(agent.slice(0, 2)).toEqual([ms[1], { role: "system", content: "[12 earlier messages omitted from the trace]" }]);
+    expect(agent.slice(2)).toEqual(ms.slice(14));
   });
 });
 
@@ -235,10 +276,11 @@ describe("agent traces", () => {
     const [span] = (await flushed()).filter((x) => x.name === "chat m1");
     expect(span!.attributes).toMatchObject({
       "neotags.llm.purpose": "agent", "neotags.llm.chain": "agent", "neotags.llm.effort": "high",
-      "gen_ai.prompt.0.role": "user", "gen_ai.prompt.0.content": "why is disk full?",
-      "gen_ai.completion.0.content": 'search({"q":"disk"})', "gen_ai.response.finish_reasons": ["tool_calls"],
+      "gen_ai.response.finish_reasons": ["tool_calls"],
       "gen_ai.usage.input_tokens": 30,
     });
+    expect(messages(span!, "input")).toEqual([{ role: "user", content: "why is disk full?" }]);
+    expect(messages(span!, "output")).toEqual([{ role: "assistant", content: 'search({"q":"disk"})', finish_reason: "tool_calls" }]);
     expect(span!.attributes["neotags.llm.attempt"]).toBeUndefined();
   });
 });
@@ -292,5 +334,28 @@ describe("tracing never fails the traced work", () => {
     const s = await tracedStreamFn(inner, { captureContent: true })({ id: "m1" } as never, { messages: [{ role: "user", content: 1 }] } as never);
     await s.result();
     await new Promise((r) => setTimeout(r, 0)); // vitest fails the run on an unhandled rejection
+  });
+
+  it("records what inSpan's work threw, and rethrows it as it was", async () => {
+    const thrown = { code: 7 };
+    await expect(inSpan("skill a", {}, async () => Promise.reject(thrown))).rejects.toBe(thrown);
+    const err = new TypeError("bad input");
+    await expect(inSpan("skill b", {}, async () => { throw err; })).rejects.toBe(err);
+    const [a, b] = (await flushed()).filter((s) => s.name.startsWith("skill "));
+    // A thrown non-Error is not an LLM error.
+    expect(a!.attributes["error.type"]).toBe("error");
+    expect(a!.status).toMatchObject({ code: 2, message: "[object Object]" });
+    expect(b!.attributes["error.type"]).toBe("TypeError");
+    expect(b!.status).toMatchObject({ code: 2, message: "bad input" });
+  });
+
+  it("returns inSpan's result when the span cannot be ended", async () => {
+    const result = inSpan("skill c", {}, async (span) => {
+      span.end = () => {
+        throw new Error("exporter bug");
+      };
+      return 42;
+    });
+    await expect(result).resolves.toBe(42);
   });
 });

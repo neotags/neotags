@@ -28,6 +28,21 @@ describe("redact", () => {
     const t = "fixed in 9f86d081884c7d659a2feaa0c55ad015a3bf4f1b, see https://example.com/runbooks/restart-the-api-server";
     expect(redact(t)).toEqual({ text: t, count: 0 });
   });
+  it("keeps a URL's port and path; only user:pass@ or a random part is redacted", () => {
+    // An O2 MCP error: the port and the path (with an org identifier) once read as one random token.
+    const timeout = "MCP error -32603: Tool execution failed: Network error: Request timeout after 30 seconds while calling POST http://localhost:5080/api/7Qx2Lr9TfK4mWb8ZsN1cVdH5pYe/_search?type=logs";
+    expect(redact(timeout)).toEqual({ text: timeout, count: 0 });
+    const prom = "calling POST http://localhost:5080/api/default/prometheus/api/v1/query_range";
+    expect(redact(prom)).toEqual({ text: prom, count: 0 });
+    expect(redact("postgres://admin:s3cretpass@db.example.com:5432/app").text).toBe("postgres://admin:[REDACTED]@db.example.com:5432/app");
+    expect(redact("GET https://example.com:8443/keys/Zx9Qm2Lp7Vb4Nc8Rd1Ts6Yw3Uh5Je0KfGa/meta").text).toBe("GET https://example.com:8443/keys/[REDACTED]/meta");
+    // Outside a URL, a key with `/` in it is still one token.
+    expect(redact("key Zx9Qm2Lp7Vb4/Nc8Rd1Ts6Yw3+Uh5Je0KfGa end").text).toBe("key [REDACTED] end");
+    // Also right after a URL in a CSV row, and in a URL's query: neither is a path.
+    const secret = "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY";
+    expect(redact(`2024-01-01,http://localhost:5080/api/x,${secret}`).text).toBe("2024-01-01,http://localhost:5080/api/x,[REDACTED]");
+    expect(redact(`GET https://example.com/cb?sig=${secret}&a=1`).text).toBe("GET https://example.com/cb?[REDACTED]&a=1");
+  });
 });
 
 describe("HttpOnyxClient", () => {
