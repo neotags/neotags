@@ -1,0 +1,6 @@
+# Used by the misconfiguration scan in supply-chain.yml. The chart refuses to
+# render without image.tag, so render it with the CI values.
+misconfiguration:
+  helm:
+    values:
+      - deploy/helm/neotags/ci/full-values.yaml

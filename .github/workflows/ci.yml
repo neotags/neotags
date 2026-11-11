@@ -49,9 +49,19 @@ jobs:
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
-          push: false
+          load: true
+          tags: neotags:ci
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      # Same gate as build-image.yml, but before merge instead of after the push.
+      - name: Scan image for fixed vulnerabilities
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: neotags:ci
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          exit-code: '1'
 
   # Trivy and the sandbox tests for executor/ on amd64 and arm64; no push.
   # Pull requests only: on main, build-executor-image.yml runs the same checks
