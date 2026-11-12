@@ -202,6 +202,8 @@ const fileSchema = z.object({
           total: z.number().int().positive().default(4),
           // Per user (or per session when the user is unknown).
           perUserPerHour: z.number().int().positive().default(20),
+          // Emails not counted against perUserPerHour (e.g. an eval runner); total still applies.
+          exemptUsers: z.array(z.string().trim().toLowerCase().min(1)).default([]),
         })
         .prefault({}),
       // On shutdown, how long running runs may finish; keep below terminationGracePeriodSeconds.
