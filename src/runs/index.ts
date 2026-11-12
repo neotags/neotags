@@ -91,6 +91,7 @@ export function createRunManager(
     runner,
     concurrency: a.concurrency.total,
     perUserPerHour: a.concurrency.perUserPerHour,
+    exemptUsers: a.concurrency.exemptUsers,
     maxSteps: a.maxSteps,
     maxInputTokens: a.maxInputTokens,
     wallClockSec: a.wallClockSec,

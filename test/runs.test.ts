@@ -202,6 +202,25 @@ describe("RunManager", () => {
     expect(m.submit(q("s4", { user: "a@example.com" })).ok).toBe(true);
   });
 
+  it("does not count exempt users against the hourly limit, and logs it", async () => {
+    const lines: Record<string, unknown>[] = [];
+    const log = { info: (o: object) => void lines.push(o as Record<string, unknown>), warn: () => {}, error: () => {} };
+    const m = manager({ run: async () => ok() }, { perUserPerHour: 2, exemptUsers: ["eval@example.com"], log });
+    const runs = Array.from({ length: 5 }, (_, i) => submitted(m, q(`x${i}`, { user: i % 2 ? " Eval@Example.com" : "eval@example.com" })));
+    expect(m.submit(q("a1", { user: "a@example.com" })).ok).toBe(true);
+    expect(m.submit(q("a2", { user: "a@example.com" })).ok).toBe(true);
+    expect(m.submit(q("a3", { user: "a@example.com" }))).toMatchObject({ ok: false, code: "rate_limited" });
+    // A session id never matches an exempt email.
+    expect(m.submit(q("eval@example.com")).ok).toBe(true);
+    expect(m.submit(q("eval@example.com")).ok).toBe(true);
+    expect(m.submit(q("eval@example.com")).ok).toBe(false);
+    await Promise.all(runs.map((r) => r.result));
+    const finished = lines.filter((l) => /^x\d$/.test(String(l.session)) && l.runId);
+    expect(finished).toHaveLength(5);
+    expect(finished.every((l) => l.rateLimitExempt === true)).toBe(true);
+    expect(lines.filter((l) => l.session === "a1" && l.runId).every((l) => !("rateLimitExempt" in l))).toBe(true);
+  });
+
   it("finishes a run whose runner ignores the abort, freeing its slot and session", async () => {
     let calls = 0;
     const m = manager({ run: () => (calls++ === 0 ? new Promise<RunOutcome>(() => {}) : Promise.resolve(ok())) }, {

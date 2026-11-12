@@ -21,6 +21,8 @@ export interface RunManagerOptions {
   /** Runs at once; the rest wait in submission order. */
   concurrency: number;
   perUserPerHour: number;
+  /** Emails not counted against perUserPerHour; the concurrency limit still applies. */
+  exemptUsers?: readonly string[];
   maxSteps: number;
   maxInputTokens: number;
   wallClockSec: Record<RunSource, number>;
@@ -61,6 +63,7 @@ interface Run {
   state: RunState;
   controller: AbortController;
   enqueuedAt: number;
+  rateLimitExempt: boolean;
   startedAt?: number;
   ahead?: number;
   timer?: NodeJS.Timeout;
@@ -90,10 +93,12 @@ export class RunManager {
   private running = new Map<string, Run>();
   private busySessions = new Set<string>();
   private limiter: RateLimiter;
+  private exempt: Set<string>;
   private draining = false;
 
   constructor(private o: RunManagerOptions) {
     this.limiter = new RateLimiter({ limit: o.perUserPerHour, windowMs: 3600_000, ...(o.now && { now: o.now }) });
+    this.exempt = new Set((o.exemptUsers ?? []).map((user) => limitKey({ user, sessionId: "" })));
   }
 
   private now(): number {
@@ -106,7 +111,9 @@ export class RunManager {
 
   submit(input: RunInput, observer: RunObserver = {}): SubmitResult {
     if (this.draining) return { ok: false, code: "shutting_down", message: notice("shutting_down", input.question) };
-    const taken = this.limiter.take(limitKey(input));
+    const key = limitKey(input);
+    const exempt = this.exempt.has(key);
+    const taken = exempt ? { ok: true as const } : this.limiter.take(key);
     if (!taken.ok) {
       const retryAfterSec = Math.ceil(taken.retryAfterMs / 1000);
       return { ok: false, code: "rate_limited", message: `rate limit: ${this.o.perUserPerHour} runs per hour`, retryAfterSec };
@@ -120,6 +127,7 @@ export class RunManager {
       state: "queued",
       controller: new AbortController(),
       enqueuedAt: this.now(),
+      rateLimitExempt: exempt,
       resolve,
       result,
     };
@@ -307,6 +315,7 @@ export class RunManager {
         source: run.input.source,
         session: run.input.sessionId,
         user: run.input.user,
+        ...(run.rateLimitExempt && { rateLimitExempt: true }),
         state: result.state,
         degraded: result.degraded ?? false,
         reason: result.reason,

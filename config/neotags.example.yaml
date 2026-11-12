@@ -70,7 +70,7 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #   wallClockSec: { slack: 360, o2: 600, job: 600 }
 #   finalReserveSec: 90           # the last seconds of the wall clock are kept for the final answer
 #   maxInputTokens: 100000        # prompt budget per request; the oldest tool outputs are stubbed out first
-#   concurrency: { total: 4, perUserPerHour: 20 }
+#   concurrency: { total: 4, perUserPerHour: 20, exemptUsers: [] }   # exemptUsers: emails not counted per hour (eval runner)
 #   drainSec: 640                 # on shutdown; keep below terminationGracePeriodSeconds
 # skillPacks:                     # Agent Skills (<pack>/SKILL.md + references/), mounted read-only
 #   dir: /etc/neotags/skills
