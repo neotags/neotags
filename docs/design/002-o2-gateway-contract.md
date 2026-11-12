@@ -1,6 +1,6 @@
 # neotags — Design 002: OpenObserve assistant gateway contract
 
-Status: **v4** · Date: 2026-11-12 (v2: upstream o2-ai paths and error body, no turn-id header, user email optional; v3: the gateway's choices, §6; v4: `x-o2-user-token` and querying as the user, §1, §2, §7)
+Status: **v5** · Date: 2026-11-12 (v2: upstream o2-ai paths and error body, no turn-id header, user email optional; v3: the gateway's choices, §6; v4: `x-o2-user-token` and querying as the user, §1, §2, §7; v5: the token's lifetime bounds the run, HTTP errors are O2's answer, the run lists tools itself, §2, §7)
 
 The OpenObserve (O2) enterprise AI assistant panel can be pointed at an external agent. O2 forwards each chat turn to `POST {O2_AGENT_URL}/o2_agent/{agent}/query/stream` and pipes the agent's `text/event-stream` response **byte for byte** to the browser, so this document is the contract between the neotags O2 gateway (`src/gateway/o2.ts`) and the O2 web panel.
 
@@ -68,7 +68,7 @@ Only when the turn cannot start. JSON body in o2-ai's shape, `{"detail": {"code"
 | 404 | `agent_not_found` | `{agent}` is not `o2`. |
 | 429 | `turn_limit` | Per-user rate limit or concurrency cap. Add `Retry-After`. The panel then puts the prompt back in the input box and shows its turn-limit notice. |
 | 503 | `unavailable` | Shutting down or draining. Add `Retry-After`. |
-| 503 | `user_auth_unavailable` | `o2Gateway.auth: user` only: no usable `x-o2-user-token` (missing, or not the token's shape), or the page org (`context.org_id`) is missing or not in `o2Gateway.orgs`. The `message` says which. No `Retry-After`: asking again only helps once O2 sends a token. |
+| 503 | `user_auth_unavailable` | `o2Gateway.auth: user` only: no usable `x-o2-user-token` (missing, not the token's shape, no readable `exp`), a token that expires too soon (§7), or the page org (`context.org_id`) is missing or not in `o2Gateway.orgs`. The `message` says which. No `Retry-After`: asking again only helps once O2 sends a token. |
 
 The O2 client turns this into its own response to the browser, `{"code": <status>, "error": "<message>", "error_code": "<code>"}`, with the same status (502 when neotags is unreachable). The panel shows a generic "server error (status)" for anything except 429 (and 403, which it words as "you are not authorized", so never return 403). The O2 side must keep 429 and `error_code` intact for the turn-limit behaviour.
 
@@ -182,14 +182,17 @@ Choices the contract left to the gateway (`src/gateway/o2.ts`, `o2-stream.ts`, `
 
 By default (`auth: service`) every run queries O2 through the MCP servers' configured headers, the agent's own read-only service account, and `x-o2-user-token` is ignored. With `auth: user` the run queries with the asking user's own O2 permissions:
 
-- **Token.** The gateway checks the shape only: the `o2ut.` prefix, then two unpadded base64url parts joined by one `.`, at most 4096 characters. It never decodes or verifies it (only O2 holds the key); anything else counts as no token. There is no fallback to the service account: a turn without a usable token gets `503 user_auth_unavailable` before the stream (§2).
+- **Token.** The gateway checks the shape: the `o2ut.` prefix, then two unpadded base64url parts joined by one `.`, at most 4096 characters, and reads `exp` from the claims part for timing only. It never verifies the MAC (only O2 holds the key; O2 checks every call, so a forged `exp` buys nothing). A token of another shape or without a readable `exp` counts as no token. There is no fallback to the service account: a turn without a usable token gets `503 user_auth_unavailable` before the stream (§2).
+- **Token lifetime.** The run's tool calls must end before the token does (15 minutes, while a run may take 10 and wait in its session's queue first). The deadline is `exp` less 30 s (clock skew, a call in flight). A turn with less than `o2Gateway.minUserTokenSec` (default 120 s) left before it is refused with `503 user_auth_unavailable`; a run left with less than that when it leaves the queue is not started, and is answered "ask again" (`error_type` `sign_in_expiring`). A run that starts gets its wall clock cut so that its tool calls end by the deadline; the final answer, which needs no token, may take the final reserve after it.
 - **One org.** The token is valid for the page org only. The run gets only the tools of that org's MCP server (`o2Gateway.orgs`); other orgs' servers are not offered, and the run is told it can only link to them.
-- **The calls.** That server's `tools/call` requests go out on an MCP client of the run alone, as `Authorization: Bearer <token>`, without the server's configured headers. It connects (initialize only) on the run's first call and is closed when the run ends; the tool schemas are the ones the shared client listed at startup. The shared service-account client only lists tools.
+- **The calls.** That server's `tools/call` requests go out on an MCP client of the run alone, as `Authorization: Bearer <token>`, without the server's configured headers; it is closed when the run ends. The tool schemas are the ones the shared client listed; when it has listed none (its credential is missing or refused, or the server was down at startup), the run client lists them itself as the user, so the user mode does not depend on the service account. A run whose own listing fails gets no tools for the server and is told it is unavailable.
 - **O2's answers.** O2 checks the token on every request, then the user's org membership and permissions.
   | Status | Meaning | The model is told |
   |---|---|---|
   | 401 | bad signature or expired | the sign-in for this question is no longer valid: ask again; no retry |
   | 403 | other org, a route outside the read-only list, not a member, or no permission | the user's account cannot see this data: no other org, no guessing |
-  Neither is a connection problem: the shared client is not reconnected or marked down.
+  | 404 | the server no longer knows the MCP session (it restarted) | nothing: one reconnect and retry |
+  | other (400, 429, 5xx) | O2's answer to this call | the status and the start of O2's body, redacted; for 429, not to retry now. No retry |
+  None of them marks the shared client down. The same rule holds on the shared client, except that 401 and 403 there are the service account's and count as the connection (reconnect, then down); only network errors, a closed connection and 404 are retried.
 - **Secrecy.** The token is kept out of the prompt, the page context, logs, audit lines and spans; on the run's input it is wrapped so that serializing it shows `[REDACTED]`, and `redact()` replaces any `o2ut.` token. The `invoke_agent` span carries `neotags.o2.auth` (`user` or `service`).
 - **Unchanged.** The tool guard (`allowTools`, `innerAllow`, `argAllow`, query limits), the current-org rules of §6, and rate limiting by `x-o2-user-email` (`agent.concurrency.exemptUsers` for an eval account). Slack and job runs always use the service account.

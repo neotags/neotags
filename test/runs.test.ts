@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { compactToBudget, STUB } from "../src/runs/budget.js";
 import { contextPackage } from "../src/runs/degrade.js";
 import { RateLimiter, limitKey } from "../src/runs/limits.js";
@@ -200,6 +200,47 @@ describe("RunManager", () => {
     expect(m.submit(q("anon")).ok).toBe(false);
     now = 3600_000;
     expect(m.submit(q("s4", { user: "a@example.com" })).ok).toBe(true);
+  });
+
+  it("cuts a run's wall clock to its credential, and does not start one left with too little after the queue", async () => {
+    let now = 1_000_000;
+    const { runner, pending } = controlled();
+    // Wall clock 600 s, final reserve 90 s.
+    const m = manager(runner, { concurrency: 1, now: () => now });
+    const first = submitted(m, q("s1"));
+    const late = submitted(m, q("s2", { credentialDeadline: { at: now + 200_000, minMs: 120_000 } }));
+    const fits = submitted(m, q("s3", { credentialDeadline: { at: now + 400_000, minMs: 120_000 } }));
+    await tick();
+    expect(late.state).toBe("queued");
+    // 100 s in the queue: s2 has 100 s of its credential left, under minMs; s3 has 300 s.
+    now += 100_000;
+    pending[0]!.finish(ok());
+    await first.result;
+    expect(await late.result).toMatchObject({ state: "failed", errorType: "sign_in_expiring", steps: 0 });
+    expect((await late.result).answer).toMatch(/sign-in for this question was about to expire/);
+    await tick();
+    expect(pending.map((p) => p.input.sessionId)).toEqual(["s1", "s3"]);
+    // Tool calls end by the credential deadline; the final answer may take the reserve after it.
+    expect(pending[1]!.ctx.budget.softDeadline).toBe(now + 300_000);
+    pending[1]!.finish(ok());
+    await fits.result;
+  });
+
+  it("aborts a run at its credential deadline plus the final reserve, not at the full wall clock", async () => {
+    vi.useFakeTimers();
+    try {
+      const { runner, pending } = controlled();
+      const m = manager(runner, { wallClockSec: { o2: 600, slack: 360, job: 600 }, finalReserveSec: 90 });
+      const run = submitted(m, q("s1", { credentialDeadline: { at: Date.now() + 200_000, minMs: 120_000 } }));
+      await vi.advanceTimersByTimeAsync(0);
+      expect(pending).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(289_000);
+      expect(run.state).toBe("running");
+      await vi.advanceTimersByTimeAsync(2_000);
+      expect(await run.result).toMatchObject({ state: "failed", errorType: "deadline" });
+    } finally {
+      vi.useRealTimers();
+    }
   });
 
   it("does not count exempt users against the hourly limit, and logs it", async () => {

@@ -836,7 +836,10 @@ describe("O2 gateway: as the user (o2Gateway.auth user)", () => {
   const ok = async (): Promise<RunOutcome> => ({ state: "done", answer: "ok", steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 } });
   // o2ut.<base64url claims>.<base64url mac>, built so no token-like literal is in the source.
   const b64 = (v: string) => Buffer.from(v).toString("base64url");
-  const TOKEN = `o2ut.${b64('{"v":1,"sub":"a@example.com"}')}.${b64("mac of the token")}`;
+  const tokenFor = (claims: Record<string, unknown>) => `o2ut.${b64(JSON.stringify({ v: 1, sub: "a@example.com", ...claims }))}.${b64("mac of the token")}`;
+  const expIn = (sec: number) => Math.floor(Date.now() / 1000) + sec;
+  const TOKEN_EXP = expIn(900);
+  const TOKEN = tokenFor({ exp: TOKEN_EXP });
   const asUser = { gw: { auth: "user" as const } };
 
   it("defaults to service: no user token is read and the run gets every server", async () => {
@@ -845,6 +848,7 @@ describe("O2 gateway: as the user (o2Gateway.auth user)", () => {
     const { url } = await serve(runner);
     expect((await post(url, { headers: { "x-o2-user-token": TOKEN } })).status).toBe(200);
     expect(inputs[0]).not.toHaveProperty("mcp");
+    expect(inputs[0]).not.toHaveProperty("credentialDeadline");
     expect(JSON.stringify(inputs[0])).not.toContain(TOKEN);
   });
 
@@ -854,6 +858,10 @@ describe("O2 gateway: as the user (o2Gateway.auth user)", () => {
     ["a token with a third part", { "x-o2-user-token": "o2ut.a.b.c" }, undefined],
     ["a token with other characters", { "x-o2-user-token": "o2ut.a+b.c=" }, undefined],
     ["a token over 4096 characters", { "x-o2-user-token": `o2ut.${"a".repeat(4096)}.b` }, undefined],
+    ["a token without exp", { "x-o2-user-token": tokenFor({}) }, undefined],
+    ["a token whose claims are not JSON", { "x-o2-user-token": `o2ut.${b64("not json")}.${b64("mac")}` }, undefined],
+    // 30 s margin + minUserTokenSec 120: 149 s left is too little.
+    ["a token that expires too soon", { "x-o2-user-token": tokenFor({ exp: expIn(149) }) }, undefined],
     ["an org with no server", { "x-o2-user-token": TOKEN }, "other-org"],
     ["no org", { "x-o2-user-token": TOKEN }, null],
   ] as const)("refuses %s with 503 user_auth_unavailable before any run", async (_name, headers, org) => {
@@ -876,6 +884,8 @@ describe("O2 gateway: as the user (o2Gateway.auth user)", () => {
     expect(input.mcp?.hide).toEqual(["o2"]);
     expect(input.mcp?.asUser?.server).toBe("o2prod");
     expect(input.mcp?.asUser?.bearer.reveal()).toBe(TOKEN);
+    // The token's exp less the 30 s margin, and minUserTokenSec.
+    expect(input.credentialDeadline).toEqual({ at: (TOKEN_EXP - 30) * 1000, minMs: 120_000 });
     expect(input.notes).toEqual([
       `The user is in O2 org ${PROD}; query it with the o2prod__ tools, which run with the user's own O2 permissions.`,
       "Other O2 orgs: default. This run has no tools for them: for data there, give the user a link and the query instead.",

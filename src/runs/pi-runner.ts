@@ -24,7 +24,9 @@ export interface PiRunnerOptions {
    * More tools (MCP) next to read_skill / read_skill_ref; a function is read at the start of every run, with its
    * input and skill packs. What it registers with `onEnd` runs when the run ends, however it ends (run-scoped clients).
    */
-  tools?: AgentTool<any>[] | ((run: { packs: readonly string[]; input: RunInput; onEnd: (f: () => unknown) => void }) => AgentTool<any>[]);
+  tools?:
+    | AgentTool<any>[]
+    | ((run: { packs: readonly string[]; input: RunInput; signal: AbortSignal; onEnd: (f: () => unknown) => void }) => AgentTool<any>[] | Promise<AgentTool<any>[]>);
   /** Data sources (MCP servers) that are down at the start of a run; the system prompt names them. */
   unavailable?: (input: RunInput) => string[];
   /** Checked after the built-in rule that only registered tools run. */
@@ -76,9 +78,24 @@ export class PiAgentRunner implements AgentRunner {
     const stats = { steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 }, model: step.model.id, ...(step.effort && { effort: step.effort }) };
 
     const packs = input.packs ?? o.entries[input.source] ?? [];
-    // Registered here, run in the finally below: nothing before it opens a connection (run clients connect on a call).
+    // Registered here, run in the finally below. A tools function may connect (a run client listing its tools): if it
+    // throws, what it registered is closed and the model lease released here.
     const onEnd: (() => unknown)[] = [];
-    const extra = typeof o.tools === "function" ? o.tools({ packs, input, onEnd: (f) => onEnd.push(f) }) : (o.tools ?? []);
+    const cleanup = () => {
+      for (const f of onEnd) {
+        void Promise.resolve()
+          .then(f)
+          .catch((err: unknown) => o.log?.warn({ runId: ctx.runId, err }, "run cleanup failed"));
+      }
+    };
+    let extra: AgentTool<any>[];
+    try {
+      extra = typeof o.tools === "function" ? await o.tools({ packs, input, signal: ctx.signal, onEnd: (f) => onEnd.push(f) }) : (o.tools ?? []);
+    } catch (err) {
+      cleanup();
+      lease.release();
+      throw err;
+    }
     const shared = [...skillPackTools(o.index), ...extra];
     const taken = new Set(shared.map((t) => t.name));
     // A run's own tool never shadows a shared one: two tools with one name would leave the guard unable to tell them apart.
@@ -259,11 +276,7 @@ export class PiAgentRunner implements AgentRunner {
     } finally {
       toolSpans.closeAll("the run stopped before the tool finished");
       ctx.signal.removeEventListener("abort", onAbort);
-      for (const f of onEnd) {
-        void Promise.resolve()
-          .then(f)
-          .catch((err: unknown) => o.log?.warn({ runId: ctx.runId, err }, "run cleanup failed"));
-      }
+      cleanup();
       if (outcome === "failure") lease.failure(failure);
       else if (outcome === "success" || answered) lease.success();
       else lease.release();
