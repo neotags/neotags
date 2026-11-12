@@ -1,11 +1,12 @@
 import type { AgentTool, AgentToolResult } from "@earendil-works/pi-agent-core";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { StreamableHTTPClientTransport, StreamableHTTPError } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { ErrorCode, McpError, type CallToolResult, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import type { Logger } from "pino";
 import { EXECUTED_ARGS, RESULT_DATA } from "../agent/executed.js";
 import type { Config } from "../config/index.js";
 import { mcpToolName, type McpGuard } from "../guardrails/tools.js";
+import type { Credential, RunMcpAccess } from "../runs/types.js";
 
 export type McpServerConfig = Config["mcp"]["servers"][number];
 
@@ -27,10 +28,18 @@ const TOOL_NAME = /^[A-Za-z0-9_-]{1,64}$/;
 // Past this many tools the model picks the wrong one more often, and every request carries their schemas.
 const MANY_TOOLS = 40;
 
+interface ToolDef {
+  tool: Tool;
+  /** `<server>__<tool>`. */
+  full: string;
+}
+
 interface ServerState {
   cfg: McpServerConfig;
   client?: Client;
   /** From the last successful tools/list; kept while the server is down so a run's tool list does not change. */
+  defs: ToolDef[];
+  /** `defs` as tools on the shared client. */
   tools: AgentTool<any>[];
   /** Why the server is unavailable; unset while connected. */
   down?: string;
@@ -57,7 +66,7 @@ export class McpHub {
   private closed = false;
 
   constructor(private o: McpHubOptions) {
-    this.states = o.servers.map((cfg) => ({ cfg, tools: [], down: "not connected yet", retryMs: o.reconnectMinMs ?? 5000, retryAt: 0, gen: 0 }));
+    this.states = o.servers.map((cfg) => ({ cfg, defs: [], tools: [], down: "not connected yet", retryMs: o.reconnectMinMs ?? 5000, retryAt: 0, gen: 0 }));
   }
 
   get guard(): McpGuard {
@@ -77,9 +86,34 @@ export class McpHub {
     return this.states.flatMap((s) => s.tools);
   }
 
-  /** Servers that are down right now, by name. */
-  unavailable(): string[] {
-    return this.states.filter((s) => s.down !== undefined).map((s) => s.cfg.name);
+  /**
+   * Servers that are down right now, by name. Under a run's `access`: not the hidden ones, and not its user server
+   * while that has tools listed, since the run's calls to it do not go through the shared client.
+   */
+  unavailable(access?: RunMcpAccess): string[] {
+    const hide = new Set(access?.hide ?? []);
+    return this.states
+      .filter((s) => s.down !== undefined && !hide.has(s.cfg.name) && !(s.cfg.name === access?.asUser?.server && s.defs.length > 0))
+      .map((s) => s.cfg.name);
+  }
+
+  /**
+   * The tools of one run. Without `asUser` they are the shared ones, less the hidden servers'. With it, that server's
+   * tools (the schemas the shared client listed) call it on a client of this run alone, carrying the user's bearer
+   * token and none of the server's configured headers; it connects on the run's first call and `close()` ends it.
+   * The credential is passed down explicitly, never through ambient context, so one run can never call with another's.
+   */
+  forRun(access?: RunMcpAccess): { tools: AgentTool<any>[]; close: () => Promise<void> } {
+    const hide = new Set(access?.hide ?? []);
+    const states = this.states.filter((s) => !hide.has(s.cfg.name));
+    const as = access?.asUser;
+    const user = as && states.find((s) => s.cfg.name === as.server);
+    if (!as || !user) return { tools: states.flatMap((s) => s.tools), close: async () => {} };
+    const rc = new RunClient(user.cfg.url, as.bearer, this.o.connectTimeoutMs);
+    const tools = states.flatMap((s) =>
+      s === user ? s.defs.map((d) => this.wrap(d, (args, signal) => this.callAsUser(rc, s, d, args, signal))) : s.tools,
+    );
+    return { tools, close: () => rc.close() };
   }
 
   async close(): Promise<void> {
@@ -124,7 +158,7 @@ export class McpHub {
       const byName = new Map(listed.map((t) => [t.name, t]));
       const notListed = cfg.allowTools.filter((n) => !byName.has(n));
       if (notListed.length) this.o.log.warn({ server: cfg.name, notListed }, "mcp: allowlisted tools the server does not list");
-      const tools: AgentTool<any>[] = [];
+      const defs: ToolDef[] = [];
       for (const name of cfg.allowTools) {
         const t = byName.get(name);
         if (!t) continue;
@@ -133,17 +167,18 @@ export class McpHub {
           this.o.log.warn({ server: cfg.name, tool: name }, "mcp: tool name is not a valid function name, skipped");
           continue;
         }
-        tools.push(this.wrap(s, t, full));
+        defs.push({ tool: t, full });
       }
       if (this.closed) throw new Error("closed");
       s.client = client;
       s.gen++;
-      s.tools = tools;
+      s.defs = defs;
+      s.tools = defs.map((d) => this.wrap(d, (args, signal) => this.call(s, d.tool.name, d.full, args, signal)));
       s.down = undefined;
       s.retryMs = this.o.reconnectMinMs ?? 5000;
       s.retryAt = 0;
       clearTimeout(s.timer);
-      this.o.log.info({ server: cfg.name, tools: tools.length }, "mcp: connected");
+      this.o.log.info({ server: cfg.name, tools: defs.length }, "mcp: connected");
     } catch (err) {
       await client?.close().catch(() => undefined);
       this.markDown(s, message(err));
@@ -165,7 +200,7 @@ export class McpHub {
     s.retryMs = Math.min(s.retryMs * 2, this.o.reconnectMaxMs);
   }
 
-  private wrap(s: ServerState, t: Tool, full: string): AgentTool<any> {
+  private wrap({ tool: t, full }: ToolDef, call: (args: unknown, signal?: AbortSignal) => Promise<AgentToolResult<McpCallDetails>>): AgentTool<any> {
     // pi validates arguments against the tool's JSON Schema, which comes from the server as is.
     const { $schema: _ignored, ...schema } = t.inputSchema as Record<string, unknown>;
     return {
@@ -175,8 +210,37 @@ export class McpHub {
       parameters: { ...schema, type: "object" },
       executionMode: "parallel",
       prepareArguments: (args: unknown) => this.o.guard.prepare(full, args) as never,
-      execute: (_id, params, signal) => this.call(s, t.name, full, params, signal),
+      execute: (_id, params, signal) => call(params, signal),
     };
+  }
+
+  /**
+   * A call as the run's user. 401 (expired or bad token) and 403 (no access) are the server's answer about the
+   * user, not about the connection: they reach the model as such, are not retried, and leave the shared client
+   * alone. Other connection failures get one retry on a fresh run client.
+   */
+  private async callAsUser(rc: RunClient, s: ServerState, d: ToolDef, args: unknown, signal?: AbortSignal): Promise<AgentToolResult<McpCallDetails>> {
+    const server = s.cfg.name;
+    let res: CallToolResult | undefined;
+    for (let attempt = 0; !res; attempt++) {
+      const pending = rc.get();
+      try {
+        const client = await abortable(pending, signal);
+        res = (await client.callTool({ name: d.tool.name, arguments: (args ?? {}) as Record<string, unknown> }, undefined, {
+          timeout: this.o.callTimeoutMs,
+          ...(signal && { signal }),
+        })) as CallToolResult;
+      } catch (err) {
+        if (signal?.aborted) throw err;
+        const status = err instanceof StreamableHTTPError ? err.code : undefined;
+        if (status === 401) throw new Error(userCredentialRejected(server));
+        if (status === 403) throw new Error(userAccessRefused(server));
+        if (err instanceof McpError && err.code !== ErrorCode.ConnectionClosed) throw new Error(message(err));
+        rc.drop(pending);
+        if (attempt > 0 || rc.closed) throw new Error(unavailableMessage(server, message(err)));
+      }
+    }
+    return this.result(d.full, args, res);
   }
 
   private async call(s: ServerState, tool: string, full: string, args: unknown, signal?: AbortSignal): Promise<AgentToolResult<McpCallDetails>> {
@@ -207,6 +271,10 @@ export class McpHub {
         ({ client, gen } = next);
       }
     }
+    return this.result(full, args, res);
+  }
+
+  private result(full: string, args: unknown, res: CallToolResult): AgentToolResult<McpCallDetails> {
     const { text, data } = this.o.guard.result(full, args, resultText(res), res.isError === true);
     // The arguments that ran, after the guard's defaults, for traces and the entry (evidence links): pi reports the
     // model's own arguments on tool events. `data` is what the entry needs of a result the model sees cut.
@@ -250,6 +318,70 @@ function abortable<T>(p: Promise<T>, signal?: AbortSignal): Promise<T> {
 
 const unavailableMessage = (server: string, why: string | undefined) =>
   `Data source ${server} is unavailable (${why ?? "not connected"}). Continue without it and say what you could not check.`;
+
+// Worded without "unauthorized" / "forbidden": the text can reach the panel, which rewrites such messages.
+const userCredentialRejected = (server: string) =>
+  `Data source ${server} no longer accepts the user's O2 sign-in for this question (it expired or is invalid). Do not retry; ` +
+  "tell the user to ask the question again.";
+const userAccessRefused = (server: string) =>
+  `Data source ${server} refused this call for the user's own O2 account: the user has no access to this data. Do not try ` +
+  "another org or guess the result; tell the user their account cannot see it.";
+
+const RUN_ENDED = "the run has ended";
+
+/**
+ * One run's MCP client of a server, as the run's user: connects (initialize only; the tools are the shared
+ * client's) on the first call, and is closed with the run. A client that failed on the connection is dropped,
+ * and the next call connects again.
+ */
+class RunClient {
+  private current?: Promise<Client>;
+  closed = false;
+
+  constructor(
+    private url: string,
+    private bearer: Credential,
+    private timeoutMs: number,
+  ) {}
+
+  get(): Promise<Client> {
+    if (this.closed) return Promise.reject(new Error(RUN_ENDED));
+    if (!this.current) {
+      const p = this.open();
+      this.current = p;
+      p.catch(() => this.current === p && (this.current = undefined));
+    }
+    return this.current;
+  }
+
+  /** Stop using `failed` (it failed on the connection); the next call connects again. */
+  drop(failed: Promise<Client>): void {
+    if (this.current !== failed) return;
+    this.current = undefined;
+    failed.then((c) => c.close()).catch(() => undefined);
+  }
+
+  async close(): Promise<void> {
+    this.closed = true;
+    const c = this.current;
+    this.current = undefined;
+    await c?.then((client) => client.close()).catch(() => undefined);
+  }
+
+  private async open(): Promise<Client> {
+    const client = new Client({ name: "neotags", version: "1" });
+    const transport = new StreamableHTTPClientTransport(new URL(this.url), {
+      requestInit: { headers: { Authorization: `Bearer ${this.bearer.reveal()}` } },
+    });
+    await client.connect(transport, { timeout: this.timeoutMs });
+    // The run ended while this connected: nobody closes it otherwise.
+    if (this.closed) {
+      await client.close().catch(() => undefined);
+      throw new Error(RUN_ENDED);
+    }
+    return client;
+  }
+}
 
 /** An MCP tool result as text: text parts as is, embedded text resources inlined, other parts as `[type]`. */
 export function resultText(res: CallToolResult): string {

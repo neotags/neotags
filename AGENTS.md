@@ -37,7 +37,7 @@ src/tools/              slack (thread reader, file download), onyx (ingestion + 
 src/telemetry/          OpenTelemetry setup (OTLP via OTEL_* env) and GenAI spans: invoke_agent per task / run -> chat per LLM request, execute_tool per tool call; content redacted
 src/guardrails/         channel/user allowlist policy; MCP tool guard (tools.ts: allowlists, tools_call inner names, argAllow, query limits, output redaction); sandbox guard (sandbox.ts: only a pack's declared `sandbox` tools, its declaration as the constraints); enforced in code, not prompts
 src/sandbox/            Sandbox interface; backend local (executor sidecar over a unix socket, FIFO slots so calls queue instead of getting 429 busy) or none (refuse all); SkillExecutor = sandbox guard + audit; run_skill_command tool
-src/mcp/                MCP clients (Streamable HTTP): allowlisted tools as pi AgentTools named <server>__<tool>, background reconnect, unavailable servers named in the system prompt
+src/mcp/                MCP clients (Streamable HTTP): allowlisted tools as pi AgentTools named <server>__<tool>, background reconnect, unavailable servers named in the system prompt; forRun: per-run clients that call as the O2 user (o2Gateway.auth user)
 src/task.ts             Task / Notifier: origin-agnostic interfaces; skills never see the transport
 src/lang.ts             answer language rule (D13), shared by every entry: answerLang() for code-written text, LANGUAGE_RULE for prompts
 src/version.ts          neotags' version (package.json): the agent version of an entry without skill packs

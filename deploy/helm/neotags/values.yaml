@@ -46,7 +46,9 @@ config:
     enabled: false
     port: 3001
     orgs: {}                      # O2 org identifier -> mcp.servers name, one server per org, e.g. { default: o2 }
+    # auth: service               # default; user: query as the asker with O2's x-o2-user-token (contract §7)
   # agent: { entries: { o2: [o2-query-assistant] }, drainSec: 640, ... }   # agent runs; see config example
+  #   concurrency.exemptUsers: [eval@example.com]   # emails not counted against perUserPerHour (an eval account)
   # mcp: { servers: [...] }       # MCP tools of agent runs; header values come from Secret env vars (headersFromEnv)
   # skillPacks.dir and sandbox.* are set by the chart from skillPacks and executor below.
   skillPacks:

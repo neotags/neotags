@@ -831,3 +831,74 @@ describe("config", () => {
     expect(loadConfig(base).o2Gateway).toMatchObject({ enabled: false, port: 3001 });
   });
 });
+
+describe("O2 gateway: as the user (o2Gateway.auth user)", () => {
+  const ok = async (): Promise<RunOutcome> => ({ state: "done", answer: "ok", steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 } });
+  // o2ut.<base64url claims>.<base64url mac>, built so no token-like literal is in the source.
+  const b64 = (v: string) => Buffer.from(v).toString("base64url");
+  const TOKEN = `o2ut.${b64('{"v":1,"sub":"a@example.com"}')}.${b64("mac of the token")}`;
+  const asUser = { gw: { auth: "user" as const } };
+
+  it("defaults to service: no user token is read and the run gets every server", async () => {
+    expect(cfg.o2Gateway.auth).toBe("service");
+    const { runner, inputs } = stubRunner(ok);
+    const { url } = await serve(runner);
+    expect((await post(url, { headers: { "x-o2-user-token": TOKEN } })).status).toBe(200);
+    expect(inputs[0]).not.toHaveProperty("mcp");
+    expect(JSON.stringify(inputs[0])).not.toContain(TOKEN);
+  });
+
+  it.each([
+    ["no token", {}, undefined],
+    ["a token without the o2ut prefix", { "x-o2-user-token": TOKEN.replace("o2ut.", "o2dt.") }, undefined],
+    ["a token with a third part", { "x-o2-user-token": "o2ut.a.b.c" }, undefined],
+    ["a token with other characters", { "x-o2-user-token": "o2ut.a+b.c=" }, undefined],
+    ["a token over 4096 characters", { "x-o2-user-token": `o2ut.${"a".repeat(4096)}.b` }, undefined],
+    ["an org with no server", { "x-o2-user-token": TOKEN }, "other-org"],
+    ["no org", { "x-o2-user-token": TOKEN }, null],
+  ] as const)("refuses %s with 503 user_auth_unavailable before any run", async (_name, headers, org) => {
+    const { runner, inputs } = stubRunner(ok);
+    const { url } = await serve(runner, asUser);
+    const context = org === undefined ? request.body.context : org === null ? {} : { ...request.body.context, org_id: org };
+    const res = await post(url, { headers, body: { ...request.body, context } });
+    expect(res.status).toBe(503);
+    expect(await res.json()).toEqual({ detail: { code: "user_auth_unavailable", message: expect.any(String) } });
+    expect(inputs).toHaveLength(0);
+  });
+
+  it("gives the run the page org's server only, as the user, and keeps the token out of the prompt notes and logs", async () => {
+    const { runner, inputs } = stubRunner(ok);
+    const { url } = await serve(runner, asUser);
+    logs.length = 0;
+    const res = await post(url, { headers: { "x-o2-user-token": TOKEN }, body: { ...request.body, context: { ...request.body.context, org_id: PROD } } });
+    await res.text();
+    const input = inputs[0]!;
+    expect(input.mcp?.hide).toEqual(["o2"]);
+    expect(input.mcp?.asUser?.server).toBe("o2prod");
+    expect(input.mcp?.asUser?.bearer.reveal()).toBe(TOKEN);
+    expect(input.notes).toEqual([
+      `The user is in O2 org ${PROD}; query it with the o2prod__ tools, which run with the user's own O2 permissions.`,
+      "Other O2 orgs: default. This run has no tools for them: for data there, give the user a link and the query instead.",
+    ]);
+    // However the input is serialized, the credential shows as a placeholder.
+    expect(JSON.stringify(input)).not.toContain(TOKEN);
+    expect(JSON.stringify(input)).toContain('"bearer":"[REDACTED]"');
+    expect(JSON.stringify(logs)).not.toContain(TOKEN);
+    expect(logs.find((l) => l.msg === "o2 query accepted")?.obj).toMatchObject({ auth: "user" });
+  });
+
+  it("logs a malformed token by its length, not its value", async () => {
+    const { runner } = stubRunner(ok);
+    const { url } = await serve(runner, asUser);
+    logs.length = 0;
+    const bad = "o2ut.not a token";
+    expect((await post(url, { headers: { "x-o2-user-token": bad } })).status).toBe(503);
+    expect(logs.find((l) => l.msg.includes("malformed"))?.obj).toMatchObject({ length: bad.length });
+    expect(JSON.stringify(logs)).not.toContain(bad);
+  });
+
+  it("needs orgs for auth user", () => {
+    expect(() => loadConfig({ ...base, NEOTAGS_CONFIG: "f" }, () => "o2Gateway: { enabled: true, auth: user }")).toThrow(/needs o2Gateway.orgs/);
+    expect(() => loadConfig({ ...base, NEOTAGS_CONFIG: "f" }, () => "o2Gateway: { auth: other }")).toThrow();
+  });
+});

@@ -4,7 +4,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { O2_ORG_ID, type Config } from "../config/index.js";
 import { answerLang } from "../lang.js";
-import type { HistoryTurn, RunInput, RunManager } from "../runs/index.js";
+import { Credential, type HistoryTurn, type RunInput, type RunManager } from "../runs/index.js";
 import { cap } from "./o2-events.js";
 import { O2Turn } from "./o2-stream.js";
 
@@ -31,6 +31,12 @@ const QueryRequest = z.object({
 const SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const TRACEPARENT = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/;
 const EMAIL = /^[^\s@]{1,128}@[^\s@]{1,128}$/;
+/**
+ * O2's per-turn user token, `o2ut.<claims>.<mac>` (unpadded base64url). Opaque here: only O2 can check it, so this
+ * is a shape check, and anything else counts as no token.
+ */
+const USER_TOKEN = /^o2ut\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
+const USER_TOKEN_CHARS = 4096;
 /** One value of the page context larger than this is replaced by a note: the context is a starting point, not data. */
 const CONTEXT_VALUE_CHARS = 4000;
 /** All of the page context; values past it are dropped, so a page cannot fill the prompt. */
@@ -137,18 +143,35 @@ export function boundedContext(ctx: Record<string, unknown> | null | undefined):
   return Object.fromEntries(out);
 }
 
+/** A usable `x-o2-user-token`, or undefined. */
+export function userToken(v: string | undefined): string | undefined {
+  return v && v.length <= USER_TOKEN_CHARS && USER_TOKEN.test(v) ? v : undefined;
+}
+
 /**
  * What the run is told about orgs, in code: the user's org from the URL path (O2 sets `org_id`) and the tools of each
  * configured org. The org id is checked against the identifier format before it goes anywhere near the prompt.
+ * `asUser`: the run queries as the user and has only its own org's tools, so other orgs can only be linked to.
  */
-export function orgNotes(org: string | undefined, orgs: Record<string, string>): { notes: string[]; server?: string } {
+export function orgNotes(org: string | undefined, orgs: Record<string, string>, asUser = false): { notes: string[]; server?: string } {
   // Own keys only: an org id such as "constructor" must not find Object.prototype.
   const server = org && Object.hasOwn(orgs, org) ? orgs[org] : undefined;
   const others = Object.entries(orgs).filter(([id]) => id !== org);
   const notes: string[] = [];
-  if (org && server) notes.push(`The user is in O2 org ${org}; query it with the ${server}__ tools unless the data is in another org.`);
-  else if (org) notes.push(`The user is in O2 org ${org}, which no data source here queries.`);
-  if (others.length) notes.push(`Other O2 orgs: ${others.map(([id, s]) => `${id} (${s}__ tools)`).join(", ")}.`);
+  if (org && server) {
+    notes.push(
+      asUser
+        ? `The user is in O2 org ${org}; query it with the ${server}__ tools, which run with the user's own O2 permissions.`
+        : `The user is in O2 org ${org}; query it with the ${server}__ tools unless the data is in another org.`,
+    );
+  } else if (org) notes.push(`The user is in O2 org ${org}, which no data source here queries.`);
+  if (others.length) {
+    notes.push(
+      asUser
+        ? `Other O2 orgs: ${others.map(([id]) => id).join(", ")}. This run has no tools for them: for data there, give the user a link and the query instead.`
+        : `Other O2 orgs: ${others.map(([id, s]) => `${id} (${s}__ tools)`).join(", ")}.`,
+    );
+  }
   return { notes, ...(server && { server }) };
 }
 
@@ -177,7 +200,23 @@ export function createO2Gateway(o: O2GatewayOptions) {
     // From the request, not the bounded copy: large page fields before it must not cost the run its org.
     const rawOrg = body.context?.org_id;
     const orgId = typeof rawOrg === "string" && O2_ORG_ID.test(rawOrg) ? rawOrg : undefined;
-    const { notes, server } = orgNotes(orgId, cfg.orgs);
+    const asUser = cfg.auth === "user";
+    const { notes, server } = orgNotes(orgId, cfg.orgs, asUser);
+    let mcp: RunInput["mcp"];
+    if (asUser) {
+      // Never the service account instead: the panel's user would see data their own account cannot.
+      const raw = header(req, "x-o2-user-token");
+      const token = userToken(raw);
+      if (!token) {
+        if (raw) log.warn({ session, length: raw.length }, "o2 x-o2-user-token is malformed; turn refused");
+        throw new HttpError(503, "user_auth_unavailable", "O2 sent no usable credential for this user; ask again, or ask an admin to check the AI assistant's user tokens");
+      }
+      if (!server) throw new HttpError(503, "user_auth_unavailable", "the assistant does not serve this O2 org");
+      mcp = {
+        hide: Object.values(cfg.orgs).filter((s) => s !== server),
+        asUser: { server, bearer: new Credential(token) },
+      };
+    }
     const history = boundedHistory(body.history, cfg.maxHistoryChars);
     const lang = answerLang(question);
 
@@ -202,6 +241,7 @@ export function createO2Gateway(o: O2GatewayOptions) {
       context,
       notes,
       tools: [turn.navigationTool(), turn.dashboardTool(), turn.alertsTool()],
+      ...(mcp && { mcp }),
       ...(trace && { traceparent: traceparent! }),
     };
     // The user may have pressed Stop while the body was still arriving: no run for a turn nobody reads.
@@ -213,7 +253,7 @@ export function createO2Gateway(o: O2GatewayOptions) {
       if (submitted.code === "rate_limited") throw new HttpError(429, "turn_limit", submitted.message, submitted.retryAfterSec);
       throw new HttpError(503, "unavailable", submitted.message, 5);
     }
-    log.info({ runId: submitted.run.id, session, user, org: orgId, historyTurns: history.length }, "o2 query accepted");
+    log.info({ runId: submitted.run.id, session, user, org: orgId, auth: cfg.auth, historyTurns: history.length }, "o2 query accepted");
     turn.open(submitted.run);
   }
 

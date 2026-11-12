@@ -302,6 +302,11 @@ const fileSchema = z.object({
       // O2 org identifier -> MCP server that queries it, e.g. { default: o2, <org id>: o2prod }. Decides the run's
       // default org, and which queries get the panel's "View in Logs" button (only the current org's).
       orgs: z.record(z.string().regex(O2_ORG_ID, "an O2 org identifier"), z.string().min(1)).default({}),
+      // Whose identity a run queries O2 with. service: every org's MCP server with its configured (service account)
+      // headers. user: the asker's own, from the x-o2-user-token O2 signs for each turn; the run gets only the page
+      // org's server, and a turn without a usable token is refused (503 user_auth_unavailable), never served as the
+      // service account.
+      auth: z.enum(["service", "user"]).default("service"),
       // Request body (the turn's history and page context); larger is refused.
       maxBodyKb: z.number().int().positive().default(4096),
       // Earlier turns kept for the model, newest first; older ones are dropped.
@@ -330,6 +335,9 @@ const fileSchema = z.object({
     const other = taken.get(server);
     if (other !== undefined) ctx.addIssue({ code: "custom", path: ["o2Gateway", "orgs", org], message: `MCP server "${server}" already queries org ${other}` });
     taken.set(server, org);
+  }
+  if (cfg.o2Gateway.enabled && cfg.o2Gateway.auth === "user" && Object.keys(cfg.o2Gateway.orgs).length === 0) {
+    ctx.addIssue({ code: "custom", path: ["o2Gateway", "auth"], message: 'auth "user" needs o2Gateway.orgs: a run only gets its page org\'s server' });
   }
   for (const [entry, packs] of Object.entries(cfg.agent.entries)) {
     (packs ?? []).forEach((p, i) => {

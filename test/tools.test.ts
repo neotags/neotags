@@ -20,6 +20,13 @@ describe("redact", () => {
     expect(r.count).toBeGreaterThan(0);
     expect(r.text).toContain("[REDACTED]");
   });
+  it("redacts an O2 user token whole, also a cut one, and after Bearer", () => {
+    // Short parts on purpose: no other rule (entropy, JWT, Bearer's 16+ characters) would catch them.
+    expect(redact("sent o2ut.eyJ2Ijox.mac-1_2 to O2")).toEqual({ text: "sent [REDACTED] to O2", count: 1 });
+    expect(redact("token o2ut.eyJ2Ijox").text).toBe("token [REDACTED]");
+    expect(redact("Authorization: Bearer o2ut.eyJ2Ijox.bWFj").text).toBe("Authorization: Bearer [REDACTED]");
+    expect(redact("no2ut.x.y stays")).toEqual({ text: "no2ut.x.y stays", count: 0 });
+  });
   it("keeps names of assignments and non-secret text", () => {
     const r = redact("password=hunter2hunter2 failed for user bob");
     expect(r.text).toBe("password=[REDACTED] failed for user bob");
