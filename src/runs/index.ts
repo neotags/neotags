@@ -8,6 +8,7 @@ import { EXEC_TOOL, skillExecTool, type SkillExecutor } from "../sandbox/index.j
 import { SkillPackIndex, loadSkillPacks, packsVersion, type SkillPack } from "../tools/skillpacks.js";
 import { RunManager } from "./manager.js";
 import { PiAgentRunner } from "./pi-runner.js";
+import type { RunInput } from "./types.js";
 
 export { RunManager, type RunHandle, type SubmitResult } from "./manager.js";
 export { PiAgentRunner } from "./pi-runner.js";
@@ -38,7 +39,7 @@ export function createRunManager(
     index: SkillPackIndex;
     log: Logger;
     /** MCP tools behind its tool guard (`startMcp`). */
-    mcp?: Pick<McpHub, "tools" | "unavailable" | "guard">;
+    mcp?: Pick<McpHub, "forRun" | "unavailable" | "guard">;
     tools?: AgentTool<any>[];
     guard?: ToolGuard;
     /** Command execution behind the sandbox tool guard; a run gets `run_skill_command` only when one of its packs can run something. */
@@ -51,9 +52,12 @@ export function createRunManager(
   // Built per run: the exec tool lists and allows only that run's skill packs.
   const tools =
     mcp || exec
-      ? ({ packs }: { packs: readonly string[] }) => {
+      ? ({ packs, input, onEnd }: { packs: readonly string[]; input: RunInput; onEnd: (f: () => unknown) => void }) => {
           const run = exec && skillExecTool(exec, packs, a.toolOutputChars);
-          return [...(mcp?.tools() ?? []), ...(deps.tools ?? []), ...(run ? [run] : [])];
+          // The run's own view of the MCP servers (o2Gateway.auth user: the page org's, as the user), closed with it.
+          const servers = mcp?.forRun(input.mcp);
+          if (servers) onEnd(servers.close);
+          return [...(servers?.tools ?? []), ...(deps.tools ?? []), ...(run ? [run] : [])];
         }
       : deps.tools;
   const checks: ToolGuard[] = [
@@ -77,7 +81,7 @@ export function createRunManager(
     entries: a.entries,
     ...(tools && { tools }),
     ...(guard && { guard }),
-    ...(mcp && { unavailable: () => mcp.unavailable() }),
+    ...(mcp && { unavailable: (input: RunInput) => mcp.unavailable(input.mcp) }),
     firstTokenTimeoutMs: cfg.llm.failover.firstTokenTimeoutSec * 1000,
     idleTimeoutMs: cfg.llm.timeoutMs,
     maxRetries: cfg.llm.maxRetries,

@@ -11,12 +11,51 @@ export interface HistoryTurn {
   content: string;
 }
 
+const HIDDEN = "[REDACTED]";
+
+/**
+ * A credential carried on a run's input. The value sits in a private field, so JSON, pino and util.inspect see
+ * only a placeholder: a RunInput that gets logged or put on a span cannot leak it. Only `reveal()` gives it out.
+ */
+export class Credential {
+  readonly #value: string;
+  constructor(value: string) {
+    this.#value = value;
+  }
+  reveal(): string {
+    return this.#value;
+  }
+  toJSON(): string {
+    return HIDDEN;
+  }
+  toString(): string {
+    return HIDDEN;
+  }
+  [Symbol.for("nodejs.util.inspect.custom")](): string {
+    return `Credential ${HIDDEN}`;
+  }
+}
+
+/**
+ * How a run reaches its MCP servers, when it is not the shared service-account clients for all of them
+ * (O2 entry with `o2Gateway.auth: user`). Set by the entry's code, never from request text.
+ */
+export interface RunMcpAccess {
+  /** Servers whose tools this run does not get (the other orgs' O2 servers). */
+  hide?: readonly string[];
+  /** Calls to `server` go out on a client of this run only, as `Authorization: Bearer <bearer>`. */
+  asUser?: { server: string; bearer: Credential };
+}
+
 /** One question to the agent, already mapped from its entry (O2 QueryRequest, Slack thread, job request). */
 export interface RunInput {
   source: RunSource;
   /** Conversation the run belongs to (O2 assistant session, Slack thread); one run per session at a time. */
   sessionId: string;
-  /** Asker, for rate limits and audit only; data is always queried with the agent's own read-only identity. */
+  /**
+   * Asker, for rate limits and audit only. Never an authorization input: data is queried with the agent's own
+   * read-only identity, or with the credential in `mcp.asUser` that O2 issued for this user.
+   */
   user?: string;
   question: string;
   /** Earlier turns of the conversation, oldest first. Untrusted. */
@@ -37,6 +76,8 @@ export interface RunInput {
   notes?: string[];
   /** Tools of this run only, next to the shared ones (O2: opening a query in the user's page). Set by the entry's code. */
   tools?: AgentTool<any>[];
+  /** MCP servers this run may use and with which credential; default: every server, as the service account. */
+  mcp?: RunMcpAccess;
   /** W3C trace context of the caller; the run's trace span is its child when it is sampled. */
   traceparent?: string;
 }

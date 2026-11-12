@@ -81,6 +81,8 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #   enabled: false                # needs env O2_AGENT_API_KEY (the x-o2-agent-key O2 sends) and an LLM
 #   port: 3001                    # its own port; in-cluster callers only (Service + NetworkPolicy)
 #   orgs: {}                      # O2 org identifier -> the mcp.servers entry that queries it, e.g. { default: o2 }
+#   auth: service                 # service: every org with the servers' headers. user: as the asker, with O2's
+#                                 # x-o2-user-token, page org only; no token -> 503 user_auth_unavailable
 #   maxBodyKb: 4096
 #   maxHistoryChars: 48000        # earlier turns kept, newest first
 #   maxQueued: 8                  # runs waiting for a slot; beyond it O2 gets 429 turn_limit

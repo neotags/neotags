@@ -305,6 +305,8 @@ export interface AgentRunSpan {
   queuedMs?: number;
   /** W3C `traceparent` of the caller (O2). */
   traceparent?: string;
+  /** O2 entry: whose identity the run queries O2 with (`neotags.o2.auth`). Never the credential itself. */
+  o2Auth?: "user" | "service";
 }
 
 const propagator = new W3CTraceContextPropagator();
@@ -347,6 +349,7 @@ export function startRunSpan(run: AgentRunSpan): Span {
           "session.id": run.sessionId,
           ...(run.user && { "user.id": run.user }),
           ...(run.queuedMs !== undefined && { "neotags.run.queued_ms": run.queuedMs }),
+          ...(run.o2Auth && { "neotags.o2.auth": run.o2Auth }),
         },
       },
       // The caller's trace or a root, never the active context: a queued run is started from whatever finished

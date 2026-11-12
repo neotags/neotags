@@ -8,6 +8,9 @@ const MARK = "[REDACTED]";
 
 // Ordered: specific token shapes first, then generic assignments, then entropy.
 const PATTERNS: { name: string; re: RegExp; replace?: string }[] = [
+  // O2's per-turn user token (o2ut.<claims>.<mac>), whole: the claims part alone names the user and org. Also a
+  // token cut short (no MAC yet), as a capped log line would leave it.
+  { name: "o2-user-token", re: /\bo2ut\.[A-Za-z0-9_-]+(?:\.[A-Za-z0-9_-]*)?/g },
   { name: "private-key", re: /-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----/g },
   { name: "aws-access-key", re: /\b(?:AKIA|ASIA|AGPA|AIDA|AROA)[A-Z0-9]{16}\b/g },
   { name: "slack-token", re: /\bxox[abprso]-[A-Za-z0-9-]{10,}\b/g },

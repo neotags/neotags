@@ -246,6 +246,7 @@ export class RunManager {
       sessionId: input.sessionId,
       ...(input.user && { user: input.user }),
       ...(input.traceparent && { traceparent: input.traceparent }),
+      ...(input.source === "o2" && { o2Auth: input.mcp?.asUser ? ("user" as const) : ("service" as const) }),
       queuedMs: run.startedAt - run.enqueuedAt,
     });
     run.observer.started?.({ runId: run.id });
