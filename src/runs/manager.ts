@@ -210,6 +210,15 @@ export class RunManager {
       if (this.running.size >= this.o.concurrency) break;
       if (this.busySessions.has(run.input.sessionId)) continue;
       this.dequeue(run);
+      const cd = run.input.credentialDeadline;
+      if (cd && cd.at - this.now() < cd.minMs) {
+        // Not run: its tool calls would fail on the expired credential halfway. Async, so a run is never done
+        // before submit() returns its handle.
+        queueMicrotask(() =>
+          this.finish(run, { ...ZERO, state: "failed", answer: notice("sign_in_expiring", run.input.question), reason: "credential expires too soon", errorType: "sign_in_expiring" }),
+        );
+        continue;
+      }
       this.start(run);
     }
     this.queue.forEach((run, ahead) => {
@@ -225,8 +234,11 @@ export class RunManager {
     run.startedAt = this.now();
     this.running.set(run.id, run);
     this.busySessions.add(input.sessionId);
-    const wallMs = this.o.wallClockSec[input.source] * 1000;
-    const reserveMs = Math.min(this.o.finalReserveSec * 1000, wallMs / 2);
+    const configuredMs = this.o.wallClockSec[input.source] * 1000;
+    const reserveMs = Math.min(this.o.finalReserveSec * 1000, configuredMs / 2);
+    // Tool calls end by the credential deadline (the soft deadline); the final answer needs no credential.
+    const cd = input.credentialDeadline;
+    const wallMs = cd ? Math.min(configuredMs, cd.at - run.startedAt + reserveMs) : configuredMs;
     run.timer = setTimeout(() => run.controller.abort(new RunAbort("deadline", "wall clock exceeded")), wallMs);
     run.controller.signal.addEventListener(
       "abort",

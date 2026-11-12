@@ -52,10 +52,10 @@ export function createRunManager(
   // Built per run: the exec tool lists and allows only that run's skill packs.
   const tools =
     mcp || exec
-      ? ({ packs, input, onEnd }: { packs: readonly string[]; input: RunInput; onEnd: (f: () => unknown) => void }) => {
+      ? async ({ packs, input, signal, onEnd }: { packs: readonly string[]; input: RunInput; signal: AbortSignal; onEnd: (f: () => unknown) => void }) => {
           const run = exec && skillExecTool(exec, packs, a.toolOutputChars);
           // The run's own view of the MCP servers (o2Gateway.auth user: the page org's, as the user), closed with it.
-          const servers = mcp?.forRun(input.mcp);
+          const servers = await mcp?.forRun(input.mcp, signal);
           if (servers) onEnd(servers.close);
           return [...(servers?.tools ?? []), ...(deps.tools ?? []), ...(run ? [run] : [])];
         }

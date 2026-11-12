@@ -37,6 +37,8 @@ const EMAIL = /^[^\s@]{1,128}@[^\s@]{1,128}$/;
  */
 const USER_TOKEN = /^o2ut\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+$/;
 const USER_TOKEN_CHARS = 4096;
+/** Taken off the token's exp: clock skew between moose and O2, and a call in flight when time runs out. */
+const USER_TOKEN_MARGIN_MS = 30_000;
 /** One value of the page context larger than this is replaced by a note: the context is a starting point, not data. */
 const CONTEXT_VALUE_CHARS = 4000;
 /** All of the page context; values past it are dropped, so a page cannot fill the prompt. */
@@ -149,6 +151,19 @@ export function userToken(v: string | undefined): string | undefined {
 }
 
 /**
+ * The token's `exp` (Unix seconds), read from its claims without checking the MAC: only for timing the run. O2
+ * still checks the token on every call, so a forged exp buys nothing.
+ */
+export function userTokenExp(token: string): number | undefined {
+  try {
+    const exp: unknown = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8"))?.exp;
+    return typeof exp === "number" && Number.isSafeInteger(exp) && exp > 0 ? exp : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
  * What the run is told about orgs, in code: the user's org from the URL path (O2 sets `org_id`) and the tools of each
  * configured org. The org id is checked against the identifier format before it goes anywhere near the prompt.
  * `asUser`: the run queries as the user and has only its own org's tools, so other orgs can only be linked to.
@@ -203,15 +218,22 @@ export function createO2Gateway(o: O2GatewayOptions) {
     const asUser = cfg.auth === "user";
     const { notes, server } = orgNotes(orgId, cfg.orgs, asUser);
     let mcp: RunInput["mcp"];
+    let credentialDeadline: RunInput["credentialDeadline"];
     if (asUser) {
       // Never the service account instead: the panel's user would see data their own account cannot.
       const raw = header(req, "x-o2-user-token");
       const token = userToken(raw);
-      if (!token) {
+      const exp = token && userTokenExp(token);
+      if (!token || !exp) {
         if (raw) log.warn({ session, length: raw.length }, "o2 x-o2-user-token is malformed; turn refused");
         throw new HttpError(503, "user_auth_unavailable", "O2 sent no usable credential for this user; ask again, or ask an admin to check the AI assistant's user tokens");
       }
       if (!server) throw new HttpError(503, "user_auth_unavailable", "the assistant does not serve this O2 org");
+      credentialDeadline = { at: exp * 1000 - USER_TOKEN_MARGIN_MS, minMs: cfg.minUserTokenSec * 1000 };
+      if (credentialDeadline.at - Date.now() < credentialDeadline.minMs) {
+        log.warn({ session, expiresInSec: Math.round(exp - Date.now() / 1000) }, "o2 x-o2-user-token expires too soon; turn refused");
+        throw new HttpError(503, "user_auth_unavailable", "the user's O2 sign-in for this question expires too soon; ask again");
+      }
       mcp = {
         hide: Object.values(cfg.orgs).filter((s) => s !== server),
         asUser: { server, bearer: new Credential(token) },
@@ -242,6 +264,7 @@ export function createO2Gateway(o: O2GatewayOptions) {
       notes,
       tools: [turn.navigationTool(), turn.dashboardTool(), turn.alertsTool()],
       ...(mcp && { mcp }),
+      ...(credentialDeadline && { credentialDeadline }),
       ...(trace && { traceparent: traceparent! }),
     };
     // The user may have pressed Stop while the body was still arriving: no run for a turn nobody reads.

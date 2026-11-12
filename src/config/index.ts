@@ -307,6 +307,9 @@ const fileSchema = z.object({
       // org's server, and a turn without a usable token is refused (503 user_auth_unavailable), never served as the
       // service account.
       auth: z.enum(["service", "user"]).default("service"),
+      // auth user: a turn whose token has less than this left (after a 30 s margin) is refused, before the stream
+      // and again when it leaves the queue; a run that starts in time gets its wall clock cut to the token's life.
+      minUserTokenSec: z.number().int().positive().default(120),
       // Request body (the turn's history and page context); larger is refused.
       maxBodyKb: z.number().int().positive().default(4096),
       // Earlier turns kept for the model, newest first; older ones are dropped.

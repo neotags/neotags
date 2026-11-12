@@ -46,9 +46,13 @@ export function contextPackage(input: RunInput, why: DegradeReason): string {
 }
 
 /** Short notices for runs that never started or were stopped. */
-export function notice(kind: "shutting_down" | "interrupted" | "cancelled", question: string): string {
+export function notice(kind: "shutting_down" | "interrupted" | "cancelled" | "sign_in_expiring", question: string): string {
   const zh = answerLang(question) === "zh";
   switch (kind) {
+    case "sign_in_expiring":
+      return zh
+        ? "这次提问的 O2 登录凭证快过期了（排队时间太长），没有开始排查，请重新提问。"
+        : "Your O2 sign-in for this question was about to expire (it waited too long in the queue), so it was not started; please ask again.";
     case "shutting_down":
       return zh ? "服务正在更新，请稍后重新提问。" : "The service is restarting; please ask again in a moment.";
     case "interrupted":

@@ -78,6 +78,11 @@ export interface RunInput {
   tools?: AgentTool<any>[];
   /** MCP servers this run may use and with which credential; default: every server, as the service account. */
   mcp?: RunMcpAccess;
+  /**
+   * When the run's own credential (`mcp.asUser`) stops working, epoch ms, less a margin: the run's tool calls must
+   * end by then, so its wall clock is cut to fit, and a run left with less than `minMs` when it starts is not run.
+   */
+  credentialDeadline?: { at: number; minMs: number };
   /** W3C trace context of the caller; the run's trace span is its child when it is sampled. */
   traceparent?: string;
 }

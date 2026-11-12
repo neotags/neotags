@@ -27,7 +27,7 @@ const telemetry = startTelemetry({ exporter })!;
 const SERVICE = "Basic c2VydmljZTpzZWNyZXQ=";
 /** Shaped like O2's tokens, o2ut.<base64url claims>.<base64url mac>; built here so no token-like literal is in the source. */
 const fakeUserToken = (sub: string) =>
-  `o2ut.${Buffer.from(JSON.stringify({ v: 1, sub, org: "prod", scope: "read" })).toString("base64url")}.${Buffer.from(`mac of ${sub}`).toString("base64url")}`;
+  `o2ut.${Buffer.from(JSON.stringify({ v: 1, sub, org: "prod", scope: "read", exp: Math.floor(Date.now() / 1000) + 900 })).toString("base64url")}.${Buffer.from(`mac of ${sub}`).toString("base64url")}`;
 const TOKEN_A = fakeUserToken("a@example.com");
 const TOKEN_B = fakeUserToken("b@example.com");
 const EXPIRED = fakeUserToken("expired@example.com");
@@ -47,6 +47,10 @@ interface Seen {
  */
 class FakeO2 {
   seen: Seen[] = [];
+  /** The next `failCalls` tools/call requests answer `failStatus` with `failBody` (O2 rate limiting, a bad request). */
+  failCalls = 0;
+  failStatus = 429;
+  failBody = "rate limit exceeded";
   private http?: Server;
   port = 0;
 
@@ -76,6 +80,10 @@ class FakeO2 {
       const user = auth?.startsWith("Bearer o2ut.") ? auth.slice("Bearer ".length) : undefined;
       if (auth !== SERVICE && ![TOKEN_A, TOKEN_B, NO_ACCESS].includes(user ?? "")) return void res.writeHead(401).end("token expired");
       if (user === NO_ACCESS && msg?.method === "tools/call") return void res.writeHead(403).end("no access to stream");
+      if (this.failCalls > 0 && msg?.method === "tools/call") {
+        this.failCalls--;
+        return void res.writeHead(this.failStatus).end(this.failBody);
+      }
       const server = this.build();
       const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
       res.on("close", () => {
@@ -133,13 +141,13 @@ telemetry: { captureContent: true }
 `);
 }
 
-async function setup(auth: "user" | "service" = "user") {
+async function setup(auth: "user" | "service" = "user", env: NodeJS.ProcessEnv = { O2_AUTH: SERVICE }) {
   const o2 = await new FakeO2().listen();
   cleanup.push(() => o2.stop());
   const cfg = configFor(o2, auth);
   let logged = "";
   const log = pino({ level: "debug" }, { write: (s: string) => void (logged += s) });
-  const mcp = await startMcp(cfg, log, { O2_AUTH: SERVICE });
+  const mcp = await startMcp(cfg, log, env);
   cleanup.push(() => mcp.close());
   return { o2, cfg, log, mcp, logs: () => logged };
 }
@@ -149,7 +157,7 @@ const SQL = { request_body: { query: { sql: "SELECT count(*) FROM app_logs", sta
 
 /** Run one question through the hub as a run of `access` would: the tools the run gets, called by name. */
 async function callAs(mcp: McpHub, access: RunInput["mcp"], name: string) {
-  const run = mcp.forRun(access);
+  const run = await mcp.forRun(access);
   const tool = run.tools.find((t) => t.name === name);
   if (!tool) throw new Error(`no tool ${name}`);
   const call = () => tool.execute("c1", mcp.guard.prepare(name, SQL) as never, undefined, undefined as never);
@@ -159,8 +167,8 @@ async function callAs(mcp: McpHub, access: RunInput["mcp"], name: string) {
 describe("McpHub.forRun", () => {
   it("without access: every server's shared tools, as before", async () => {
     const { mcp } = await setup();
-    expect(mcp.forRun(undefined).tools.map((t) => t.name)).toEqual(mcp.tools().map((t) => t.name));
-    expect(mcp.forRun(undefined).tools).toHaveLength(4);
+    expect((await mcp.forRun(undefined)).tools.map((t) => t.name)).toEqual(mcp.tools().map((t) => t.name));
+    expect((await mcp.forRun(undefined)).tools).toHaveLength(4);
   });
 
   it("as the user: only the page org's tools, on a run client that sends the bearer token and no service header", async () => {
@@ -241,6 +249,77 @@ describe("McpHub.forRun", () => {
     // A user run calls o2prod on its own client with the tools listed at startup, and has no o2 at all.
     expect(mcp.unavailable({ hide: ["o2"], asUser: { server: "o2prod", bearer: new Credential(TOKEN_A) } })).toEqual([]);
     expect(mcp.unavailable({ hide: ["o2"] })).toEqual(["o2prod"]);
+  });
+
+  const userAccess = (token = TOKEN_A) => ({ hide: ["o2"], asUser: { server: "o2prod", bearer: new Credential(token) } });
+  const errorOf = (p: Promise<unknown>) =>
+    p.then(
+      () => undefined,
+      (e: unknown) => (e as Error).message,
+    );
+
+  it.each([
+    [429, "rate limit exceeded", /answered HTTP 429: rate limit exceeded\. It is limiting requests: do not retry now/],
+    [400, "bad SQL near FROM", /answered HTTP 400: bad SQL near FROM\. Do not send the same call again/],
+    [500, "internal error", /answered HTTP 500: internal error\. Do not send the same call again/],
+  ])("as the user, passes HTTP %i through to the model as O2's answer, sent once, without reconnecting", async (status, body, want) => {
+    const { o2, mcp } = await setup();
+    const { run, call } = await callAs(mcp, userAccess(), "o2prod__SearchSQL");
+    await call();
+    const before = o2.seen.length;
+    Object.assign(o2, { failCalls: 1, failStatus: status, failBody: body });
+    expect(await errorOf(call())).toMatch(want);
+    const sent = o2.seen.slice(before);
+    expect(sent.map((s) => s.method)).toEqual(["tools/call"]);
+    await run.close();
+  });
+
+  it("as the user, a 404 (the server lost the session) reconnects once and retries", async () => {
+    const { o2, mcp } = await setup();
+    const { run, call } = await callAs(mcp, userAccess(), "o2prod__SearchSQL");
+    await call();
+    const before = o2.seen.length;
+    Object.assign(o2, { failCalls: 1, failStatus: 404, failBody: "session not found" });
+    await expect(call()).resolves.toMatchObject({ content: [{ text: expect.stringContaining('"total":1') }] });
+    const sent = o2.seen.slice(before).map((s) => s.method);
+    expect(sent.filter((m) => m === "initialize")).toHaveLength(1);
+    expect(sent.filter((m) => m === "tools/call")).toHaveLength(2);
+    await run.close();
+  });
+
+  it("on the shared client, a 429 is the server's answer: sent once, and the server stays up", async () => {
+    const { o2, mcp } = await setup("service");
+    const tool = mcp.tools().find((t) => t.name === "o2prod__SearchSQL")!;
+    const before = o2.seen.length;
+    Object.assign(o2, { failCalls: 1, failStatus: 429, failBody: "rate limit exceeded" });
+    expect(await errorOf(tool.execute("c", mcp.guard.prepare("o2prod__SearchSQL", SQL) as never, undefined, undefined as never))).toMatch(/answered HTTP 429/);
+    expect(o2.seen.slice(before).map((s) => s.method)).toEqual(["tools/call"]);
+    expect(mcp.unavailable()).toEqual([]);
+  });
+
+  it("lists the tools on the run client when the shared client has none (no service credential)", async () => {
+    const { o2, mcp } = await setup("user", {});
+    expect(mcp.tools()).toEqual([]);
+    expect(mcp.unavailable()).toEqual(["o2", "o2prod"]);
+    const access = userAccess();
+    const { run, call } = await callAs(mcp, access, "o2prod__SearchSQL");
+    expect(run.tools.map((t) => t.name)).toEqual(["o2prod__SearchSQL", "o2prod__StreamList"]);
+    expect(mcp.unavailable(access)).toEqual([]);
+    await call();
+    // One connection as the user: initialize, list, call; nothing as the service account.
+    expect(o2.seen.filter((s) => s.method === "initialize")).toHaveLength(1);
+    expect(o2.seen.filter((s) => s.method === "tools/list").every((s) => s.auth === `Bearer ${TOKEN_A}`)).toBe(true);
+    expect(o2.calls(`Bearer ${TOKEN_A}`)).toHaveLength(1);
+    await run.close();
+  });
+
+  it("a run whose own listing is refused gets no tools for that server, and is told it is unavailable", async () => {
+    const { mcp } = await setup("user", {});
+    const access = userAccess(EXPIRED);
+    const run = await mcp.forRun(access);
+    expect(run.tools).toEqual([]);
+    expect(mcp.unavailable(access)).toEqual(["o2prod"]);
+    await run.close();
   });
 });
 

@@ -30,10 +30,11 @@ const guardFor = (servers: McpServerPolicy[] = [o2Policy], outputChars = 16_000)
 class FakeMcp {
   calls: { tool: string; args: Record<string, unknown> }[] = [];
   headers: IncomingHttpHeaders[] = [];
+  /** Every request's connection is dropped (the server is gone). */
   down = false;
-  /** Requests that fail with 503 before the server answers again (a restart, an expired session). */
+  /** Requests that fail with `failStatus` before the server answers again; 404 is a session it no longer knows. */
   failNext = 0;
-  failStatus = 503;
+  failStatus = 404;
   /** Requests are accepted but never answered. */
   hang = false;
   /** Start hanging once the `failNext` failures are used up. */
@@ -71,10 +72,11 @@ class FakeMcp {
     this.http = createServer(async (req, res) => {
       this.headers.push(req.headers);
       if (this.hang) return;
-      if (this.down || this.failNext > 0) {
-        this.failNext = Math.max(0, this.failNext - 1);
+      if (this.down) return void req.socket.destroy();
+      if (this.failNext > 0) {
+        this.failNext--;
         if (this.failNext === 0 && this.hangAfterFailures) this.hang = true;
-        res.writeHead(this.down ? 503 : this.failStatus).end("down");
+        res.writeHead(this.failStatus).end("down");
         return;
       }
       const server = this.build();
@@ -309,13 +311,12 @@ describe("MCP client", () => {
     expect(f.calls.map((c) => c.args.query).sort()).toEqual(["a", "b"]);
   });
 
-  it("retries a call once after any connection error; failing again marks the server down", async () => {
+  it("retries a call once after a connection error; failing again marks the server down", async () => {
     const f = await fake();
     const hub = hubFor([{ name: "o2", url: f.url() }], { reconnectMinMs: 60_000 });
     await hub.start();
     const tool = hub.tools().find((t) => t.name === "o2__tool_search")!;
     f.failNext = 1;
-    f.failStatus = 500;
     await expect(tool.execute("1", { query: "a" })).resolves.toMatchObject({ content: [{ text: "ok" }] });
     // Call, reconnect (initialize + list), call again: every one of them fails.
     f.failNext = 10;

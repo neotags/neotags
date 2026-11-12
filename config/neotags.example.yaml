@@ -83,6 +83,7 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #   orgs: {}                      # O2 org identifier -> the mcp.servers entry that queries it, e.g. { default: o2 }
 #   auth: service                 # service: every org with the servers' headers. user: as the asker, with O2's
 #                                 # x-o2-user-token, page org only; no token -> 503 user_auth_unavailable
+#   minUserTokenSec: 120          # auth user: less token life than this (after a 30 s margin) -> refused, ask again
 #   maxBodyKb: 4096
 #   maxHistoryChars: 48000        # earlier turns kept, newest first
 #   maxQueued: 8                  # runs waiting for a slot; beyond it O2 gets 429 turn_limit
