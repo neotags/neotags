@@ -32,4 +32,4 @@ settings:
     is_enabled: true     # the Undo button
     request_url: https://neotags.example.com/slack/events
   org_deploy_enabled: false
-  socket_mode_enabled: false
+  socket_mode_enabled: false   # true for slack.mode: socket (needs an app-level token with connections:write; drop both request_url lines)

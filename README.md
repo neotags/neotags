@@ -14,7 +14,7 @@ npm test && npm run typecheck
 ```
 
 Create the Slack app from `deploy/slack-app-manifest.yaml`; the Events request URL must be publicly reachable
-(use a tunnel such as ngrok/cloudflared for local dev). Bot name is configuration (`bot.name`); mentions are matched by bot user ID.
+(use a tunnel such as ngrok/cloudflared for local dev), or set `slack.mode: socket` to connect out to Slack over a WebSocket instead: no public URL, `SLACK_APP_TOKEN` (app-level token, scope `connections:write`) replaces `SLACK_SIGNING_SECRET`, and the manifest needs `socket_mode_enabled: true` without the two `request_url`s. The port then serves only `/healthz`. `/healthz` stays green while the socket is down (Bolt reconnects by itself): watch the `slack socket` log lines (`reconnecting`/`disconnected` are warnings). Bot name is configuration (`bot.name`); mentions are matched by bot user ID.
 
 ## Status
 

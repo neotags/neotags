@@ -1,4 +1,4 @@
-import { App, ExpressReceiver } from "@slack/bolt";
+import { App, ExpressReceiver, SocketModeReceiver } from "@slack/bolt";
 import type { Logger } from "pino";
 import type { Config } from "../config/index.js";
 import { authorize } from "../guardrails/policy.js";
@@ -19,13 +19,32 @@ export interface SlackDeps {
 }
 
 export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps) => Router) {
-  const receiver = new ExpressReceiver({
-    signingSecret: cfg.secrets.slackSigningSecret,
-    endpoints: "/slack/events",
-  });
-  receiver.router.get("/healthz", (_req, res) => void res.status(200).send("ok"));
-
-  const app = new App({ token: cfg.secrets.slackBotToken, receiver });
+  const health = (_req: unknown, res: { writeHead(c: number): unknown; end(b: string): unknown }) => {
+    res.writeHead(200);
+    res.end("ok");
+  };
+  let app: App;
+  if (cfg.slack.mode === "socket") {
+    // Outbound WebSocket: Slack delivers events and interactivity over it, so nothing is exposed for them. The
+    // receiver's HTTP server (installerOptions.port, started by app.start) serves only /healthz.
+    const receiver = new SocketModeReceiver({
+      appToken: cfg.secrets.slackAppToken!,
+      installerOptions: { port: cfg.slack.port },
+      customRoutes: [{ path: "/healthz", method: ["GET"], handler: health }],
+    });
+    // /healthz stays green while the socket is down and Bolt reconnects by itself, so these lines are the only
+    // sign that Slack stopped delivering.
+    for (const state of ["connecting", "connected"] as const) receiver.client.on(state, () => log.info({ state }, "slack socket"));
+    for (const state of ["reconnecting", "disconnected"] as const) receiver.client.on(state, () => log.warn({ state }, "slack socket"));
+    app = new App({ token: cfg.secrets.slackBotToken, receiver });
+  } else {
+    const receiver = new ExpressReceiver({
+      signingSecret: cfg.secrets.slackSigningSecret!,
+      endpoints: "/slack/events",
+    });
+    receiver.router.get("/healthz", (_req, res) => void res.status(200).send("ok"));
+    app = new App({ token: cfg.secrets.slackBotToken, receiver });
+  }
 
   const notifier: Notifier = {
     async reply(t: ReplyTarget, text: string, blocks?: unknown[]) {
@@ -121,7 +140,7 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
   };
 
   app.event("app_mention", async ({ event, body, context }) => {
-    // Bolt acks the HTTP request itself; the work below runs after the 3s window is safe.
+    // Bolt acks the request (HTTP response or socket envelope) itself; the work below runs after the 3s window is safe.
     const eventId = (body as { event_id?: string }).event_id ?? `${event.channel}:${event.ts}`;
     const user = event.user;
     if (!user || !context.botUserId) return;

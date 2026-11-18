@@ -1,7 +1,9 @@
 bot:
   name: moose            # display name only; mentions are matched by bot user ID
 slack:
-  port: 3000
+  mode: events-http      # or socket: outbound WebSocket, no public URL (env SLACK_APP_TOKEN, scope connections:write,
+  #                      # instead of SLACK_SIGNING_SECRET; the manifest needs socket_mode_enabled and no request_url)
+  port: 3000             # events-http: the Events server; socket: only GET /healthz
   allowedChannels: []    # empty = all channels the bot is in
   allowedUsers: []       # empty = everyone
   allowPrivateChannels: false  # true: also record private-channel threads (bot invited; groups:read + groups:history).
@@ -99,5 +101,5 @@ telemetry:               # LLM traces over OTLP/HTTP (OpenObserve, Langfuse, an 
   captureContent: false  # true: prompts, replies and tool input/output on spans (redacted; readable by anyone who
   #                      # can read the traces). Or env OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
 logLevel: info
-# Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none),
+# Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET (SLACK_APP_TOKEN instead with slack.mode socket), ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none),
 # O2_AGENT_API_KEY (with o2Gateway.enabled)

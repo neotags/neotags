@@ -9,6 +9,9 @@
 {{- if and $o2 (ne .Values.service.type "ClusterIP") -}}
 {{- fail (printf "service.type %s would expose the O2 gateway port outside the cluster; it is in-cluster only (use the Ingress for Slack)" .Values.service.type) -}}
 {{- end -}}
+{{- if and .Values.ingress.enabled (eq (default "events-http" (default dict .Values.config.slack).mode) "socket") -}}
+{{- fail "ingress.enabled with config.slack.mode socket: Slack delivers over an outbound WebSocket, so the public /slack/events route would serve nothing" -}}
+{{- end -}}
 {{- $sp := default dict .Values.config.skillPacks -}}
 {{- if or $sp.packs $sp.refs -}}
 {{- if not .Values.skillPacks.configMap -}}
