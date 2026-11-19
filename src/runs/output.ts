@@ -1,5 +1,7 @@
 import type { AgentTool } from "@earendil-works/pi-agent-core";
 import { Ajv, type ValidateFunction } from "ajv";
+import { Ajv2019 } from "ajv/dist/2019.js";
+import { Ajv2020 } from "ajv/dist/2020.js";
 import addFormatsModule from "ajv-formats";
 
 /** The tool a run with an `outputSchema` delivers its result through (S-D11). */
@@ -10,17 +12,31 @@ export const MAX_INVALID_SUBMITS = 2;
 // ajv-formats is CommonJS with a default export; under NodeNext its default import is the module object.
 const addFormats = ((addFormatsModule as unknown as { default?: unknown }).default ?? addFormatsModule) as (ajv: Ajv) => Ajv;
 
-// strict: false so schemas written for other validators (unknown keywords, `$comment`, draft differences) still work.
-const ajv = addFormats(new Ajv({ strict: false, allErrors: true }));
 const compiled = new WeakMap<object, ValidateFunction>();
 
-/** A validator for an output schema; throws with why the schema is unusable. Cached per schema object. */
+/**
+ * The validator class for the schema's declared draft: 2020-12 (what zod v4's toJSONSchema writes), 2019-09, else
+ * draft-07, ajv's default. strict: false so schemas written for other validators (unknown keywords, `$comment`)
+ * still work.
+ */
+function ajvFor(schema: Record<string, unknown>): Ajv {
+  const declared = typeof schema.$schema === "string" ? schema.$schema : "";
+  const o = { strict: false, allErrors: true };
+  const ajv = declared.includes("2020-12") ? new Ajv2020(o) : declared.includes("2019-09") ? new Ajv2019(o) : new Ajv(o);
+  return addFormats(ajv);
+}
+
+/**
+ * A validator for an output schema; throws with why the schema is unusable. Each schema gets an Ajv instance of its
+ * own: a shared one keeps every compiled schema for the life of the process and refuses a second schema with the same
+ * `$id`, and every request brings a new schema object. Cached per schema object (the runner reuses runJob's).
+ */
 export function outputValidator(schema: Record<string, unknown>): ValidateFunction {
   const hit = compiled.get(schema);
   if (hit) return hit;
   // Tool parameters are an object on every model API.
   if (schema.type !== "object") throw new Error('the output schema must have type "object"');
-  const v = ajv.compile(schema);
+  const v = ajvFor(schema).compile(schema);
   compiled.set(schema, v);
   return v;
 }

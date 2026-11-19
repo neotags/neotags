@@ -45,7 +45,8 @@ export function createInternalApi(o: InternalApiOptions): { route: Route } {
 
   /** The caller whose key the request carries. Every key is compared, so the time does not tell which matched. */
   function caller(req: IncomingMessage): JobCaller | undefined {
-    const m = /^Bearer (\S+)$/.exec(header(req, "authorization") ?? "");
+    // The scheme is case-insensitive (RFC 9110).
+    const m = /^bearer\s+(\S+)\s*$/i.exec(header(req, "authorization") ?? "");
     let found: JobCaller | undefined;
     for (const [name, key] of keys) if (keyMatches(m?.[1], key) && !found) found = name;
     return found;

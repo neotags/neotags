@@ -241,18 +241,18 @@ export class PiAgentRunner implements AgentRunner {
     try {
       if (ctx.signal.aborted) return this.stopped(ctx, stats, undefined);
       await agent.prompt(userPrompt(input, new Date(now())));
+      // An accepted submit_output is the result even when the run was aborted just after it.
+      const early = accepted();
+      if (early) {
+        outcome = "success";
+        return { state: "done", ...submitted(early.value), ...stats };
+      }
       let last = lastAssistant(agent.state.messages);
       const ended = this.check(last, ctx);
       if (ended.kind === "aborted") return this.stopped(ctx, stats, undefined);
       if (ended.kind === "error") {
         ({ outcome, failure } = ended);
         throw new RunError(ended.message, "model_error", stats);
-      }
-
-      const early = accepted();
-      if (early) {
-        outcome = "success";
-        return { state: "done", ...submitted(early.value), ...stats };
       }
       if (invalidSubmits >= MAX_INVALID_SUBMITS) {
         outcome = "success";

@@ -88,7 +88,8 @@ export function finalPrompt(why: "final" | "submit" | "steps" | "time" | "tokens
     tokens: "The evidence gathered no longer fits in the context budget.",
   };
   if (structured) {
-    const lead = why === "submit" || why === "final" ? "You stopped without calling submit_output." : budget[why];
+    // "submit": the investigation ended without an accepted call, which may follow a rejected one.
+    const lead = why === "submit" || why === "final" ? "No submit_output call has been accepted yet; if one returned errors above, fix exactly those." : budget[why];
     return `${lead} submit_output is the only tool left: call it now with the result, from the evidence you have.`;
   }
   return why === "final" || why === "submit"

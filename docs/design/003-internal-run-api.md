@@ -52,7 +52,7 @@ The pipeline engine calls the same `runJob` in process; the HTTP route is for ot
 
 ## 3. Structured output: `submit_output`
 
-A run with an `outputSchema` gets a `submit_output` tool whose parameters are the schema, and the system prompt says the result is delivered only through it. A call is checked twice: pi checks (and coerces) the arguments against the schema, then ajv (`strict: false`, with `ajv-formats`) validates them. An invalid call is a tool error carrying the validation errors, so the model can fix them. The first valid call ends the run; its arguments are `RunResult.output`.
+A run with an `outputSchema` gets a `submit_output` tool whose parameters are the schema, and the system prompt says the result is delivered only through it. A call is checked twice: pi checks (and coerces) the arguments against the schema, then ajv (`strict: false`, with `ajv-formats`; draft 2020-12 or 2019-09 when the schema's `$schema` says so, else draft-07) validates them. An invalid call is a tool error carrying the validation errors, so the model can fix them. The first valid call ends the run; its arguments are `RunResult.output`.
 
 - One invalid call gets its retry; a second fails the run.
 - When the investigation ends without a valid call, or a budget runs out (steps, time, context), the run gets one last turn whose only tool is `submit_output`, asking for the result from the evidence so far. No call there fails the run.
@@ -62,7 +62,7 @@ A run with an `outputSchema` gets a `submit_output` tool whose parameters are th
 
 - `RunInput.budget` lowers the run's wall clock and steps: the RunManager and the runner use `min(configured, budget)`.
 - Routine runs wait for `jobsApi.concurrency` (default 1 per process), a FIFO semaphore of their own, held for one run and released when it ends. They neither wait for nor take `agent.concurrency.total`, and are not counted against `perUserPerHour`: a routine never delays an interactive question, nor the other way round. The semaphore is shared with the rest of a routine's work (the pipeline engine's sandbox steps), which takes it per step, never across a run.
-- Job runs take their model from the `job` chain (`llm.chains.job`), with its own breakers.
+- Job runs take their model from the `job` chain (`llm.chains.job`). Breakers are per model, not per chain: when the `job` chain uses the same model as `agent`, an outage the O2 entry sees also degrades routines, and the other way round.
 
 ## 5. Traces
 

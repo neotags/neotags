@@ -136,8 +136,9 @@ export class RunManager {
   submit(input: RunInput, observer: RunObserver = {}): SubmitResult {
     if (this.draining) return { ok: false, code: "shutting_down", message: notice("shutting_down", input.question) };
     const key = limitKey(input);
-    const exempt = this.exempt.has(key) || this.selfLimited.has(input.source);
-    const taken = exempt ? { ok: true as const } : this.limiter.take(key);
+    const exempt = this.exempt.has(key);
+    // Self-limited sources are not rate limited either, but are not "exempt users" in the logs.
+    const taken = exempt || this.selfLimited.has(input.source) ? { ok: true as const } : this.limiter.take(key);
     if (!taken.ok) {
       const retryAfterSec = Math.ceil(taken.retryAfterMs / 1000);
       return { ok: false, code: "rate_limited", message: `rate limit: ${this.o.perUserPerHour} runs per hour`, retryAfterSec };

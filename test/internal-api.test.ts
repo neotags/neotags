@@ -107,9 +107,18 @@ describe("internal API: /internal/v1/runs", () => {
     expect((await post(url, body(), { authorization: `Bearer ${O2_KEY}` })).status).toBe(401);
     expect((await post(url, body(), { "x-o2-agent-key": O2_KEY })).status).toBe(401);
     expect((await post(url, body(), { authorization: JOB_KEY })).status).toBe(401);
+    expect((await post(url, body(), { authorization: `Basic ${JOB_KEY}` })).status).toBe(401);
     const r = await post(url, body(), { authorization: "Bearer wrong" });
     expect(await r.json()).toEqual({ error: { code: "unauthorized", message: expect.any(String) } });
     expect(pending).toHaveLength(0);
+  });
+
+  it("takes the Bearer scheme in any case", async () => {
+    const { url, pending } = await serve();
+    const res = post(url, body(), { authorization: `bearer  ${JOB_KEY}` });
+    await until(() => pending.length === 1);
+    pending[0]!.finish(ok);
+    expect((await res).status).toBe(200);
   });
 
   it("does not let the job key into the O2 gateway", async () => {

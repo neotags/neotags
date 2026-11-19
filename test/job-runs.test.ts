@@ -1,6 +1,7 @@
 import { TraceFlags } from "@opentelemetry/api";
 import { InMemorySpanExporter, type ReadableSpan } from "@opentelemetry/sdk-trace";
 import { describe, expect, it } from "vitest";
+import { z } from "zod";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
 import { createJobRunner, JobRequestError, type JobRunRequest } from "../src/runs/job.js";
@@ -99,6 +100,20 @@ describe("submit_output", () => {
     expect(() => outputValidator({ type: "object", properties: { a: { type: "nope" } } })).toThrow();
   });
 
+  it("compiles the same $id again for every request's new schema object", () => {
+    const fresh = () => ({ $id: "https://example.com/out.json", type: "object", properties: { a: { type: "string" } } });
+    for (let i = 0; i < 3; i++) expect(outputValidator(fresh())({ a: "x" })).toBe(true);
+  });
+
+  it("takes draft 2020-12 schemas (zod v4's toJSONSchema) by their $schema", () => {
+    const zs = z.toJSONSchema(z.object({ notify: z.boolean(), pair: z.tuple([z.string(), z.number()]) })) as Record<string, unknown>;
+    expect(String(zs.$schema)).toContain("2020-12");
+    const v = outputValidator(zs);
+    expect(v({ notify: true, pair: ["a", 1] })).toBe(true);
+    // prefixItems is a 2020-12 keyword; draft-07 would not check the tuple's items.
+    expect(v({ notify: true, pair: [1, "a"] })).toBe(false);
+  });
+
   it("validates with the schema itself and reports ajv's errors at their paths", async () => {
     const got: unknown[] = [];
     const tool = submitOutputTool({ ...schema, properties: { ...schema.properties, at: { type: "string", format: "date-time" } } }, (v) => got.push(v));
@@ -150,7 +165,14 @@ describe("submit_output", () => {
     const { runner, stream } = piRunner([say("here is my answer in prose"), say("still prose")]);
     await expect(runner.run(job(), ctxFor())).rejects.toThrow(/did not call submit_output/);
     expect(stream.calls).toHaveLength(2);
-    expect(transcriptText(stream.calls[1]!.context)).toContain("You stopped without calling submit_output");
+    expect(transcriptText(stream.calls[1]!.context)).toContain("No submit_output call has been accepted yet");
+  });
+
+  it("keeps an accepted output when the run is aborted right after it", async () => {
+    const { runner } = piRunner([callTool(SUBMIT_TOOL, good)]);
+    const ac = new AbortController();
+    const ctx = { ...ctxFor({ signal: ac.signal }), observer: { toolEnd: () => ac.abort(new Error("caller went away")) } };
+    await expect(runner.run(job(), ctx)).resolves.toMatchObject({ state: "done", output: good });
   });
 
   it("takes the output when the model submits after being asked", async () => {
@@ -187,7 +209,9 @@ function jobs(o: { cfg?: ReturnType<typeof cfgFor>; total?: number; available?: 
   const cfg = o.cfg ?? cfgFor();
   const { runner, pending } = controlled();
   let n = 0;
+  const logs: Record<string, unknown>[] = [];
   const runs = new RunManager({
+    log: { info: (obj: unknown) => void logs.push(obj as Record<string, unknown>), warn: () => {}, error: () => {} } as never,
     runner,
     concurrency: o.total ?? 4,
     selfLimited: ["job"],
@@ -199,7 +223,7 @@ function jobs(o: { cfg?: ReturnType<typeof cfgFor>; total?: number; available?: 
     newId: () => `run-${++n}`,
   });
   const jr = createJobRunner({ cfg, runs, modelAvailable: o.available ?? (() => true) });
-  return { ...jr, runs, pending, cfg };
+  return { ...jr, runs, pending, cfg, logs };
 }
 
 const req = (extra: Partial<JobRunRequest> = {}): JobRunRequest => ({ routine: "daily-triage", period: "2026-11-18T01:00:00Z", input: { alerts: [1, 2] }, outputSchema: schema, ...extra });
@@ -291,6 +315,10 @@ describe("runJob", () => {
     j.pending[2]!.finish(submitted);
     await expect(second).resolves.toMatchObject({ state: "done" });
     j.pending[1]!.finish(submitted);
+    await tick();
+    // Not rate limited, but not logged as an exempt user either (that flag marks agent.concurrency.exemptUsers).
+    expect(j.logs.filter((l) => l.source === "job")).toHaveLength(2);
+    expect(j.logs.some((l) => l.rateLimitExempt)).toBe(false);
   });
 
   it("starts routine runs while the interactive pool is full", async () => {
