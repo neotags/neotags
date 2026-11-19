@@ -62,7 +62,7 @@ async function serve(o: { o2?: boolean; available?: () => boolean } = {}) {
   const routes: Record<string, Route> = {};
   if (cfg.o2Gateway.enabled) routes["/o2_agent/"] = createO2Gateway({ cfg: cfg.o2Gateway, key: cfg.secrets.o2AgentKey!, runs, log }).route;
   const jobs = createJobRunner({ cfg, runs, modelAvailable: o.available ?? (() => true) });
-  routes["/internal/v1/"] = createInternalApi({ keys: cfg.secrets.jobKeys!, jobs, log }).route;
+  routes["/internal/"] = createInternalApi({ keys: cfg.secrets.jobKeys!, jobs, log }).route;
   const server = createPortServer({ routes, log, name: "test" });
   servers.push(server);
   await server.listen(0, "127.0.0.1");
@@ -153,7 +153,11 @@ describe("internal API: /internal/v1/runs", () => {
     expect((await post(url, body({ budget: { wallClockSec: 3600 } }))).status).toBe(400);
     expect((await post(url, body({ budget: { maxSteps: 100 } }))).status).toBe(400);
     expect((await fetch(`${url}/internal/v1/runs`, { headers: { authorization: `Bearer ${JOB_KEY}` } })).status).toBe(405);
-    expect((await fetch(`${url}/internal/v1/nope`, { headers: { authorization: `Bearer ${JOB_KEY}` } })).status).toBe(404);
+    for (const path of ["/internal/v1/nope", "/internal/v2/runs"]) {
+      const r = await fetch(`${url}${path}`, { headers: { authorization: `Bearer ${JOB_KEY}` } });
+      expect(r.status).toBe(404);
+      expect(await r.json()).toEqual({ error: { code: "not_found", message: "not found" } });
+    }
   });
 
   it("answers degraded at once when the model is unavailable", async () => {
@@ -169,6 +173,7 @@ describe("internal API: /internal/v1/runs", () => {
     await runs.drain(10);
     const r = await post(url, body());
     expect(r.status).toBe(503);
+    expect(r.headers.get("retry-after")).toBe("5");
     expect((await r.json()).error.code).toBe("shutting_down");
   });
 

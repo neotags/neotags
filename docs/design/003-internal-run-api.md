@@ -6,7 +6,7 @@ Routines are tasks neotags runs on its own, on a schedule (later on events), fro
 
 ## 1. Transport and authentication
 
-The internal API is served under `/internal/v1/` on the in-cluster agent port (`o2Gateway.port`, 3001), next to the O2 gateway's `/o2_agent/` (`src/gateway/http.ts` routes by path prefix). `jobsApi.enabled` opens the port even when the O2 gateway is off.
+The internal API is served under `/internal/v1/` on the in-cluster agent port (`o2Gateway.port`, 3001), next to the O2 gateway's `/o2_agent/` (`src/gateway/http.ts` routes by path prefix; anything under `/internal/` gets this API's error shape). `jobsApi.enabled` opens the port even when the O2 gateway is off.
 
 - `Authorization: Bearer <key>`; one key per caller in `jobsApi.callers` (`{ job: { keyFromEnv: MOOSE_JOB_KEY } }`), compared in constant time. The caller whose key matched is the run's `source` (`job` today); a `source` in the body is ignored.
 - Each route accepts only its own credential: `/internal/v1/*` never accepts O2's `x-o2-agent-key`, and `/o2_agent/*` never accepts a caller's Bearer key. Startup fails when a caller's key equals another caller's or O2's.
@@ -32,9 +32,9 @@ Request:
 |---|---|
 | `routine` | A name in `routines`; otherwise 403. |
 | `period` | The scheduled time, RFC 3339 UTC to the minute. With the routine it is the run's session, `job:<routine>:<period>`: a retry of the same period queues behind the previous try, never beside it. |
-| `packs` | Optional; a subset of the routine's `packs`, else 403. The packs decide what the run may load and, for packs that declare `sandbox`, execute, so they come from configuration; a request can only narrow them. |
+| `packs` | Optional; a subset of the routine's `packs`, else 403. The packs decide what the run may read (its `read_skill` tools and system prompt see only them, plus reference-only packs from `skillPacks.refs`) and, for packs that declare `sandbox`, execute, so they come from configuration; a request can only narrow them. |
 | `input` | Any JSON; a string as it is, anything else serialized. Over 200,000 characters: 413. In the prompt inside `<job_input>`, marked untrusted and redacted like every other untrusted block. |
-| `outputSchema` | Required. A JSON Schema with `type: "object"`; one ajv cannot compile is 400. |
+| `outputSchema` | Required. A JSON Schema with `type: "object"`, read as draft 2020-12 whatever its `$schema` says; one ajv cannot compile is 400. |
 | `budget` | Optional, only below the defaults (`agent.wallClockSec.job`, 900 s; `agent.maxSteps`, 30); above them is 400. |
 
 The call waits for the run and answers 200:
@@ -45,14 +45,14 @@ The call waits for the run and answers 200:
 
 - `state`: `done` (the output validated), `failed` (no valid output), `cancelled`. `output` is null unless `done`.
 - `degraded: true`: every model of the `job` chain is failing (circuit breakers open). The answer comes at once, without a run (`runId: null`); retrying now would not help.
-- 503 `shutting_down` while the process drains, 503 `busy` when no routine slot came free within an hour.
+- 503 `shutting_down` while the process drains, also for a run the shutdown interrupts (submit again, to another Pod; `Retry-After: 5`); 503 `busy` when no routine slot came free within an hour (`Retry-After: 60`).
 - A caller that closes the connection cancels its run.
 
 The pipeline engine calls the same `runJob` in process; the HTTP route is for other in-cluster callers and debugging. `runJob` also takes an AbortSignal (cancels the run, or the wait for a slot) and a `traceparent`, and, from a routine's own configuration only, `instructions` (what the model is asked; without them it is asked to do the task its packs describe).
 
 ## 3. Structured output: `submit_output`
 
-A run with an `outputSchema` gets a `submit_output` tool whose parameters are the schema, and the system prompt says the result is delivered only through it. A call is checked twice: pi checks (and coerces) the arguments against the schema, then ajv (`strict: false`, with `ajv-formats`; draft 2020-12 or 2019-09 when the schema's `$schema` says so, else draft-07) validates them. An invalid call is a tool error carrying the validation errors, so the model can fix them. The first valid call ends the run; its arguments are `RunResult.output`.
+A run with an `outputSchema` gets a `submit_output` tool whose parameters are the schema, and the system prompt says the result is delivered only through it. A call is checked twice: pi checks (and coerces) the arguments against the schema, then ajv validates them (`strict: false`, with `ajv-formats`). Both read the schema as draft 2020-12, so the two checks never disagree on what it means. An invalid call is a tool error carrying the validation errors, so the model can fix them. The first valid call ends the run; its arguments are `RunResult.output`.
 
 - One invalid call gets its retry; a second fails the run.
 - When the investigation ends without a valid call, or a budget runs out (steps, time, context), the run gets one last turn whose only tool is `submit_output`, asking for the result from the evidence so far. No call there fails the run.

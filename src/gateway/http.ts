@@ -40,6 +40,9 @@ export async function readBody(req: IncomingMessage, maxBytes: number, tooLarge 
   }
 }
 
+/** A W3C `traceparent` (lower-case); group 1 is the trace id. */
+export const TRACEPARENT = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/;
+
 export function decoded(segment: string): string {
   try {
     return decodeURIComponent(segment);

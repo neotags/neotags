@@ -136,7 +136,10 @@ export function createJobRunner(o: JobRunnerOptions) {
       const onAbort = () => submitted.run.cancel("cancelled by the caller");
       opts.signal?.addEventListener("abort", onAbort, { once: true });
       try {
-        return toJobResult(await submitted.run.result);
+        const result = await submitted.run.result;
+        // Stopped by this process shutting down, not by the caller: the caller should submit again (to another Pod).
+        if (result.errorType === "interrupted") throw new JobRequestError(503, "shutting_down", "interrupted by shutdown; submit again");
+        return toJobResult(result);
       } finally {
         opts.signal?.removeEventListener("abort", onAbort);
       }

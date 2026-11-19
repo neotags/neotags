@@ -249,11 +249,15 @@ export class RunManager {
       if (this.pooled(run)) pooled++;
       this.start(run);
     }
-    this.queue.forEach((run, ahead) => {
-      if (run.ahead === ahead) return;
+    // Positions within a run's own pool: a self-limited run never delays a pooled one, nor the other way round.
+    const before = { pooled: 0, self: 0 };
+    for (const run of this.queue) {
+      const pool = this.pooled(run) ? "pooled" : "self";
+      const ahead = before[pool]++;
+      if (run.ahead === ahead) continue;
       run.ahead = ahead;
       run.observer.queued?.({ runId: run.id, ahead });
-    });
+    }
   }
 
   private start(run: Run): void {

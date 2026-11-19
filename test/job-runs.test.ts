@@ -44,7 +44,8 @@ ${extra}`);
 const index = new SkillPackIndex(
   new Map([
     ["triage", { name: "triage", description: "Group alerts into problems", body: "Group by cause.", refs: new Map() }],
-    ["other", { name: "other", description: "Something else", body: "Other.", refs: new Map() }],
+    ["other", { name: "other", description: "Something else", body: "Other.", refs: new Map([["secret.md", "other's reference"]]) }],
+    ["method", { name: "method", description: "", refs: new Map([["problems.md", "how to group"]]) }],
   ]),
 );
 
@@ -114,6 +115,12 @@ describe("submit_output", () => {
     expect(v({ notify: true, pair: [1, "a"] })).toBe(false);
   });
 
+  it("reads every schema as 2020-12, like pi's own argument check, whatever $schema says", () => {
+    const v = outputValidator({ $schema: "http://json-schema.org/draft-07/schema#", type: "object", properties: { a: { type: "string" } }, unevaluatedProperties: false });
+    expect(v({ a: "x" })).toBe(true);
+    expect(v({ a: "x", b: 1 })).toBe(false);
+  });
+
   it("validates with the schema itself and reports ajv's errors at their paths", async () => {
     const got: unknown[] = [];
     const tool = submitOutputTool({ ...schema, properties: { ...schema.properties, at: { type: "string", format: "date-time" } } }, (v) => got.push(v));
@@ -178,6 +185,20 @@ describe("submit_output", () => {
   it("takes the output when the model submits after being asked", async () => {
     const { runner } = piRunner([say("prose"), callTool(SUBMIT_TOOL, good)]);
     await expect(runner.run(job(), ctxFor())).resolves.toMatchObject({ state: "done", output: good });
+  });
+
+  it("lets a job run read only its own packs and reference-only ones", async () => {
+    const { runner, stream } = piRunner([
+      callTool("read_skill", { name: "other" }),
+      callTool("read_skill_ref", { name: "method", file: "problems.md" }),
+      callTool(SUBMIT_TOOL, good),
+    ]);
+    await expect(runner.run(job(), ctxFor())).resolves.toMatchObject({ output: good });
+    const sent = transcriptText(stream.calls[2]!.context);
+    expect(sent).toContain('unknown skill pack "other"');
+    expect(sent).toContain("how to group");
+    expect(sent).toContain("- triage: Group alerts into problems");
+    expect(sent).not.toContain("- other:");
   });
 
   it("leaves runs without an outputSchema unchanged", async () => {
@@ -351,6 +372,31 @@ describe("runJob", () => {
     const j = jobs();
     await j.runs.drain(10);
     await expect(j.runJob(req(), { caller: "job" })).rejects.toMatchObject({ status: 503, code: "shutting_down" });
+  });
+
+  it("answers 503, not cancelled, for a run a shutdown interrupts", async () => {
+    const j = jobs();
+    const running = j.runJob(req(), { caller: "job" });
+    const queued = j.runJob(req({ period: "2026-11-19T01:00:00Z" }), { caller: "job" });
+    await tick();
+    await j.runs.drain(10);
+    await expect(running).rejects.toMatchObject({ status: 503, code: "shutting_down" });
+    await expect(queued).rejects.toMatchObject({ status: 503 });
+  });
+
+  it("counts queue positions within each pool", async () => {
+    const j = jobs({ total: 1 });
+    j.runs.submit({ source: "o2", sessionId: "s1", question: "q" });
+    const p = j.runJob(req(), { caller: "job" });
+    await tick();
+    // A retry of the same period waits behind its own session, ahead of the next O2 question in the queue.
+    const retry = j.runs.submit({ source: "job", sessionId: "job:daily-triage:2026-11-18T01:00:00Z", question: "q" });
+    expect(retry.ok && retry.run.state).toBe("queued");
+    const aheads: number[] = [];
+    j.runs.submit({ source: "o2", sessionId: "s2", question: "q" }, { queued: (i) => aheads.push(i.ahead) });
+    expect(aheads).toEqual([0]);
+    j.pending[1]!.finish(submitted);
+    await p;
   });
 
   it("cancels the run, or the wait for a slot, when its signal aborts", async () => {

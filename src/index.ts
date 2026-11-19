@@ -110,7 +110,7 @@ if (cfg.o2Gateway.enabled || cfg.jobsApi.enabled) {
     if (cfg.jobsApi.enabled) {
       const g = gateway;
       const jobs = createJobRunner({ cfg, runs, log, modelAvailable: () => g.policy.steps("job").some((s) => s.breaker.state !== "open") });
-      routes["/internal/v1/"] = createInternalApi({ keys: cfg.secrets.jobKeys ?? {}, jobs, log }).route;
+      routes["/internal/"] = createInternalApi({ keys: cfg.secrets.jobKeys ?? {}, jobs, log }).route;
     }
     port = createPortServer({ routes, log, name: "agent api" });
     await port.listen(cfg.o2Gateway.port);

@@ -8,7 +8,7 @@ import type { Gateway } from "../agent/models.js";
 import type { Effort } from "../config/index.js";
 import { answerLang } from "../lang.js";
 import { endChatSpan, startChatSpan, ToolSpans } from "../telemetry/spans.js";
-import { skillPackTools, type SkillPackIndex } from "../tools/skillpacks.js";
+import { SkillPackIndex, skillPackTools } from "../tools/skillpacks.js";
 import { compactToBudget } from "./budget.js";
 import { MAX_INVALID_SUBMITS, SUBMIT_TOOL, submitOutputTool } from "./output.js";
 import { finalPrompt, systemPrompt, userPrompt } from "./prompt.js";
@@ -88,6 +88,10 @@ export class PiAgentRunner implements AgentRunner {
     const stats = { steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 }, model: step.model.id, ...(step.effort && { effort: step.effort }) };
 
     const packs = input.packs ?? o.entries[input.source] ?? [];
+    // A routine's packs bound what its run may read, not only what it may execute: its read_skill tools and system
+    // prompt see those packs, plus reference-only packs (skillPacks.refs: reference files other packs cite, never
+    // instructions or execution). Other entries keep every loaded pack.
+    const index = input.source === "job" ? new SkillPackIndex(new Map(o.index.list().filter((p) => packs.includes(p.name) || p.body === undefined).map((p) => [p.name, p]))) : o.index;
     // Registered here, run in the finally below. A tools function may connect (a run client listing its tools): if it
     // throws, what it registered is closed and the model lease released here.
     const onEnd: (() => unknown)[] = [];
@@ -112,7 +116,7 @@ export class PiAgentRunner implements AgentRunner {
     const accepted = (): { value: unknown } | undefined => output;
     let invalidSubmits = 0;
     const submit = input.outputSchema ? submitOutputTool(input.outputSchema, (value) => (output ??= { value })) : undefined;
-    const shared = [...(submit ? [submit] : []), ...skillPackTools(o.index), ...extra];
+    const shared = [...(submit ? [submit] : []), ...skillPackTools(index), ...extra];
     const taken = new Set(shared.map((t) => t.name));
     // A run's own tool never shadows a shared one: two tools with one name would leave the guard unable to tell them apart.
     const own = (input.tools ?? []).filter((t) => {
@@ -148,7 +152,7 @@ export class PiAgentRunner implements AgentRunner {
       initialState: {
         systemPrompt: systemPrompt({
           botName: o.botName,
-          index: o.index,
+          index,
           entryPacks: packs,
           unavailable: o.unavailable?.(input) ?? [],
           structured: !!submit,

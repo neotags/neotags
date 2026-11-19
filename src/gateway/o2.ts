@@ -5,7 +5,7 @@ import { z } from "zod";
 import { O2_ORG_ID, type Config } from "../config/index.js";
 import { answerLang } from "../lang.js";
 import { Credential, type HistoryTurn, type RunInput, type RunManager } from "../runs/index.js";
-import { createPortServer, decoded, header, HttpError, keyMatches, readBody, sendJson, type Route } from "./http.js";
+import { createPortServer, decoded, header, HttpError, keyMatches, readBody, sendJson, TRACEPARENT, type Route } from "./http.js";
 import { cap } from "./o2-events.js";
 import { O2Turn } from "./o2-stream.js";
 
@@ -30,7 +30,6 @@ const QueryRequest = z.object({
 }).loose();
 
 const SESSION = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-const TRACEPARENT = /^[0-9a-f]{2}-([0-9a-f]{32})-[0-9a-f]{16}-[0-9a-f]{2}$/;
 const EMAIL = /^[^\s@]{1,128}@[^\s@]{1,128}$/;
 /**
  * O2's per-turn user token, `o2ut.<claims>.<mac>` (unpadded base64url). Opaque here: only O2 can check it, so this

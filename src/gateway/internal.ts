@@ -3,7 +3,7 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { ROUTINE_NAME, type JobCaller } from "../config/index.js";
 import { JobRequestError, type JobRunner } from "../runs/job.js";
-import { header, HttpError, keyMatches, readBody, sendJson, type Route } from "./http.js";
+import { header, HttpError, keyMatches, readBody, sendJson, TRACEPARENT, type Route } from "./http.js";
 
 // The internal API (docs/design/003-internal-run-api.md): in-cluster callers with their own Bearer keys
 // (jobsApi.callers), under /internal/v1/ on the port the O2 gateway uses. Nothing of the O2 gateway's applies here:
@@ -11,7 +11,6 @@ import { header, HttpError, keyMatches, readBody, sendJson, type Route } from ".
 
 /** The body: `input` (200k characters) plus the schema and a margin for JSON escaping. */
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
-const TRACEPARENT = /^[0-9a-f]{2}-[0-9a-f]{32}-[0-9a-f]{16}-[0-9a-f]{2}$/;
 /** A period: the scheduled time, RFC 3339 in UTC, to the minute (S02b checks it against the schedule). */
 const PERIOD = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00Z$/;
 
@@ -32,13 +31,17 @@ export interface InternalApiOptions {
   log: Pick<Logger, "info" | "warn" | "error">;
 }
 
+/** When to submit again after a 503: another Pod takes over within seconds of a shutdown; a busy slot takes longer. */
+const RETRY_AFTER_SEC: Record<string, number> = { shutting_down: 5, busy: 60 };
+
 function sendError(res: ServerResponse, e: HttpError): void {
   if (res.headersSent) return void res.end();
-  res.writeHead(e.status, { "content-type": "application/json" });
+  const retry = e.retryAfterSec ?? RETRY_AFTER_SEC[e.code];
+  res.writeHead(e.status, { "content-type": "application/json", ...(retry !== undefined && e.status === 503 && { "retry-after": String(retry) }) });
   res.end(JSON.stringify({ error: { code: e.code, message: e.message } }));
 }
 
-/** `/internal/v1/` on the shared port server: `POST /internal/v1/runs`. */
+/** `/internal/` on the shared port server: `POST /internal/v1/runs`; anything else under it is 404 in this API's shape. */
 export function createInternalApi(o: InternalApiOptions): { route: Route } {
   const { log } = o;
   const keys = Object.entries(o.keys).filter((e): e is [JobCaller, string] => typeof e[1] === "string" && e[1].length > 0);
