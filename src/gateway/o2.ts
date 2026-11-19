@@ -1,10 +1,11 @@
-import { createHash, randomBytes, timingSafeEqual } from "node:crypto";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { randomBytes } from "node:crypto";
+import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Logger } from "pino";
 import { z } from "zod";
 import { O2_ORG_ID, type Config } from "../config/index.js";
 import { answerLang } from "../lang.js";
 import { Credential, type HistoryTurn, type RunInput, type RunManager } from "../runs/index.js";
+import { createPortServer, decoded, header, HttpError, keyMatches, readBody, sendJson, type Route } from "./http.js";
 import { cap } from "./o2-events.js";
 import { O2Turn } from "./o2-stream.js";
 
@@ -45,17 +46,6 @@ const CONTEXT_VALUE_CHARS = 4000;
 const CONTEXT_CHARS = 32_000;
 const FEEDBACK_BODY_BYTES = 64 * 1024;
 
-class HttpError extends Error {
-  constructor(
-    public readonly status: number,
-    public readonly code: string,
-    message: string,
-    public readonly retryAfterSec?: number,
-  ) {
-    super(message);
-  }
-}
-
 /** Pre-stream failure in o2-ai's shape; O2 passes `code` on to the panel as `error_code`. */
 function sendError(res: ServerResponse, e: HttpError): void {
   if (res.headersSent) return void res.end();
@@ -65,49 +55,6 @@ function sendError(res: ServerResponse, e: HttpError): void {
   });
   res.end(JSON.stringify({ detail: { code: e.code, message: e.message } }));
 }
-
-function sendJson(res: ServerResponse, body: unknown): void {
-  res.writeHead(200, { "content-type": "application/json" });
-  res.end(JSON.stringify(body));
-}
-
-async function readBody(req: IncomingMessage, maxBytes: number): Promise<unknown> {
-  const chunks: Buffer[] = [];
-  let size = 0;
-  // Read to the end even when too large: leaving the loop early destroys the socket, and O2 would get a reset
-  // instead of the 400.
-  for await (const chunk of req) {
-    size += (chunk as Buffer).length;
-    if (size <= maxBytes) chunks.push(chunk as Buffer);
-  }
-  if (size > maxBytes) throw new HttpError(400, "bad_request", `the request body is over ${Math.floor(maxBytes / 1024)} KB`);
-  if (size === 0) return {};
-  try {
-    return JSON.parse(Buffer.concat(chunks).toString("utf8"));
-  } catch {
-    throw new HttpError(400, "bad_request", "the request body is not JSON");
-  }
-}
-
-function decoded(segment: string): string {
-  try {
-    return decodeURIComponent(segment);
-  } catch {
-    throw new HttpError(400, "bad_request", "malformed path");
-  }
-}
-
-const digest = (s: string) => createHash("sha256").update(s).digest();
-
-/** Constant time; hashing first makes the lengths equal. */
-function keyMatches(given: string | string[] | undefined, key: string): boolean {
-  return typeof given === "string" && timingSafeEqual(digest(given), digest(key));
-}
-
-const header = (req: IncomingMessage, name: string): string | undefined => {
-  const v = req.headers[name];
-  return typeof v === "string" ? v : undefined;
-};
 
 /** Newest turns that fit `maxChars`, oldest first; text only (the panel replays no tool calls). */
 export function boundedHistory(raw: { role: string; content: unknown }[] | null | undefined, maxChars: number): HistoryTurn[] {
@@ -191,8 +138,9 @@ export function orgNotes(org: string | undefined, orgs: Record<string, string>, 
 }
 
 /**
- * HTTP server of the O2 entry, on its own port (in-cluster only; the Service and NetworkPolicy keep it there):
- * `POST /o2_agent/{agent}/query/stream` (SSE), `POST /o2_agent/sessions/{id}/cancel`, `POST /o2_agent/feedback`.
+ * The O2 entry, on the in-cluster port (the Service and NetworkPolicy keep it there): `POST /o2_agent/{agent}/query/stream`
+ * (SSE), `POST /o2_agent/sessions/{id}/cancel`, `POST /o2_agent/feedback`. `route` serves `/o2_agent/` on a shared
+ * port server; the rest is a server of its own with only this route.
  */
 export function createO2Gateway(o: O2GatewayOptions) {
   const { cfg, log } = o;
@@ -313,8 +261,6 @@ export function createO2Gateway(o: O2GatewayOptions) {
 
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = (req.url ?? "/").split("?")[0]!;
-    if (req.method === "GET" && path === "/healthz") return void res.writeHead(200, { "content-type": "text/plain" }).end("ok");
-    if (!path.startsWith("/o2_agent/")) throw new HttpError(404, "not_found", "not found");
     if (!keyMatches(req.headers["x-o2-agent-key"], o.key)) throw new HttpError(401, "unauthorized", "missing or wrong x-o2-agent-key");
     // O2 must never forward the user's own credentials; they are not used, and their presence is an O2 bug.
     if (req.headers.authorization || req.headers.cookie) log.warn({ path }, "o2 request carries Authorization or Cookie; ignored");
@@ -326,7 +272,7 @@ export function createO2Gateway(o: O2GatewayOptions) {
     return feedback(req, res);
   }
 
-  const server: Server = createServer((req, res) => {
+  const route: Route = (req, res) =>
     handle(req, res).catch((err: unknown) => {
       if (err instanceof HttpError) return sendError(res, err);
       // The client went away mid-request (an aborted upload): nobody to answer.
@@ -334,32 +280,8 @@ export function createO2Gateway(o: O2GatewayOptions) {
       log.error({ err }, "o2 gateway request failed");
       sendError(res, new HttpError(500, "internal_error", "internal error"));
     });
-  });
 
-  return {
-    server,
-    listen: (port: number, host?: string) =>
-      new Promise<void>((resolve, reject) => {
-        server.once("error", reject);
-        server.listen(port, host, () => {
-          server.off("error", reject);
-          // After startup a server error (EMFILE on accept, ...) is logged; unhandled it would take the process down.
-          server.on("error", (err) => log.error({ err }, "o2 gateway server error"));
-          resolve();
-        });
-      }),
-    /** Stop accepting connections; open streams go on until their runs finish (the run manager drains them). */
-    stopAccepting: () => {
-      server.close();
-      server.closeIdleConnections();
-    },
-    /** Close whatever is still open, after up to `graceMs` for responses that just ended to flush their last event. */
-    close: async (graceMs = 2000) => {
-      const closed = new Promise<void>((r) => server.once("close", () => r()));
-      await Promise.race([closed, new Promise((r) => setTimeout(r, graceMs).unref())]);
-      server.closeAllConnections();
-    },
-  };
+  return { ...createPortServer({ routes: { "/o2_agent/": route }, log, name: "o2 gateway" }), route };
 }
 
 export type O2Gateway = ReturnType<typeof createO2Gateway>;

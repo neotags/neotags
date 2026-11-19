@@ -63,11 +63,11 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
   #   answer: 1200                       #   kb-ask answer
   # summarizeMaxInputTokens: 60000       # prompt budget; default = contextWindow / 2 - outputTokens.summary
   # charsPerToken: 4                     # lower (e.g. 2-3) for CJK-heavy text so budgets are not overrun
-# Tool-using agent runs (RunManager), started when o2Gateway is enabled.
+# Tool-using agent runs (RunManager), started when o2Gateway or jobsApi is enabled.
 # agent:
 #   entries: { o2: [o2-query-assistant] }   # skill packs in the system prompt per entry (must be in skillPacks.packs)
 #   maxSteps: 30                  # tool-calling turns, then the model answers with what it has
-#   wallClockSec: { slack: 360, o2: 600, job: 600 }
+#   wallClockSec: { slack: 360, o2: 600, job: 900 }
 #   finalReserveSec: 90           # the last seconds of the wall clock are kept for the final answer
 #   maxInputTokens: 100000        # prompt budget per request; the oldest tool outputs are stubbed out first
 #   concurrency: { total: 4, perUserPerHour: 20, exemptUsers: [] }   # exemptUsers: emails not counted per hour (eval runner)
@@ -87,6 +87,14 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #   maxBodyKb: 4096
 #   maxHistoryChars: 48000        # earlier turns kept, newest first
 #   maxQueued: 8                  # runs waiting for a slot; beyond it O2 gets 429 turn_limit
+# jobsApi:                        # routines' internal API (docs/design/003-internal-run-api.md), on o2Gateway.port
+#   enabled: false                # opens the port even with the O2 gateway off; in-cluster callers only
+#   callers:                      # Bearer key per caller, from env; the caller is the run's source
+#     job: { keyFromEnv: MOOSE_JOB_KEY }
+#   concurrency: 1                # routine runs at once, apart from agent.concurrency.total; not rate limited
+# routines:                       # by name (lowercase, digits, dashes; at most 52): the CronJob's name
+#   example-daily:
+#     packs: [o2-query-assistant] # what the routine's runs may load; a request may only narrow it
 # sandbox:                        # where skill-pack commands run (executor/README.md); nothing runs in this process
 #   backend: none                 # none (default): every execution is refused. local: the executor sidecar
 #   socket: /run/executor/exec.sock
@@ -100,4 +108,4 @@ telemetry:               # LLM traces over OTLP/HTTP (OpenObserve, Langfuse, an 
   #                      # can read the traces). Or env OTEL_INSTRUMENTATION_GENAI_CAPTURE_MESSAGE_CONTENT=true
 logLevel: info
 # Secrets come from env: SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional if the gateway needs none),
-# O2_AGENT_API_KEY (with o2Gateway.enabled)
+# O2_AGENT_API_KEY (with o2Gateway.enabled), each jobsApi caller's keyFromEnv (with jobsApi.enabled)

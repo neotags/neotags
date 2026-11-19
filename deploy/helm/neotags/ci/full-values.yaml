@@ -5,10 +5,16 @@ config:
   o2Gateway: { enabled: true, orgs: { default: o2 } }
   mcp: { servers: [{ name: o2, url: "http://o2.example.com/api/default/mcp", allowTools: [SearchSQL], headersFromEnv: { Authorization: O2_MCP_AUTH_DEFAULT } }] }
   agent: { entries: { o2: [o2-query-assistant] } }
+  jobsApi: { enabled: true, callers: { job: { keyFromEnv: MOOSE_JOB_KEY } } }
   skillPacks: { packs: [o2-query-assistant] }
+routines:
+  example-daily: { packs: [o2-query-assistant] }
 skillPacks:
   configMap: neotags-skills
   items: [{ key: o2-query-assistant.SKILL.md, path: o2-query-assistant/SKILL.md }]
 executor: { enabled: true, image: { tag: v0.0.0-abc1234 }, credentialsSecret: executor-creds }
-networkPolicy: { enabled: true, slack: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress } } }] }
+networkPolicy:
+  enabled: true
+  slack: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: ingress } } }]
+  jobsApi: [{ namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: portal } } }]
 otel: { endpoint: "http://otel.example.com:4318", serviceName: moose }

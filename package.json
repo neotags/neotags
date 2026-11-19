@@ -27,6 +27,8 @@
     "@opentelemetry/resources": "3.1.0",
     "@opentelemetry/sdk-trace": "3.1.0",
     "@slack/bolt": "^5.1.0",
+    "ajv": "8.20.0",
+    "ajv-formats": "3.0.1",
     "exceljs": "4.4.0",
     "jszip": "3.10.2",
     "mammoth": "1.13.0",
