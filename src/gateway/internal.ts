@@ -2,6 +2,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import type { Logger } from "pino";
 import { z } from "zod";
 import { ROUTINE_NAME, type JobCaller } from "../config/index.js";
+import { PERIOD } from "../routines/schedule.js";
 import { JobRequestError, type JobRunner } from "../runs/job.js";
 import { header, HttpError, keyMatches, readBody, sendJson, TRACEPARENT, type Route } from "./http.js";
 
@@ -11,8 +12,6 @@ import { header, HttpError, keyMatches, readBody, sendJson, TRACEPARENT, type Ro
 
 /** The body: `input` (200k characters) plus the schema and a margin for JSON escaping. */
 const MAX_BODY_BYTES = 2 * 1024 * 1024;
-/** A period: the scheduled time, RFC 3339 in UTC, to the minute (S02b checks it against the schedule). */
-const PERIOD = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00Z$/;
 
 /** `source` and anything else not listed is dropped: the run's source is the caller whose key matched. */
 const RunRequest = z.object({

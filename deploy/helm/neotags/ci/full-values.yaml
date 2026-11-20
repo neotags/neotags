@@ -6,12 +6,36 @@ config:
   mcp: { servers: [{ name: o2, url: "http://o2.example.com/api/default/mcp", allowTools: [SearchSQL], headersFromEnv: { Authorization: O2_MCP_AUTH_DEFAULT } }] }
   agent: { entries: { o2: [o2-query-assistant] } }
   jobsApi: { enabled: true, callers: { job: { keyFromEnv: MOOSE_JOB_KEY } } }
-  skillPacks: { packs: [o2-query-assistant] }
+  skillPacks: { packs: [o2-query-assistant, example-classify] }
+  outbox:
+    slack: { allowedChannels: [C0TEST, C0TEAM], testChannel: C0TEST }
+    confluence: { baseUrl: "https://wiki.example.com/wiki", allowedSpaces: [OPS], testParent: "123" }
 routines:
-  example-daily: { packs: [o2-query-assistant] }
+  example-daily:
+    kind: agent
+    trigger: { schedule: "0 9 * * *", timeZone: Asia/Shanghai }
+    owner: { slack: C0TEST }
+    packs: [o2-query-assistant]
+    mcp: [o2]
+    instructions: Summarize yesterday's alerts.
+    budget: { wallClockSec: 600, maxSteps: 20 }
+    delivery: { notify: when_findings, slack: [{ channel: C0TEAM, lang: en }] }
+  example-triage:
+    kind: pipeline
+    enabled: false
+    type: example-type
+    trigger: { schedule: "30 1 * * 1-5", timeZone: UTC }
+    owner: { slack: C0TEST }
+    packs: [example-classify]
+    params: { window: 24h }
+    delivery:
+      slack: [{ channel: C0TEAM, lang: zh, section: all }]
+      confluence: { space: OPS, parent: "456", monthlyFolder: true }
 skillPacks:
   configMap: neotags-skills
-  items: [{ key: o2-query-assistant.SKILL.md, path: o2-query-assistant/SKILL.md }]
+  items:
+    - { key: o2-query-assistant.SKILL.md, path: o2-query-assistant/SKILL.md }
+    - { key: example-classify.SKILL.md, path: example-classify/SKILL.md }
 executor: { enabled: true, image: { tag: v0.0.0-abc1234 }, credentialsSecret: executor-creds }
 networkPolicy:
   enabled: true

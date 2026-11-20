@@ -24,6 +24,9 @@ jobs:
           node-version: 24
           cache: npm
 
+      # test/chart.test.ts renders the chart.
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+
       - run: npm ci
       - run: npm run typecheck
       - run: npm test

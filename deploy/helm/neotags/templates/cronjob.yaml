@@ -1,0 +1,120 @@
+{{- /*
+One CronJob per routine (.Values.routines), named after it. Its Pod only runs `fire <routine>`: it submits the period
+to the bot's internal API and waits for the outcome; the bot does the work (docs/design/003-internal-run-api.md §6).
+The bot checks each routine in full at startup; the chart checks only what it needs to render.
+*/}}
+{{- if .Values.routines }}
+{{- if not (include "neotags.jobsApiEnabled" .) -}}
+{{- fail "routines need config.jobsApi.enabled: their CronJobs call the internal API" -}}
+{{- end -}}
+{{- $component := include "neotags.jobComponent" . -}}
+{{- $routineLabel := include "neotags.routineLabel" . -}}
+{{- $keyEnv := "MOOSE_JOB_KEY" -}}
+{{- with .Values.config.jobsApi.callers -}}{{- with .job -}}{{- $keyEnv = .keyFromEnv -}}{{- end -}}{{- end -}}
+{{- $url := printf "http://%s.%s:%v" (include "neotags.fullname" .) .Release.Namespace (include "neotags.o2ServicePort" .) -}}
+{{- range $name, $r := .Values.routines }}
+{{- if not (regexMatch "^[a-z][a-z0-9-]{0,51}$" $name) -}}
+{{- fail (printf "routines.%s: a routine name is lowercase letters, digits and dashes, starting with a letter, at most 52 (it is the CronJob's name)" $name) -}}
+{{- end -}}
+{{- if not (and $r.trigger $r.trigger.schedule $r.trigger.timeZone) -}}
+{{- fail (printf "routines.%s: trigger.schedule and trigger.timeZone are required" $name) -}}
+{{- end }}
+---
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "neotags.labels" $ | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+    {{ $routineLabel }}: {{ $name }}
+spec:
+  schedule: {{ $r.trigger.schedule | quote }}
+  timeZone: {{ $r.trigger.timeZone | quote }}
+  suspend: {{ eq (toString $r.enabled) "false" }}
+  # One period at a time; a period the controller missed by more than 10 minutes is skipped, not run late.
+  concurrencyPolicy: Forbid
+  startingDeadlineSeconds: 600
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/instance: {{ $.Release.Name }}
+        app.kubernetes.io/component: {{ $component }}
+        {{ $routineLabel }}: {{ $name }}
+    spec:
+      # fire already waits, retries and takes over within one run; the one retry re-runs a failed period.
+      backoffLimit: 1
+      # The bot gives a period an hour (its deadlineAt), plus 5 minutes for an abandoned lease to expire and a margin
+      # for polling: the Job is never killed before the bot has decided the period.
+      activeDeadlineSeconds: 4500
+      podFailurePolicy:
+        rules:
+          # A configuration or usage error: another try would fail the same way.
+          - action: FailJob
+            onExitCodes: { containerName: fire, operator: In, values: [2] }
+          # Evicted or its node drained: not the period's failure, and fire may wait up to an hour in the Pod.
+          - action: Ignore
+            onPodConditions: [{ type: DisruptionTarget }]
+      template:
+        metadata:
+          # Not app.kubernetes.io/name: the bot's Service and NetworkPolicy select by it and must not pick these Pods.
+          # The NetworkPolicy lets them in by the component.
+          labels:
+            app.kubernetes.io/instance: {{ $.Release.Name }}
+            app.kubernetes.io/component: {{ $component }}
+            {{ $routineLabel }}: {{ $name }}
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ $component }}-fire
+          automountServiceAccountToken: false
+          {{- with $.Values.imagePullSecrets }}
+          imagePullSecrets: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 1000
+            seccompProfile: { type: RuntimeDefault }
+          containers:
+            - name: fire
+              image: "{{ $.Values.image.repository }}:{{ $.Values.image.tag }}"
+              imagePullPolicy: {{ $.Values.image.pullPolicy }}
+              command: [node, dist/index.js]
+              args: [fire, {{ $name | quote }}]
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities: { drop: [ALL] }
+              # Only the job key from the Secret (never envFrom): the Pod needs nothing else of the bot's.
+              env:
+                - name: JOB_NAME
+                  valueFrom:
+                    fieldRef: { fieldPath: "metadata.labels['batch.kubernetes.io/job-name']" }
+                - name: MOOSE_URL
+                  value: {{ $url | quote }}
+                - name: MOOSE_JOB_KEY
+                  valueFrom:
+                    secretKeyRef: { name: {{ $.Values.existingSecret }}, key: {{ $keyEnv }} }
+              resources: {{- toYaml $.Values.routinesJob.resources | nindent 16 }}
+          {{- with $.Values.nodeSelector }}
+          nodeSelector: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $.Values.affinity }}
+          affinity: {{- toYaml . | nindent 12 }}
+          {{- end }}
+          {{- with $.Values.tolerations }}
+          tolerations: {{- toYaml . | nindent 12 }}
+          {{- end }}
+{{- end }}
+---
+# The routines' Pods call only the bot: no Kubernetes API token, no cloud credentials.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $component }}-fire
+  labels:
+    {{- include "neotags.labels" . | nindent 4 }}
+    app.kubernetes.io/component: {{ $component }}
+automountServiceAccountToken: false
+{{- end }}

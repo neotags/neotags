@@ -63,9 +63,24 @@ config:
     captureContent: false   # true: prompts/replies on trace spans (see config example)
   logLevel: info
 
-# Routines by name (config.routines): rendered into the config file next to config. Only `packs` is read so far: the
-# skill packs a routine's runs may load (each in config.skillPacks.packs).
+# Routines by name (config.routines; config/neotags.example.yaml has the fields): rendered into the config file next
+# to config, and each one into a CronJob of the same name that runs `fire <name>` on trigger.schedule in
+# trigger.timeZone (suspended while enabled: false). Its Pod gets only the jobsApi job caller's key from the Secret
+# and calls the bot's internal API; it needs config.jobsApi.enabled. The bot checks every routine at startup.
+#   daily-report:
+#     kind: agent
+#     trigger: { schedule: "0 9 * * *", timeZone: UTC }
+#     owner: { slack: C0123456789 }
+#     packs: [o2-query-assistant]
+#     mcp: [o2]
+#     instructions: Summarize yesterday's alerts.
+#     delivery: { slack: [{ channel: C0123456789, lang: en }] }
 routines: {}
+# The routines' CronJob Pods: `fire` only waits on HTTP requests.
+routinesJob:
+  resources:
+    requests: { cpu: 10m, memory: 64Mi }
+    limits: { memory: 256Mi }
 
 # Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET (SLACK_APP_TOKEN with slack.mode socket), ONYX_API_KEY, LLM_API_KEY (optional), O2_AGENT_API_KEY (with
 # config.o2Gateway.enabled), the jobsApi callers' keys (config.jobsApi.callers[].keyFromEnv) and the MCP header values

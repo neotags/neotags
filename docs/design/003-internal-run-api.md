@@ -2,7 +2,7 @@
 
 Status: **v1** · Date: 2026-11-19
 
-Routines are tasks neotags runs on its own, on a schedule (later on events), from configuration: `routines.<name>` names the skill packs a routine's runs may use, and later its trigger, steps and delivery targets. A Kubernetes CronJob only triggers a routine; the work, the model calls and the delivery happen in neotags. This document covers the first piece: one agent run for a routine, with a structured result, through `runJob` in process and `POST /internal/v1/runs` over HTTP. The CronJob entry (`fire`), periods, leases and delivery come later and build on it.
+Routines are tasks neotags runs on its own, on a schedule (later on events), from configuration: `routines.<name>` names the skill packs a routine's runs may use, and later its trigger, steps and delivery targets. A Kubernetes CronJob only triggers a routine; the work, the model calls and the delivery happen in neotags. This document covers the first piece: one agent run for a routine, with a structured result, through `runJob` in process and `POST /internal/v1/runs` over HTTP. §6 adds the routines' configuration, their CronJobs and the `fire` command; the `fire` endpoint, period records, leases, the pipeline engine and delivery (the Outbox) come later and build on them.
 
 ## 1. Transport and authentication
 
@@ -67,3 +67,40 @@ A run with an `outputSchema` gets a `submit_output` tool whose parameters are th
 ## 5. Traces
 
 A job run's `invoke_agent job` span has `gen_ai.agent.name = job`, `neotags.routine.name` and `neotags.routine.period`, and is the child of the `traceparent` given to `runJob` when that is sampled (a link otherwise), so a routine's runs hang under the routine's own root span.
+
+## 6. Routines: configuration, CronJobs and `fire`
+
+### Configuration
+
+`routines.<name>` (`src/config/routines.ts`; every field in `config/neotags.example.yaml`). The name is the CronJob's: lowercase letters, digits and dashes, starting with a letter, at most 52 (the Job controller appends `-<minutes>`, and a Job name is at most 63). Every routine is checked in full at startup, enabled or not, and the process refuses to start on any problem; keys are strict, so a misspelt one fails instead of being dropped.
+
+| Field | Rule |
+|---|---|
+| `kind` | `agent` (one run: `instructions`, optional `context`, `budget`) or `pipeline` (a routine type's steps: `type`, `params`; both checked by the type's step pack once loaded). |
+| `enabled` | Default true; false suspends the CronJob. |
+| `trigger` | `schedule`: Kubernetes CronJob syntax, 5 fields (no seconds, no `@` macros, no `L`/`W`/`#`/`H`); `timeZone`: an IANA name. Both required. Later, event triggers go here too. |
+| `owner.slack` | Where failure notices go; in `outbox.slack.allowedChannels`. |
+| `packs` | In `skillPacks.packs`. A pipeline's packs are its classify run's, which reads untrusted data: none may declare `sandbox` (checked when the packs are loaded). |
+| `mcp` | The MCP servers its runs get, in `mcp.servers`; default none. `runJob` hides every other server from the run (`RunInput.mcp.hide`), so untrusted input cannot steer a run to another org's data. |
+| `budget` | agent only; `{wallClockSec, maxSteps}`, at most `agent.wallClockSec.job` and `agent.maxSteps`. |
+| `delivery` | `notify` (`always` \| `when_findings`), `slack: [{channel, lang, mention?, section?}]` (channels in `outbox.slack.allowedChannels`; `section` default `all`), `confluence: {space, parent, monthlyFolder?}` (`space` in `outbox.confluence.allowedSpaces`; the Outbox checks that `parent` is in it). At least one target. |
+
+`outbox`: `slack.allowedChannels`, `slack.testChannel` (required with routines, one of the allowed channels: every Slack target on a dry run), `confluence.{baseUrl, allowedSpaces, testParent}` (`testParent` unset: a dry run skips Confluence). Routines also need `jobsApi.enabled`.
+
+### Periods
+
+A period is a scheduled time in UTC, RFC 3339 to the minute (`2026-11-18T01:00:00Z`). The CronJob controller names each Job `<routine>-<scheduled time in minutes since the epoch>`; `fire` reads the period from it (`JOB_NAME`, from the Pod's `batch.kubernetes.io/job-name` label). A Job made by hand has no such suffix and needs `--period`. The bot accepts a period only when the schedule fires at it in the routine's time zone and it is at most 8 days old (`periodError`). Matching is on the wall clock, as the controller does: in the hour clocks go back both instants of a matching time are firings; in the hour they skip, nothing fires.
+
+### CronJobs (chart)
+
+One CronJob per routine, named after it, on the bot's image: `node dist/index.js fire <name>`. `concurrencyPolicy: Forbid`, `startingDeadlineSeconds: 600`, history 3 and 3. `backoffLimit: 1` (fire already waits and takes over within one run; the retry re-runs a failed period), `activeDeadlineSeconds: 4500` (the bot's hour per period, plus 5 minutes for a dead holder's lease to expire, plus polling), so the Job never outlives the bot's decision by being killed first. `podFailurePolicy`: exit code 2 fails the Job at once; a Pod with a `DisruptionTarget` condition (evicted, node drained) does not count against the backoff limit. The labels `app.kubernetes.io/component: <bot>-job` and `<bot>.neotags.io/routine: <name>` are on the CronJob, the Job and the Pod (the NetworkPolicy selects Pods by the first); the Pod does not carry the bot's selector labels. Its service account `<bot>-job-fire` mounts no token; its env is `JOB_NAME`, `MOOSE_URL` (the bot's Service) and `MOOSE_JOB_KEY` (a `secretKeyRef` to the job caller's `keyFromEnv` key, never `envFrom`).
+
+### `fire`
+
+`fire <name> [--period <RFC 3339>] [--dry-run] [--force]` reads no configuration and opens no Slack or MCP connection. It submits the period and polls; the bot does the work and holds the lease, so the Pod can be replaced at any time.
+
+1. `POST /internal/v1/routines/{name}/fire` `{period, dryRun, force?}`. 202, 200 and 409 all go on to polling; 503, other 5xx, 408, 429 and connection errors are retried, backing off from 5 s to 30 s. Any other 4xx exits 2. `force` (by hand: run again past the deadline) is sent only with the first submit.
+2. `GET /internal/v1/routines/{name}/periods/{period}?dryRun=<as --dry-run>` at once, then every 30 s, one log line each (period, state, step): `delivered` exits 0; `failed` exits 1; `running` and `stalled` wait; `orphaned` (no live lease) submits again, so a live Pod takes over; 404 waits, and after 2 minutes of 404s submits again.
+3. Every request times out after 10 s. Unreachable (as in 1) for 5 minutes in a row exits 1; so does no outcome 5 minutes past the period's `deadlineAt` (an hour from the start until the bot reports it).
+
+Exit codes: 0 delivered, 1 failed or gave up (the Job retries once), 2 usage or configuration (the Job fails).

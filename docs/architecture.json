@@ -502,7 +502,8 @@
         "LLM traces over OTLP: one trace per task or agent run, a span per LLM request and tool call (model, tokens, latency)",
         "OpenObserve assistant: O2 gateway (:3001, SSE), agent runs with O2 MCP tools, evidence links and navigation",
         "MCP client + Tool Guard; executor sidecar (bubblewrap) behind the sandbox guard",
-        "Internal run API for routines (:3001 /internal/v1/runs): Bearer key per caller, the routine's packs only, structured output through submit_output, own concurrency slots, job model chain"
+        "Internal run API for routines (:3001 /internal/v1/runs): Bearer key per caller, the routine's packs only, structured output through submit_output, own concurrency slots, job model chain",
+        "Routines configuration, checked in full at startup; one CronJob per routine running fire (submit a period, poll to its outcome); a routine's runs get only its MCP servers"
       ]
     },
     {
@@ -511,7 +512,7 @@
       "items": [
         "Live verification: Slack, Onyx and the O2 assistant end to end",
         "Slack answers and alert triage on the Agent runtime",
-        "Routine CronJobs (fire, periods, leases, Outbox), alert webhook, GitHub/GitLab bot"
+        "Routines: the fire endpoint, period records and leases, pipeline engine, Outbox; alert webhook, GitHub/GitLab bot"
       ]
     }
   ]
