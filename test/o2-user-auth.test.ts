@@ -171,6 +171,13 @@ describe("McpHub.forRun", () => {
     expect((await mcp.forRun(undefined)).tools).toHaveLength(4);
   });
 
+  it("with only: just those servers' tools, less any hidden; none for an empty list (a routine's mcp)", async () => {
+    const { mcp } = await setup();
+    expect((await mcp.forRun({ only: ["o2prod"] })).tools.map((t) => t.name)).toEqual(["o2prod__SearchSQL", "o2prod__StreamList"]);
+    expect((await mcp.forRun({ only: [] })).tools).toEqual([]);
+    expect((await mcp.forRun({ only: ["o2prod"], hide: ["o2prod"] })).tools).toEqual([]);
+  });
+
   it("as the user: only the page org's tools, on a run client that sends the bearer token and no service header", async () => {
     const { o2, mcp } = await setup();
     const listedBefore = o2.seen.length;
@@ -249,6 +256,8 @@ describe("McpHub.forRun", () => {
     // A user run calls o2prod on its own client with the tools listed at startup, and has no o2 at all.
     expect(mcp.unavailable({ hide: ["o2"], asUser: { server: "o2prod", bearer: new Credential(TOKEN_A) } })).toEqual([]);
     expect(mcp.unavailable({ hide: ["o2"] })).toEqual(["o2prod"]);
+    expect(mcp.unavailable({ only: ["o2"] })).toEqual(["o2"]);
+    expect(mcp.unavailable({ only: [] })).toEqual([]);
   });
 
   const userAccess = (token = TOKEN_A) => ({ hide: ["o2"], asUser: { server: "o2prod", bearer: new Credential(token) } });

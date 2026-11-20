@@ -90,21 +90,20 @@ export class McpHub {
   }
 
   /**
-   * Servers that are down right now, by name. Under a run's `access`: not the hidden ones, and its user server only
+   * Servers that are down right now, by name. Under a run's `access`: only the ones it may see, and its user server only
    * when the run got no tools for it, since the run's calls to it do not go through the shared client.
    */
   unavailable(access?: RunMcpAccess): string[] {
-    const hide = new Set(access?.hide ?? []);
     const userServer = access?.asUser?.server;
     return this.states
       .filter((s) =>
-        hide.has(s.cfg.name) ? false : s.cfg.name === userServer ? !(this.userTools.get(access!) ?? s.defs.length > 0) : s.down !== undefined,
+        !visible(access, s.cfg.name) ? false : s.cfg.name === userServer ? !(this.userTools.get(access!) ?? s.defs.length > 0) : s.down !== undefined,
       )
       .map((s) => s.cfg.name);
   }
 
   /**
-   * The tools of one run. Without `asUser` they are the shared ones, less the hidden servers'. With it, that server's
+   * The tools of one run. Without `asUser` they are the shared ones of the servers it may see (`only`, less `hide`). With it, that server's
    * tools call it on a client of this run alone, carrying the user's bearer token and none of the server's configured
    * headers; `close()` ends it. The schemas are the shared client's, or, when it has listed none (its credential is
    * missing or refused, the server was down at startup), the run client lists them itself. Never throws: a run whose
@@ -112,8 +111,7 @@ export class McpHub {
    * The credential is passed down explicitly, never through ambient context, so one run can never call with another's.
    */
   async forRun(access?: RunMcpAccess, signal?: AbortSignal): Promise<{ tools: AgentTool<any>[]; close: () => Promise<void> }> {
-    const hide = new Set(access?.hide ?? []);
-    const states = this.states.filter((s) => !hide.has(s.cfg.name));
+    const states = this.states.filter((s) => visible(access, s.cfg.name));
     const as = access?.asUser;
     const user = as && states.find((s) => s.cfg.name === as.server);
     if (!as || !user) return { tools: states.flatMap((s) => s.tools), close: async () => {} };
@@ -487,4 +485,10 @@ export function resultText(res: CallToolResult): string {
   });
   if (parts.length === 0 && res.structuredContent !== undefined) return JSON.stringify(res.structuredContent);
   return parts.join("\n");
+}
+
+/** May a run with this access use `server`: in `only` when that is set, and not in `hide`. */
+function visible(access: RunMcpAccess | undefined, server: string): boolean {
+  if (access?.hide?.includes(server)) return false;
+  return access?.only === undefined || access.only.includes(server);
 }

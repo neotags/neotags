@@ -224,8 +224,9 @@ describe("agent config", () => {
     const to = lines.findIndex((l) => l.startsWith("logLevel:"));
     expect(from).toBeGreaterThan(0);
     const block = lines.slice(from, to).map((l) => l.slice(2).replace(/\s+#.*$/, "")).join("\n");
-    const c = cfgFor(block);
+    const c = loadConfig({ ...base, MOOSE_JOB_KEY: "k", NEOTAGS_CONFIG: "f" }, () => block);
     expect(c.agent.entries.o2).toEqual(["o2-query-assistant"]);
+    expect(c.routines["example-daily"]).toMatchObject({ kind: "agent", trigger: { timeZone: "Asia/Shanghai" } });
     expect(c.skillPacks).toMatchObject({ dir: "/etc/neotags/skills", refs: { "some-pack": ["method.md", "data/table.json"] } });
   });
 

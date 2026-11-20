@@ -84,7 +84,7 @@ export function createJobRunner(o: JobRunnerOptions) {
   const slots = o.slots ?? new Slots(cfg.jobsApi.concurrency);
 
   /** Everything checkable before a run; throws JobRequestError. */
-  function check(req: JobRunRequest): { packs: string[]; input: string; budget?: RunLimits } {
+  function check(req: JobRunRequest): { packs: string[]; input: string; budget?: RunLimits; only: string[] } {
     // Own keys only: a routine named "constructor" must not find Object.prototype.
     const routine = Object.hasOwn(cfg.routines, req.routine) ? cfg.routines[req.routine] : undefined;
     if (!routine) throw new JobRequestError(403, "forbidden", `unknown routine ${JSON.stringify(req.routine.slice(0, 64))}`);
@@ -103,11 +103,14 @@ export function createJobRunner(o: JobRunnerOptions) {
       throw new JobRequestError(400, "bad_request", `budget.wallClockSec may not exceed ${cfg.agent.wallClockSec.job}`);
     }
     if (b?.maxSteps !== undefined && b.maxSteps > cfg.agent.maxSteps) throw new JobRequestError(400, "bad_request", `budget.maxSteps may not exceed ${cfg.agent.maxSteps}`);
-    return { packs, input, ...(b && { budget: b }) };
+    // Only the routine's own MCP servers: its input is untrusted and could ask for another org's data, which no
+    // prompt can be trusted to refuse.
+    // An allowlist, so a server added later stays out of the routine's runs.
+    return { packs, input, only: [...routine.mcp], ...(b && { budget: b }) };
   }
 
   async function runJob(req: JobRunRequest, opts: JobRunOptions): Promise<JobRunResult> {
-    const { packs, input, budget } = check(req);
+    const { packs, input, budget, only } = check(req);
     if (o.runs.isDraining) throw new JobRequestError(503, "shutting_down", "shutting down; submit again");
     if (!o.modelAvailable()) {
       o.log?.warn({ routine: req.routine, period: req.period }, "job run not started: model unavailable");
@@ -127,6 +130,7 @@ export function createJobRunner(o: JobRunnerOptions) {
         question: req.instructions ?? DEFAULT_QUESTION,
         jobInput: input,
         packs,
+        mcp: { only },
         outputSchema: req.outputSchema,
         ...(budget && { budget }),
         routine: { name: req.routine, period: req.period },

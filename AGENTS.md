@@ -26,8 +26,9 @@ Before finishing a change: typecheck, test, build (and `helm lint` if `deploy/` 
 ## Layout
 
 ```
-src/index.ts            entrypoint
-src/config/             YAML (NEOTAGS_CONFIG) + env secrets, validated with zod
+src/index.ts            entrypoint: `fire <routine>` (a routine's CronJob) or the bot (src/server.ts)
+src/routines/           schedule.ts: CronJob schedules, time zones, periods (cron-parser); fire.ts: the `fire` command (submit a period, poll to its outcome)
+src/config/             YAML (NEOTAGS_CONFIG) + env secrets, validated with zod; routines.ts: routines and outbox schema and cross-checks
 src/gateway/            Slack Events gateway (Bolt, HTTP), mention stripping, event dedupe; http.ts: the :3001 server, routed by path prefix; o2.ts: OpenObserve assistant entry (/o2_agent/, SSE, docs/design/002), o2-stream.ts: RunObserver -> panel events; internal.ts: internal API for routines (/internal/v1/runs, Bearer keys per caller, docs/design/003)
 src/agent/              pi-ai gateway model from config (baseUrl/model/key), tool-less LlmClient, pi Agent factory + tool guard
 src/runs/               RunManager (state machine, concurrency, per-session lock, budgets, rate limit, drain) + AgentRunner (pi-agent-core); the O2 gateway submits to it; job.ts: runJob (routine runs: config checks, own concurrency slots); output.ts: submit_output (structured output, ajv)

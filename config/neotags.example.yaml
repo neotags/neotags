@@ -90,13 +90,36 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #   maxHistoryChars: 48000        # earlier turns kept, newest first
 #   maxQueued: 8                  # runs waiting for a slot; beyond it O2 gets 429 turn_limit
 # jobsApi:                        # routines' internal API (docs/design/003-internal-run-api.md), on o2Gateway.port
-#   enabled: false                # opens the port even with the O2 gateway off; in-cluster callers only
+#   enabled: true                 # default false; opens the port even with the O2 gateway off; in-cluster only
 #   callers:                      # Bearer key per caller, from env; the caller is the run's source
 #     job: { keyFromEnv: MOOSE_JOB_KEY }
 #   concurrency: 1                # routine runs at once, apart from agent.concurrency.total; not rate limited
-# routines:                       # by name (lowercase, digits, dashes; at most 52): the CronJob's name
+# outbox:                         # where routines may deliver; every routine needs slack.testChannel
+#   slack:
+#     allowedChannels: [C0123456789]   # channel ids delivery.slack and owner.slack may name
+#     testChannel: C0123456789    # every Slack target becomes this on a dry run; one of allowedChannels
+#   confluence:                   # email and token: env CONFLUENCE_EMAIL, CONFLUENCE_WRITE_TOKEN
+#     baseUrl: https://wiki.example.com/wiki
+#     allowedSpaces: [OPS]        # spaces delivery.confluence may name
+#     testParent: "123456"        # parent of every page on a dry run; unset: a dry run skips Confluence
+# routines:                       # by name (lowercase, digits, dashes; at most 52): the CronJob's name. Each one is
+#                                 # checked in full at startup, enabled or not; unknown keys are refused
 #   example-daily:
-#     packs: [o2-query-assistant] # what the routine's runs may load; a request may only narrow it
+#     kind: agent                 # agent: one run with instructions; pipeline: a routine type's steps (type, params)
+#     enabled: true               # false: the CronJob is suspended
+#     trigger:
+#       schedule: "0 9 * * *"     # Kubernetes CronJob syntax, 5 fields (no seconds, no @ macros)
+#       timeZone: Asia/Shanghai   # IANA name
+#     owner: { slack: C0123456789 }   # failure notices
+#     packs: [o2-query-assistant] # what the routine's runs may load; a request may only narrow it. A pipeline's
+#                                 # packs (its classify run) may not declare sandbox
+#     mcp: []                     # MCP servers its runs get (in mcp.servers); default none
+#     instructions: Summarize yesterday's alerts and what changed.
+#     budget: { wallClockSec: 600, maxSteps: 20 }   # optional; only below agent.wallClockSec.job, agent.maxSteps
+#     delivery:                   # at least one target
+#       notify: when_findings     # always (default) | when_findings
+#       slack: [{ channel: C0123456789, lang: en }]   # also mention, section (default all)
+#       # confluence: { space: OPS, parent: "123456", monthlyFolder: true }
 # sandbox:                        # where skill-pack commands run (executor/README.md); nothing runs in this process
 #   backend: none                 # none (default): every execution is refused. local: the executor sidecar
 #   socket: /run/executor/exec.sock

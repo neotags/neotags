@@ -5881,6 +5881,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
           <li>OpenObserve assistant: O2 gateway (:3001, SSE), agent runs with O2 MCP tools, evidence links and navigation</li>
           <li>MCP client + Tool Guard; executor sidecar (bubblewrap) behind the sandbox guard</li>
           <li>Internal run API for routines (:3001 /internal/v1/runs): Bearer key per caller, the routine&#39;s packs only, structured output through submit_output, own concurrency slots, job model chain</li>
+          <li>Routines configuration, checked in full at startup; one CronJob per routine running fire (submit a period, poll to its outcome); a routine&#39;s runs get only its MCP servers</li>
         </ul>
       </div>
 
@@ -5892,7 +5893,7 @@ OTHER DEALINGS IN THE FONT SOFTWARE.
         <ul>
           <li>Live verification: Slack, Onyx and the O2 assistant end to end</li>
           <li>Slack answers and alert triage on the Agent runtime</li>
-          <li>Routine CronJobs (fire, periods, leases, Outbox), alert webhook, GitHub/GitLab bot</li>
+          <li>Routines: the fire endpoint, period records and leases, pipeline engine, Outbox; alert webhook, GitHub/GitLab bot</li>
         </ul>
       </div>
     </div>

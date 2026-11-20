@@ -16,8 +16,15 @@ const env = { SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", MOOSE_JOB_KEY: JO
 const yaml = (o2: boolean) => `o2Gateway: { enabled: ${o2} }
 skillPacks: { packs: [triage, other] }
 jobsApi: { enabled: true, callers: { job: { keyFromEnv: MOOSE_JOB_KEY } } }
+outbox: { slack: { allowedChannels: [C0TEST], testChannel: C0TEST } }
 routines:
-  daily-triage: { packs: [triage] }
+  daily-triage:
+    kind: agent
+    trigger: { schedule: "0 9 * * *", timeZone: UTC }
+    owner: { slack: C0TEST }
+    packs: [triage]
+    instructions: Group the alerts.
+    delivery: { slack: [{ channel: C0TEST, lang: en }] }
 `;
 const cfgFor = (o2 = true) => loadConfig({ ...env, NEOTAGS_CONFIG: "f" }, () => yaml(o2));
 
@@ -212,13 +219,6 @@ describe("jobsApi config", () => {
 
   it("refuses a job key equal to O2's", () => {
     expect(load("o2Gateway: { enabled: true }\njobsApi: { enabled: true, callers: { job: { keyFromEnv: O2_AGENT_API_KEY } } }")).toThrow(/give each its own/);
-  });
-
-  it("checks routine names and their packs", () => {
-    expect(load("routines: { Daily: { packs: [] } }")).toThrow(/lowercase/);
-    expect(load(`routines: { ${"a".repeat(53)}: { packs: [] } }`)).toThrow(/at most 52/);
-    expect(load(`routines: { ${"a".repeat(52)}: {} }`)().routines).toHaveProperty("a".repeat(52));
-    expect(load("routines: { daily: { packs: [nope] } }")).toThrow(/not in skillPacks.packs/);
   });
 
   it("defaults the job wall clock to 900 s and one routine at a time", () => {

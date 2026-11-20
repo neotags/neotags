@@ -37,8 +37,21 @@ const cfgFor = (extra = "") =>
     breaker: { failures: 1, windowSec: 60, cooldownSec: 120 }
 skillPacks: { packs: [triage, other] }
 jobsApi: { enabled: true, callers: { job: { keyFromEnv: MOOSE_JOB_KEY } } }
+mcp:
+  servers:
+    - { name: o2, url: "http://o2.test/mcp", allowTools: [SearchSQL] }
+    - { name: o2prod, url: "http://o2prod.test/mcp", allowTools: [SearchSQL] }
+outbox: { slack: { allowedChannels: [C0TEST], testChannel: C0TEST } }
 routines:
-  daily-triage: { packs: [triage], kind: pipeline, extra: kept }
+  daily-triage:
+    kind: pipeline
+    type: alert-triage
+    trigger: { schedule: "0 9 * * *", timeZone: Asia/Shanghai }
+    owner: { slack: C0TEST }
+    packs: [triage]
+    mcp: [o2prod]
+    params: { window: 24h }
+    delivery: { slack: [{ channel: C0TEST, lang: zh }] }
 ${extra}`);
 
 const index = new SkillPackIndex(
@@ -267,8 +280,17 @@ describe("runJob", () => {
     await expect(p).resolves.toMatchObject({ runId: "run-1", state: "done", output: good, degraded: false });
   });
 
-  it("keeps the routine's other fields in the config", () => {
-    expect(cfgFor().routines["daily-triage"]).toMatchObject({ packs: ["triage"], kind: "pipeline", extra: "kept" });
+  it("keeps the routine's fields in the config", () => {
+    expect(cfgFor().routines["daily-triage"]).toMatchObject({ packs: ["triage"], kind: "pipeline", params: { window: "24h" } });
+  });
+
+  it("gives the run only the routine's own MCP servers", async () => {
+    const j = jobs();
+    const p = j.runJob(req(), { caller: "job" });
+    await tick();
+    expect(j.pending[0]!.input.mcp).toEqual({ only: ["o2prod"] });
+    j.pending[0]!.finish(submitted);
+    await p;
   });
 
   it("refuses unknown routines and packs the routine does not have", async () => {

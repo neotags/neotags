@@ -1,6 +1,9 @@
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
+import { outboxSchema, routineIssues, routinesSchema } from "./routines.js";
+
+export { ROUTINE_NAME, type Routine } from "./routines.js";
 
 export const EFFORTS = ["none", "low", "medium", "high", "max"] as const;
 export type Effort = (typeof EFFORTS)[number];
@@ -14,11 +17,6 @@ export const O2_ORG_ID = /^[A-Za-z0-9_-]{1,64}$/;
 /** Callers of the internal API (`jobsApi.callers`); the caller a key belongs to is the run's source. */
 export const JOB_CALLERS = ["job"] as const satisfies readonly RunSource[];
 export type JobCaller = (typeof JOB_CALLERS)[number];
-/**
- * A routine name, which is also its CronJob's name: the Job controller appends `-<minutes>` (8+ digits) and a Job
- * name is at most 63 characters.
- */
-export const ROUTINE_NAME = /^[a-z][a-z0-9-]{0,51}$/;
 
 const effortSchema = z.enum(EFFORTS);
 
@@ -346,11 +344,11 @@ const fileSchema = z.object({
       if (j.enabled && Object.keys(j.callers).length === 0) ctx.addIssue({ code: "custom", path: ["callers"], message: "jobsApi.enabled needs at least one caller" });
     })
     .prefault({}),
-  // Routines by name. Only what runs need so far: the skill packs a routine's runs may load (and execute through,
-  // when a pack declares `sandbox`); a request can narrow them, never widen them. Other fields are kept as they are.
-  routines: z
-    .record(z.string().regex(ROUTINE_NAME, "lowercase letters, digits and dashes, starting with a letter, at most 52"), z.object({ packs: z.array(z.string().min(1)).default([]) }).loose())
-    .default({}),
+  // Routines by name (src/config/routines.ts): tasks run on a schedule, each from its own CronJob, and delivered by
+  // the Outbox. Every routine is checked in full at startup, enabled or not.
+  routines: routinesSchema,
+  // Where routines may deliver (Slack channels, Confluence spaces), and where dry runs go instead.
+  outbox: outboxSchema,
   // LLM traces over OTLP (OpenObserve, Langfuse, an OTel collector). The exporter is configured with the standard
   // OTEL_EXPORTER_OTLP_* env vars; tracing is off unless an endpoint is set.
   telemetry: z
@@ -382,11 +380,7 @@ const fileSchema = z.object({
       }
     });
   }
-  for (const [name, routine] of Object.entries(cfg.routines)) {
-    routine.packs.forEach((p, i) => {
-      if (!cfg.skillPacks.packs.includes(p)) ctx.addIssue({ code: "custom", path: ["routines", name, "packs", i], message: `skill pack "${p}" is not in skillPacks.packs` });
-    });
-  }
+  for (const issue of routineIssues(cfg)) ctx.addIssue({ code: "custom", ...issue });
 });
 
 export interface Secrets {
