@@ -87,7 +87,13 @@ export async function fire(o: FireOptions, d: FireDeps): Promise<number> {
     } catch (err) {
       return down((err as Error).message || String(err));
     }
-    const text = await res.text().catch(() => "");
+    let text: string;
+    try {
+      text = await res.text();
+    } catch (err) {
+      // Cut off mid-body (the timeout, a dropped connection): no answer, like a connection error.
+      return down(`HTTP ${res.status}, body not read: ${(err as Error).message || String(err)}`);
+    }
     // 503 (shutting down, busy), other 5xx, and a gateway's 408 or 429: the bot, not the request, is the problem.
     if (res.status >= 500 || res.status === 408 || res.status === 429) return down(`HTTP ${res.status} ${errorText(text)}`);
     downSince = undefined;
@@ -107,7 +113,7 @@ export async function fire(o: FireOptions, d: FireDeps): Promise<number> {
   }
 
   function checkDeadline(): void {
-    const by = (deadline ?? started + UNKNOWN_DEADLINE_MS - DEADLINE_GRACE_MS) + DEADLINE_GRACE_MS;
+    const by = deadline !== undefined ? deadline + DEADLINE_GRACE_MS : started + UNKNOWN_DEADLINE_MS;
     if (d.now() > by) throw new Exit(EXIT_FAILED, `no outcome by ${new Date(by).toISOString()}, ${DEADLINE_GRACE_MS / 60_000} minutes past the period's deadline`);
   }
 

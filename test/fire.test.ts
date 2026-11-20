@@ -7,7 +7,7 @@ const env = { MOOSE_URL: "http://moose.test:3001/", MOOSE_JOB_KEY: "test-job-key
 const T0 = Date.parse("2026-11-18T01:00:20Z");
 const deadlineAt = new Date(T0 + 3600_000).toISOString();
 
-type Answer = number | { status: number; body?: unknown } | Error;
+type Answer = number | { status: number; body?: unknown } | Error | "cut";
 interface Call {
   at: number;
   method: string;
@@ -38,6 +38,8 @@ function bot(o: { post?: Answer[]; get?: Answer[] }) {
     const a = q.length > 1 ? q.shift()! : q[0];
     if (a === undefined) throw new Error(`no answer for ${method}`);
     if (a instanceof Error) throw a;
+    // Headers arrive, then the body is cut off.
+    if (a === "cut") return new Response(new ReadableStream({ start: (c) => c.error(new Error("terminated")) }), { status: 200 });
     const { status, body } = typeof a === "number" ? { status: a, body: undefined } : a;
     return new Response(body === undefined ? null : JSON.stringify(body), { status });
   }) as unknown as typeof globalThis.fetch;
@@ -130,6 +132,19 @@ describe("fire", () => {
     expect(b.elapsed()).toBe(330_000);
     const ok = bot({ get: [status("running"), ...Array(10).fill(down), status("delivered")] });
     expect(await ok.run()).toBe(EXIT_DELIVERED);
+  });
+
+  it("treats a body cut off after the headers as no answer, not a refusal", async () => {
+    const b = bot({ get: [status("running"), "cut", status("delivered")] });
+    expect(await b.run()).toBe(EXIT_DELIVERED);
+    expect(b.logs.find((l) => l.msg === "status check failed")?.obj.error).toMatch(/body not read/);
+  });
+
+  it("gives up 65 minutes after starting when the bot never reports a deadline", async () => {
+    const b = bot({ get: [404], post: [202] });
+    expect(await b.run()).toBe(EXIT_FAILED);
+    expect(b.elapsed()).toBeGreaterThan(65 * 60_000);
+    expect(b.elapsed()).toBeLessThanOrEqual(65 * 60_000 + 30_000);
   });
 
   it("exits 1 when the period has no outcome 5 minutes past its deadline", async () => {

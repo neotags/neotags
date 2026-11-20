@@ -25,6 +25,9 @@ export function scheduleError(expr: string): string | undefined {
     const plain = i >= 3 ? field.replace(/[A-Za-z]+/g, (w) => (NAMES.test(w) ? "0" : w)) : field;
     if (!/^[\d*?,/-]+$/.test(plain)) return `field ${i + 1} (${JSON.stringify(field)}) is not CronJob syntax: digits, * ? , - / and month or weekday names only`;
   }
+  // cron-parser also reads 7 as Sunday; a CronJob's day of week is 0-6. Step sizes (after /) are not days.
+  const days = fields[4]!.split(",").flatMap((part) => part.split("/")[0]!.split("-"));
+  if (days.some((d) => /^\d+$/.test(d) && Number(d) > 6)) return `day of week ${JSON.stringify(fields[4])}: a CronJob takes 0-6 (0 is Sunday), not 7`;
   try {
     CronExpressionParser.parse(fields.join(" "), { tz: "UTC" });
   } catch (err) {
@@ -37,12 +40,23 @@ export function scheduleError(expr: string): string | undefined {
 export function timeZoneError(tz: string): string | undefined {
   // Intl also takes offsets ("+08:00"); a CronJob only takes names from the tz database.
   if (!/^[A-Za-z][A-Za-z0-9_+-]*(\/[A-Za-z0-9_+-]+)*$/.test(tz)) return "not an IANA time zone name, e.g. Asia/Shanghai or UTC";
+  let resolved: string;
   try {
-    new Intl.DateTimeFormat("en-US", { timeZone: tz });
+    resolved = new Intl.DateTimeFormat("en-US", { timeZone: tz }).resolvedOptions().timeZone;
   } catch {
     return "not an IANA time zone name, e.g. Asia/Shanghai or UTC";
   }
-  return undefined;
+  // Intl matches names in any case; Kubernetes (Go's time.LoadLocation) only in their own. The IANA list leaves out
+  // UTC and its aliases, which Intl resolves to "UTC".
+  if (resolved === tz || ianaZones().has(tz) || UTC_ALIAS.test(tz)) return undefined;
+  return `not an IANA time zone name as written (case matters); did you mean ${resolved}?`;
+}
+
+const UTC_ALIAS = /^(Etc\/)?(UTC|UCT|GMT|GMT0|Universal|Zulu|Greenwich)$|^Etc\/GMT[+-]\d{1,2}$/;
+let zones: Set<string> | undefined;
+function ianaZones(): Set<string> {
+  zones ??= new Set(Intl.supportedValuesOf("timeZone"));
+  return zones;
 }
 
 /** The period of an instant: UTC, to the minute. */
@@ -58,7 +72,8 @@ export function formatPeriod(ms: number): string {
 export function periodFromJobName(routine: string, jobName: string | undefined): string | undefined {
   if (!jobName?.startsWith(`${routine}-`)) return undefined;
   const suffix = jobName.slice(routine.length + 1);
-  if (!/^\d{8,}$/.test(suffix)) return undefined;
+  // 8 digits from 1970-03 on; 10 reach year 20983. Longer is no scheduled time (and past Date's range).
+  if (!/^\d{8,10}$/.test(suffix)) return undefined;
   return formatPeriod(Number(suffix) * 60_000);
 }
 

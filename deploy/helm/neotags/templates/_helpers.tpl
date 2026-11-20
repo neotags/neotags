@@ -70,10 +70,11 @@ moose-job. The NetworkPolicy lets Pods with it in; nothing else in the namespace
 {{- printf "%s-job" (include "neotags.botSlug" .) | trunc 63 -}}
 {{- end }}
 
-{{/* The bot name as a DNS label: lowercase letters, digits and dashes (moose). */}}
+{{/* The bot name as a DNS label: lowercase letters, digits and dashes (moose); "neotags" when nothing is left. */}}
 {{- define "neotags.botSlug" -}}
 {{- $bot := default "neotags" (and .Values.config.bot .Values.config.bot.name) -}}
-{{- regexReplaceAll "[^a-z0-9-]+" (lower $bot) "-" | trimAll "-" | trunc 40 | trimSuffix "-" -}}
+{{- /* A name with no ASCII letter or digit leaves nothing: fall back to the chart's. */}}
+{{- regexReplaceAll "[^a-z0-9-]+" (lower $bot) "-" | trimAll "-" | trunc 40 | trimSuffix "-" | default "neotags" -}}
 {{- end }}
 
 {{/* The label that names a routine on its CronJob, Job and Pod: "<bot name>.neotags.io/routine". */}}

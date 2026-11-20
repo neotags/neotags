@@ -78,10 +78,10 @@ A job run's `invoke_agent job` span has `gen_ai.agent.name = job`, `neotags.rout
 |---|---|
 | `kind` | `agent` (one run: `instructions`, optional `context`, `budget`) or `pipeline` (a routine type's steps: `type`, `params`; both checked by the type's step pack once loaded). |
 | `enabled` | Default true; false suspends the CronJob. |
-| `trigger` | `schedule`: Kubernetes CronJob syntax, 5 fields (no seconds, no `@` macros, no `L`/`W`/`#`/`H`); `timeZone`: an IANA name. Both required. Later, event triggers go here too. |
+| `trigger` | `schedule`: Kubernetes CronJob syntax, 5 fields (no seconds, no `@` macros, no `L`/`W`/`#`/`H`, day of week 0-6); `timeZone`: an IANA name, case as written (Kubernetes reads it case-sensitively). Both required. Later, event triggers go here too. |
 | `owner.slack` | Where failure notices go; in `outbox.slack.allowedChannels`. |
 | `packs` | In `skillPacks.packs`. A pipeline's packs are its classify run's, which reads untrusted data: none may declare `sandbox` (checked when the packs are loaded). |
-| `mcp` | The MCP servers its runs get, in `mcp.servers`; default none. `runJob` hides every other server from the run (`RunInput.mcp.hide`), so untrusted input cannot steer a run to another org's data. |
+| `mcp` | The MCP servers its runs get, in `mcp.servers`; default none. `runJob` passes them as an allowlist (`RunInput.mcp.only`): the run gets no other server, including one added later, so untrusted input cannot steer it to another org's data. |
 | `budget` | agent only; `{wallClockSec, maxSteps}`, at most `agent.wallClockSec.job` and `agent.maxSteps`. |
 | `delivery` | `notify` (`always` \| `when_findings`), `slack: [{channel, lang, mention?, section?}]` (channels in `outbox.slack.allowedChannels`; `section` default `all`), `confluence: {space, parent, monthlyFolder?}` (`space` in `outbox.confluence.allowedSpaces`; the Outbox checks that `parent` is in it). At least one target. |
 

@@ -44,10 +44,12 @@ spec:
         app.kubernetes.io/component: {{ $component }}
         {{ $routineLabel }}: {{ $name }}
     spec:
-      # fire already waits, retries and takes over within one run; the one retry re-runs a failed period.
+      # fire already waits, retries and takes over within one run. The one retry re-runs a period that failed early
+      # (the bot runs a failed period again until its deadline); after a late failure it finds the period failed and
+      # exits too.
       backoffLimit: 1
-      # The bot gives a period an hour (its deadlineAt), plus 5 minutes for an abandoned lease to expire and a margin
-      # for polling: the Job is never killed before the bot has decided the period.
+      # For the whole Job, retry included: the bot's hour per period (its deadlineAt), plus 5 minutes for an abandoned
+      # lease to expire and a margin for polling. The Job is never killed before the bot has decided the period.
       activeDeadlineSeconds: 4500
       podFailurePolicy:
         rules:

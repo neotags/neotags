@@ -95,6 +95,10 @@ describe("routines config", () => {
     expect(at("@every 1h")).toThrow(/2 fields/);
     expect(at("0 9 L * *")).toThrow(/field 3/);
     expect(at("0 9 * * 1#2")).toThrow(/field 5/);
+    expect(at("0 9 * * 7")).toThrow(/0-6/);
+    expect(at("0 9 * * 0-7")).toThrow(/0-6/);
+    expect(at("0 9 * * 1-5/7")).not.toThrow();
+    expect(at("0 9 * * SUN,SAT")).not.toThrow();
     expect(at("0 25 * * *")).toThrow(/schedule .*0 25 \* \* \*.*expected range 0-23/);
     expect(at("*/15 9-18 1,15 JAN-MAR mon-fri")().routines["daily-triage"]!.trigger.schedule).toBe("*/15 9-18 1,15 JAN-MAR mon-fri");
   });
@@ -105,6 +109,10 @@ describe("routines config", () => {
     expect(tz("+08:00")).toThrow(/not an IANA time zone/);
     expect(tz("Local")).toThrow(/not an IANA time zone/);
     expect(tz("UTC")).not.toThrow();
+    expect(tz("Etc/UTC")).not.toThrow();
+    // Kubernetes reads names case-sensitively; Intl would take these.
+    expect(tz("asia/shanghai")).toThrow(/did you mean Asia\/Shanghai/);
+    expect(tz("utc")).toThrow(/case matters/);
     expect(load((c) => delete c.routines["daily-triage"].trigger.timeZone)).toThrow(/timeZone/);
   });
 

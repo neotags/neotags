@@ -288,7 +288,7 @@ describe("runJob", () => {
     const j = jobs();
     const p = j.runJob(req(), { caller: "job" });
     await tick();
-    expect(j.pending[0]!.input.mcp).toEqual({ hide: ["o2"] });
+    expect(j.pending[0]!.input.mcp).toEqual({ only: ["o2prod"] });
     j.pending[0]!.finish(submitted);
     await p;
   });

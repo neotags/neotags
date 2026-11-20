@@ -43,6 +43,8 @@ export class Credential {
 export interface RunMcpAccess {
   /** Servers whose tools this run does not get (the other orgs' O2 servers). */
   hide?: readonly string[];
+  /** When set, the only servers this run gets, less `hide` (a routine's `mcp`): a server added later stays out. */
+  only?: readonly string[];
   /** Calls to `server` go out on a client of this run only, as `Authorization: Bearer <bearer>`. */
   asUser?: { server: string; bearer: Credential };
 }

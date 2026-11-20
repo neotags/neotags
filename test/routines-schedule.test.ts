@@ -16,6 +16,8 @@ describe("periods", () => {
     expect(periodFromJobName("daily", "daily")).toBeUndefined();
     expect(periodFromJobName("daily", "other-29409660")).toBeUndefined();
     expect(periodFromJobName("daily", "daily-1234567")).toBeUndefined();
+    // Past what a Date can hold: no period, not a crash.
+    expect(periodFromJobName("daily", "daily-99999999999999999999")).toBeUndefined();
     expect(periodFromJobName("daily", undefined)).toBeUndefined();
   });
 

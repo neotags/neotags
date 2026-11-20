@@ -87,6 +87,12 @@ describe.skipIf(!helm)("chart: routines", () => {
     expect(d.spec.template.metadata.annotations["eks.amazonaws.com/skip-containers"]).toBe("executor");
   });
 
+  it("falls back to neotags for a bot name with no ASCII letter or digit", () => {
+    const c = render("config.bot.name=机器人").find((d) => d.kind === "CronJob")!;
+    expect(c.metadata.labels).toMatchObject({ "app.kubernetes.io/component": "neotags-job", "neotags.neotags.io/routine": c.metadata.name });
+    expect(c.spec.jobTemplate.spec.template.spec.serviceAccountName).toBe("neotags-job-fire");
+  });
+
   it("takes the job key's name from the job caller's keyFromEnv", () => {
     const docs2 = render("config.jobsApi.callers.job.keyFromEnv=ROUTINES_KEY");
     const c = docs2.find((d) => d.kind === "CronJob")!.spec.jobTemplate.spec.template.spec.containers[0];
