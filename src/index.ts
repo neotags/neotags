@@ -59,7 +59,7 @@ if (cfg.onyx.baseUrl) {
 const skills = selectSkills(allSkills(), cfg.skills.disabled);
 log.info({ skills: skills.map((s) => s.name), disabled: cfg.skills.disabled }, "skills registered");
 
-const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
+const slackGateway = createSlack(cfg, log, ({ notifier, slack }) =>
   new Router({
     botName: cfg.bot.name,
     notifier,
@@ -92,40 +92,22 @@ const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
 let runs: RunManager | undefined;
 let mcp: McpHub | undefined;
 let o2: O2Gateway | undefined;
-if (cfg.o2Gateway.enabled) {
-  if (!gateway) log.error("o2Gateway is enabled but no LLM is configured; the O2 entry is not started");
-  else {
-    const index = await loadConfiguredSkillPacks(cfg, log);
-    const versions = entryVersions(cfg, index);
-    setAgentVersions(versions);
-    log.info({ versions }, "agent versions");
-    mcp = await startMcp(cfg, log);
-    const executor = createSkillExecutor(cfg, index, log);
-    runs = createRunManager(cfg, { gateway, index, log, mcp, executor });
-    o2 = createO2Gateway({ cfg: cfg.o2Gateway, key: cfg.secrets.o2AgentKey!, runs, log });
-    await o2.listen(cfg.o2Gateway.port);
-    log.info({ port: cfg.o2Gateway.port, orgs: cfg.o2Gateway.orgs }, "o2 gateway listening");
-  }
-}
-
-await app.start(cfg.slack.port);
-log.info({ port: cfg.slack.port, bot: cfg.bot.name }, "neotags started");
 
 let shuttingDown = false;
-async function shutdown(sig: string) {
+async function shutdown(sig: string, exitCode = 0, cause?: unknown) {
   if (shuttingDown) return;
   shuttingDown = true;
-  log.info({ sig }, "shutting down");
-  let code = 0;
+  log.info({ sig, ...(cause !== undefined && { err: cause }) }, "shutting down");
+  let code = exitCode;
   o2?.stopAccepting();
   try {
-    await app.stop(); // stop accepting new events
+    await slackGateway.stop(); // stop accepting new events
   } catch (err) {
     log.error({ err }, "failed to stop cleanly");
     code = 1;
   }
   // Slack tasks are short; agent runs get agent.drainSec, which the pod's grace period must cover.
-  const [tasksDone, runsDone] = await Promise.all([drain(DRAIN_TIMEOUT_MS), runs?.drain(cfg.agent.drainSec * 1000) ?? true]);
+  const [tasksDone, runsDone] = await Promise.all([slackGateway.drain(DRAIN_TIMEOUT_MS), runs?.drain(cfg.agent.drainSec * 1000) ?? true]);
   if (!tasksDone) {
     log.warn("timed out waiting for in-flight tasks");
     code = 1;
@@ -146,4 +128,25 @@ async function shutdown(sig: string) {
   }
   process.exit(code);
 }
+// Registered before anything listens: a SIGTERM during startup (the O2 entry is already taking runs while Slack
+// connects) still drains instead of killing runs mid-flight.
 for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => void shutdown(sig));
+
+if (cfg.o2Gateway.enabled) {
+  if (!gateway) log.error("o2Gateway is enabled but no LLM is configured; the O2 entry is not started");
+  else {
+    const index = await loadConfiguredSkillPacks(cfg, log);
+    const versions = entryVersions(cfg, index);
+    setAgentVersions(versions);
+    log.info({ versions }, "agent versions");
+    mcp = await startMcp(cfg, log);
+    const executor = createSkillExecutor(cfg, index, log);
+    runs = createRunManager(cfg, { gateway, index, log, mcp, executor });
+    o2 = createO2Gateway({ cfg: cfg.o2Gateway, key: cfg.secrets.o2AgentKey!, runs, log });
+    await o2.listen(cfg.o2Gateway.port);
+    log.info({ port: cfg.o2Gateway.port, orgs: cfg.o2Gateway.orgs }, "o2 gateway listening");
+  }
+}
+
+await slackGateway.start((err) => void shutdown("slack-token-refused", 1, err));
+log.info({ port: cfg.slack.port, bot: cfg.bot.name, mode: cfg.slack.mode }, "neotags started");

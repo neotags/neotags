@@ -9,6 +9,7 @@ import { Dedupe } from "./dedupe.js";
 import { isDmMessage, type MaybeDm } from "./dm.js";
 import { Inflight } from "./inflight.js";
 import { stripMention } from "./mention.js";
+import { boltLogger, superviseSocket } from "./socket.js";
 
 /** Bolt's event types omit `files`, but a mention or DM posted with an upload carries them. */
 const fileCount = (e: object) => (e as { files?: unknown[] }).files?.length ?? 0;
@@ -23,28 +24,40 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
     res.writeHead(200);
     res.end("ok");
   };
+  const logger = boltLogger(log);
   let app: App;
+  let socket: ReturnType<typeof superviseSocket> | undefined;
+  let onFatal: (err: unknown) => void = () => {};
   if (cfg.slack.mode === "socket") {
     // Outbound WebSocket: Slack delivers events and interactivity over it, so nothing is exposed for them. The
-    // receiver's HTTP server (installerOptions.port, started by app.start) serves only /healthz.
+    // receiver's HTTP server (installerOptions.port, started with the first connect) serves only /healthz.
     const receiver = new SocketModeReceiver({
       appToken: cfg.secrets.slackAppToken!,
-      installerOptions: { port: cfg.slack.port },
+      logger,
+      // superviseSocket reconnects instead (see there); one try per attempt so its backoff is the only one, and a
+      // timeout because apps.connections.open has none and a black-holed request would stall reconnecting.
+      autoReconnectEnabled: false,
+      installerOptions: { port: cfg.slack.port, clientOptions: { retryConfig: { retries: 0 }, timeout: 10_000 } },
       customRoutes: [{ path: "/healthz", method: ["GET"], handler: health }],
     });
-    // /healthz stays green while the socket is down and Bolt reconnects by itself, so these lines are the only
-    // sign that Slack stopped delivering.
-    for (const state of ["connecting", "connected"] as const) receiver.client.on(state, () => log.info({ state }, "slack socket"));
-    for (const state of ["reconnecting", "disconnected"] as const) receiver.client.on(state, () => log.warn({ state }, "slack socket"));
-    app = new App({ token: cfg.secrets.slackBotToken, receiver });
+    app = new App({ token: cfg.secrets.slackBotToken, receiver, logger });
+    socket = superviseSocket({
+      client: receiver.client,
+      log,
+      first: () => app.start(),
+      onFatal: (err) => onFatal(err),
+    });
   } else {
     const receiver = new ExpressReceiver({
       signingSecret: cfg.secrets.slackSigningSecret!,
       endpoints: "/slack/events",
+      logger,
     });
     receiver.router.get("/healthz", (_req, res) => void res.status(200).send("ok"));
-    app = new App({ token: cfg.secrets.slackBotToken, receiver });
+    app = new App({ token: cfg.secrets.slackBotToken, receiver, logger });
   }
+  let started = false;
+  let stopped = false;
 
   const notifier: Notifier = {
     async reply(t: ReplyTarget, text: string, blocks?: unknown[]) {
@@ -207,5 +220,25 @@ export function createSlack(cfg: Config, log: Logger, makeRouter: (d: SlackDeps)
     );
   });
 
-  return { app, drain: (timeoutMs: number) => inflight.drain(timeoutMs) };
+  return {
+    app,
+    /**
+     * Starts receiving. Socket mode does not wait for Slack: the connection is retried in the background (a Slack
+     * outage must not hold up the process or the O2 entry), and `fatal` is called if Slack refuses the app token.
+     */
+    async start(fatal: (err: unknown) => void) {
+      if (stopped) return;
+      started = true;
+      onFatal = fatal;
+      if (socket) socket.start();
+      else await app.start(cfg.slack.port);
+    },
+    /** Stops receiving new events; safe before start (a signal during startup). */
+    async stop() {
+      stopped = true;
+      socket?.stop();
+      if (started) await app.stop();
+    },
+    drain: (timeoutMs: number) => inflight.drain(timeoutMs),
+  };
 }

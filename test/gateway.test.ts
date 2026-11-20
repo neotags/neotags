@@ -107,25 +107,23 @@ describe("createSlack", () => {
   const build = (mode: "events-http" | "socket") =>
     createSlack(cfg(mode), pino({ level: "silent" }), () => ({}) as never);
 
-  it("logs the socket's connection state: warn when Slack stops delivering", () => {
-    const lines: Array<[string, object]> = [];
-    const log = {
-      info: (o: object) => lines.push(["info", o]),
-      warn: (o: object) => lines.push(["warn", o]),
-    } as unknown as Parameters<typeof createSlack>[1];
-    const { app } = createSlack(cfg("socket"), log, () => ({}) as never);
-    const client = (app as unknown as { receiver: { client: { emit(e: string): void } } }).receiver.client;
-    for (const e of ["connected", "disconnected", "reconnecting", "connected"]) client.emit(e);
-    expect(lines).toEqual([
-      ["info", { state: "connected" }],
-      ["warn", { state: "disconnected" }],
-      ["warn", { state: "reconnecting" }],
-      ["info", { state: "connected" }],
-    ]);
+  it("turns the socket client's own reconnect off: superviseSocket owns it", () => {
+    const { app } = build("socket");
+    const client = (app as unknown as { receiver: { client: { autoReconnectEnabled: boolean } } }).receiver.client;
+    expect(client.autoReconnectEnabled).toBe(false);
   });
 
   it("builds an app in both modes", () => {
     expect(build("events-http").app).toBeDefined();
     expect(build("socket").app).toBeDefined();
+  });
+
+  it("stops safely before it was started (a signal during startup), and then never starts", async () => {
+    for (const mode of ["events-http", "socket"] as const) {
+      const g = build(mode);
+      await g.stop();
+      await g.start(() => {});
+      await g.stop();
+    }
   });
 });
