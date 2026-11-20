@@ -28,9 +28,9 @@ Before finishing a change: typecheck, test, build (and `helm lint` if `deploy/` 
 ```
 src/index.ts            entrypoint
 src/config/             YAML (NEOTAGS_CONFIG) + env secrets, validated with zod
-src/gateway/            Slack Events gateway (Bolt, HTTP), mention stripping, event dedupe; o2.ts: OpenObserve assistant entry (:3001, SSE, docs/design/002), o2-stream.ts: RunObserver -> panel events
+src/gateway/            Slack Events gateway (Bolt, HTTP), mention stripping, event dedupe; http.ts: the :3001 server, routed by path prefix; o2.ts: OpenObserve assistant entry (/o2_agent/, SSE, docs/design/002), o2-stream.ts: RunObserver -> panel events; internal.ts: internal API for routines (/internal/v1/runs, Bearer keys per caller, docs/design/003)
 src/agent/              pi-ai gateway model from config (baseUrl/model/key), tool-less LlmClient, pi Agent factory + tool guard
-src/runs/               RunManager (state machine, concurrency, per-session lock, budgets, rate limit, drain) + AgentRunner (pi-agent-core); the O2 gateway submits to it
+src/runs/               RunManager (state machine, concurrency, per-session lock, budgets, rate limit, drain) + AgentRunner (pi-agent-core); the O2 gateway submits to it; job.ts: runJob (routine runs: config checks, own concurrency slots); output.ts: submit_output (structured output, ajv)
 src/router/             LLM intent routing: one tool-less call picks a registered skill; also dispatches button actions
 src/skills/             Skill interface; kb-collect/ (thread -> redact -> summarize -> Onyx upsert, Undo); kb-files/ (Slack files -> extract -> redact -> Onyx); kb-ask/ (Onyx search -> grounded, cited answer)
 src/tools/              slack (thread reader, file download), onyx (ingestion + search client), extract (PDF/DOCX/XLSX/PPTX/text -> sections), redact (secret scrubbing), skillpacks (allowlisted Agent Skills loader + read_skill tools)

@@ -208,7 +208,7 @@ describe("agent config", () => {
     expect(c.agent).toMatchObject({
       maxSteps: 30,
       maxInputTokens: 100_000,
-      wallClockSec: { slack: 360, o2: 600, job: 600 },
+      wallClockSec: { slack: 360, o2: 600, job: 900 },
       finalReserveSec: 90,
       concurrency: { total: 4, perUserPerHour: 20 },
       drainSec: 640,

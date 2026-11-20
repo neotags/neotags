@@ -254,6 +254,20 @@
       ]
     },
     {
+      "id": "internal",
+      "type": "backend",
+      "label": "Internal API",
+      "sublabel": ":3001 · Bearer keys",
+      "pos": [
+        430,
+        100
+      ],
+      "size": [
+        160,
+        64
+      ]
+    },
+    {
       "id": "toolguard",
       "type": "security",
       "label": "Tool Guard",
@@ -288,6 +302,7 @@
       "label": "EKS · neotags Pod (1 replica)",
       "wraps": [
         "o2gw",
+        "internal",
         "gateway",
         "guard",
         "router",
@@ -410,6 +425,23 @@
       "toSide": "left"
     },
     {
+      "id": "r1",
+      "from": "ptrig",
+      "to": "internal",
+      "label": "routine runs",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "r2",
+      "from": "internal",
+      "to": "agentrt",
+      "label": "runJob · submit_output",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
       "id": "o3",
       "from": "agentrt",
       "to": "toolguard",
@@ -469,7 +501,8 @@
         "OpenAI-compatible gateway via pi-ai, verified live; Agent factory + tool guard ready",
         "LLM traces over OTLP: one trace per task or agent run, a span per LLM request and tool call (model, tokens, latency)",
         "OpenObserve assistant: O2 gateway (:3001, SSE), agent runs with O2 MCP tools, evidence links and navigation",
-        "MCP client + Tool Guard; executor sidecar (bubblewrap) behind the sandbox guard"
+        "MCP client + Tool Guard; executor sidecar (bubblewrap) behind the sandbox guard",
+        "Internal run API for routines (:3001 /internal/v1/runs): Bearer key per caller, the routine's packs only, structured output through submit_output, own concurrency slots, job model chain"
       ]
     },
     {
@@ -478,7 +511,7 @@
       "items": [
         "Live verification: Slack, Onyx and the O2 assistant end to end",
         "Slack answers and alert triage on the Agent runtime",
-        "Alert webhook, scheduler, GitHub/GitLab bot"
+        "Routine CronJobs (fire, periods, leases, Outbox), alert webhook, GitHub/GitLab bot"
       ]
     }
   ]

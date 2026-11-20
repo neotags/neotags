@@ -23,9 +23,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- else -}}{{ default "default" .Values.serviceAccount.name }}{{- end -}}
 {{- end }}
 
-{{/* The neotags config file: .Values.config plus what the chart owns (the skill pack dir, the sandbox backend and slots). */}}
+{{/* The neotags config file: .Values.config and .Values.routines, plus what the chart owns (the skill pack dir, the sandbox backend and slots). */}}
 {{- define "neotags.config" -}}
 {{- $cfg := deepCopy .Values.config -}}
+{{- with .Values.routines -}}
+{{- $_ := set $cfg "routines" (deepCopy .) -}}
+{{- end -}}
 {{- if .Values.skillPacks.configMap -}}
 {{- $sp := default dict $cfg.skillPacks -}}
 {{- $_ := set $sp "dir" "/etc/neotags/skills" -}}
@@ -49,6 +52,25 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- if and .Values.config.o2Gateway .Values.config.o2Gateway.enabled -}}true{{- end -}}
 {{- end }}
 
+{{/* config.jobsApi.enabled: routines' internal API, on the O2 gateway's port. */}}
+{{- define "neotags.jobsApiEnabled" -}}
+{{- if and .Values.config.jobsApi .Values.config.jobsApi.enabled -}}true{{- end -}}
+{{- end }}
+
+{{/* The in-cluster agent port (o2Gateway.port) is open: the O2 gateway, the internal API, or both. Agent runs drain on it. */}}
+{{- define "neotags.port3001Enabled" -}}
+{{- if or (include "neotags.o2Enabled" .) (include "neotags.jobsApiEnabled" .) -}}true{{- end -}}
+{{- end }}
+
+{{/*
+app.kubernetes.io/component of the Pods that call the internal API (routines' CronJob Pods): "<bot name>-job", e.g.
+moose-job. The NetworkPolicy lets Pods with it in; nothing else in the namespace reaches the internal API.
+*/}}
+{{- define "neotags.jobComponent" -}}
+{{- $bot := default "neotags" (and .Values.config.bot .Values.config.bot.name) -}}
+{{- printf "%s-job" (regexReplaceAll "[^a-z0-9-]+" (lower $bot) "-" | trimAll "-") | trunc 63 -}}
+{{- end }}
+
 {{- define "neotags.o2Port" -}}
 {{- (and .Values.config.o2Gateway .Values.config.o2Gateway.port) | default 3001 -}}
 {{- end }}
@@ -64,12 +86,12 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- end }}
 
 {{/*
-terminationGracePeriodSeconds: the value, else with the O2 gateway the drain plus 20 s (the process still closes the
-O2 server and MCP and flushes traces after it; 660 with the defaults), else 30.
+terminationGracePeriodSeconds: the value, else with agent runs (O2 gateway or internal API) the drain plus 20 s (the
+process still closes the agent port and MCP and flushes traces after it; 660 with the defaults), else 30.
 */}}
 {{- define "neotags.grace" -}}
 {{- if not (include "neotags.isUnset" .Values.terminationGracePeriodSeconds) -}}{{ .Values.terminationGracePeriodSeconds }}
-{{- else if include "neotags.o2Enabled" . -}}{{ addf (ceil (float64 (include "neotags.drainSec" .))) 20 | int }}
+{{- else if include "neotags.port3001Enabled" . -}}{{ addf (ceil (float64 (include "neotags.drainSec" .))) 20 | int }}
 {{- else -}}30{{- end -}}
 {{- end }}
 
