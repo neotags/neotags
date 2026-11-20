@@ -2,10 +2,10 @@ import { z } from "zod";
 import { scheduleError, timeZoneError } from "../routines/schedule.js";
 
 /**
- * A routine name, which is also its CronJob's name: the Job controller appends `-<minutes>` (8+ digits) and a Job
- * name is at most 63 characters.
+ * A routine name, which is also its CronJob's name: a DNS label (no dash at the end), at most 52 characters, since
+ * the Job controller appends `-<minutes>` (8+ digits) and a Job name is at most 63.
  */
-export const ROUTINE_NAME = /^[a-z][a-z0-9-]{0,51}$/;
+export const ROUTINE_NAME = /^[a-z](?:[a-z0-9-]{0,50}[a-z0-9])?$/;
 
 // Objects here are strict: a misspelt key (`enable: false`, `schedul:`) must fail at startup, not be dropped and leave
 // the routine running with a default.
@@ -88,7 +88,7 @@ export const routineSchema = z.discriminatedUnion("kind", [agentRoutine, pipelin
 export type Routine = z.infer<typeof routineSchema>;
 
 export const routinesSchema = z
-  .record(z.string().regex(ROUTINE_NAME, "lowercase letters, digits and dashes, starting with a letter, at most 52"), routineSchema)
+  .record(z.string().regex(ROUTINE_NAME, "lowercase letters, digits and dashes, starting with a letter and not ending in a dash, at most 52"), routineSchema)
   .default({});
 
 /** Where routines may deliver, and where everything goes on a dry run. */

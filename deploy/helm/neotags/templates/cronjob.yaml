@@ -13,8 +13,8 @@ The bot checks each routine in full at startup; the chart checks only what it ne
 {{- with .Values.config.jobsApi.callers -}}{{- with .job -}}{{- $keyEnv = .keyFromEnv -}}{{- end -}}{{- end -}}
 {{- $url := printf "http://%s.%s:%v" (include "neotags.fullname" .) .Release.Namespace (include "neotags.o2ServicePort" .) -}}
 {{- range $name, $r := .Values.routines }}
-{{- if not (regexMatch "^[a-z][a-z0-9-]{0,51}$" $name) -}}
-{{- fail (printf "routines.%s: a routine name is lowercase letters, digits and dashes, starting with a letter, at most 52 (it is the CronJob's name)" $name) -}}
+{{- if not (regexMatch "^[a-z]([a-z0-9-]{0,50}[a-z0-9])?$" $name) -}}
+{{- fail (printf "routines.%s: a routine name is lowercase letters, digits and dashes, starting with a letter and not ending in a dash, at most 52 (it is the CronJob's name)" $name) -}}
 {{- end -}}
 {{- if not (and $r.trigger $r.trigger.schedule $r.trigger.timeZone) -}}
 {{- fail (printf "routines.%s: trigger.schedule and trigger.timeZone are required" $name) -}}

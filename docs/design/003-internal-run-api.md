@@ -72,7 +72,7 @@ A job run's `invoke_agent job` span has `gen_ai.agent.name = job`, `neotags.rout
 
 ### Configuration
 
-`routines.<name>` (`src/config/routines.ts`; every field in `config/neotags.example.yaml`). The name is the CronJob's: lowercase letters, digits and dashes, starting with a letter, at most 52 (the Job controller appends `-<minutes>`, and a Job name is at most 63). Every routine is checked in full at startup, enabled or not, and the process refuses to start on any problem; keys are strict, so a misspelt one fails instead of being dropped.
+`routines.<name>` (`src/config/routines.ts`; every field in `config/neotags.example.yaml`). The name is the CronJob's: lowercase letters, digits and dashes, starting with a letter and not ending in a dash, at most 52 (the Job controller appends `-<minutes>`, and a Job name is at most 63). Every routine is checked in full at startup, enabled or not, and the process refuses to start on any problem; keys are strict, so a misspelt one fails instead of being dropped.
 
 | Field | Rule |
 |---|---|

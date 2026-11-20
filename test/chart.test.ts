@@ -96,5 +96,6 @@ describe.skipIf(!helm)("chart: routines", () => {
   it("refuses routines without the internal API, and names a CronJob cannot have", () => {
     expect(renderError("config.jobsApi.enabled=false")).toMatch(/routines need config.jobsApi.enabled/);
     expect(renderError("routines.Bad_Name.trigger.schedule=x")).toMatch(/routines.Bad_Name: a routine name/);
+    expect(renderError("routines.daily-.trigger.schedule=x")).toMatch(/routines.daily-: a routine name/);
   });
 });

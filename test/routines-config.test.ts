@@ -78,6 +78,8 @@ describe("routines config", () => {
     expect(named("Daily")).toThrow(/lowercase/);
     expect(named("1daily")).toThrow(/lowercase/);
     expect(named("a".repeat(53))).toThrow(/at most 52/);
+    expect(named("daily-")).toThrow(/not ending in a dash/);
+    expect(named("a")().routines).toHaveProperty("a");
     expect(named("a".repeat(52))().routines).toHaveProperty("a".repeat(52));
   });
 
