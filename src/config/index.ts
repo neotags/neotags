@@ -67,6 +67,10 @@ const fileSchema = z.object({
   bot: z.object({ name: z.string().min(1).default("neotags") }).prefault({}),
   slack: z
     .object({
+      // events-http: Slack POSTs events to /slack/events (public HTTPS URL; SLACK_SIGNING_SECRET).
+      // socket: outbound WebSocket to Slack, no inbound events (SLACK_APP_TOKEN, scope connections:write).
+      mode: z.enum(["events-http", "socket"]).default("events-http"),
+      // events-http: the Events server; socket: only /healthz.
       port: z.number().int().default(3000),
       // empty = every public channel the bot is a member of
       allowedChannels: z.array(z.string()).default([]),
@@ -387,7 +391,10 @@ const fileSchema = z.object({
 
 export interface Secrets {
   slackBotToken: string;
-  slackSigningSecret: string;
+  /** Required with slack.mode events-http. */
+  slackSigningSecret?: string;
+  /** Required with slack.mode socket: the app-level token (xapp-...). */
+  slackAppToken?: string;
   onyxApiKey?: string;
   /** Bearer key for the LLM gateway; optional for gateways that need none. */
   llmApiKey?: string;
@@ -469,7 +476,8 @@ export function loadConfig(
     ...file,
     secrets: {
       slackBotToken: required(env, "SLACK_BOT_TOKEN"),
-      slackSigningSecret: required(env, "SLACK_SIGNING_SECRET"),
+      slackSigningSecret: file.slack.mode === "events-http" ? required(env, "SLACK_SIGNING_SECRET") : env.SLACK_SIGNING_SECRET || undefined,
+      slackAppToken: file.slack.mode === "socket" ? required(env, "SLACK_APP_TOKEN") : undefined,
       onyxApiKey: env.ONYX_API_KEY,
       llmApiKey: env.LLM_API_KEY || undefined,
       o2AgentKey,

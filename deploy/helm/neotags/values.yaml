@@ -12,7 +12,8 @@ config:
   bot:
     name: moose
   slack:
-    port: 3000
+    mode: events-http   # or socket: outbound WebSocket (SLACK_APP_TOKEN in the Secret instead of SLACK_SIGNING_SECRET); no Ingress
+    port: 3000          # events-http: the Events server; socket: only /healthz (probes)
     allowedChannels: []
     allowedUsers: []
     allowPrivateChannels: false   # true also records private-channel threads (see config example)
@@ -66,7 +67,7 @@ config:
 # skill packs a routine's runs may load (each in config.skillPacks.packs).
 routines: {}
 
-# Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ONYX_API_KEY, LLM_API_KEY (optional), O2_AGENT_API_KEY (with
+# Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET (SLACK_APP_TOKEN with slack.mode socket), ONYX_API_KEY, LLM_API_KEY (optional), O2_AGENT_API_KEY (with
 # config.o2Gateway.enabled), the jobsApi callers' keys (config.jobsApi.callers[].keyFromEnv) and the MCP header values
 # named in config.mcp.servers[].headersFromEnv.
 # Create it out of band (External Secrets, sealed secrets, ...) and reference it here. Only the neotags container gets it.
@@ -153,7 +154,7 @@ networkPolicy:
       podSelector:
         matchLabels: { k8s-app: kube-dns }
 
-# Slack Events API needs a public HTTPS URL routed to /slack/events.
+# Slack Events API (config.slack.mode events-http) needs a public HTTPS URL routed to /slack/events; socket mode needs none.
 ingress:
   enabled: false
   className: ""

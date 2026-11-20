@@ -61,7 +61,7 @@ if (cfg.onyx.baseUrl) {
 const skills = selectSkills(allSkills(), cfg.skills.disabled);
 log.info({ skills: skills.map((s) => s.name), disabled: cfg.skills.disabled }, "skills registered");
 
-const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
+const slackGateway = createSlack(cfg, log, ({ notifier, slack }) =>
   new Router({
     botName: cfg.bot.name,
     notifier,
@@ -95,6 +95,46 @@ const { app, drain } = createSlack(cfg, log, ({ notifier, slack }) =>
 let runs: RunManager | undefined;
 let mcp: McpHub | undefined;
 let port: PortServer | undefined;
+
+let shuttingDown = false;
+async function shutdown(sig: string, exitCode = 0, cause?: unknown) {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log.info({ sig, ...(cause !== undefined && { err: cause }) }, "shutting down");
+  let code = exitCode;
+  port?.stopAccepting();
+  try {
+    await slackGateway.stop(); // stop accepting new events
+  } catch (err) {
+    log.error({ err }, "failed to stop cleanly");
+    code = 1;
+  }
+  // Slack tasks are short; agent runs get agent.drainSec, which the pod's grace period must cover.
+  const [tasksDone, runsDone] = await Promise.all([slackGateway.drain(DRAIN_TIMEOUT_MS), runs?.drain(cfg.agent.drainSec * 1000) ?? true]);
+  if (!tasksDone) {
+    log.warn("timed out waiting for in-flight tasks");
+    code = 1;
+  }
+  if (!runsDone) {
+    log.warn("agent runs still going after agent.drainSec were aborted");
+    code = 1;
+  }
+  await port?.close();
+  await mcp?.close().catch((err: unknown) => log.warn({ err }, "failed to close MCP clients"));
+  if (telemetry) {
+    const timeout = new Promise<"timeout">((r) => setTimeout(r, TRACE_FLUSH_TIMEOUT_MS, "timeout").unref());
+    const flushed = await Promise.race([telemetry.shutdown().then(() => "ok" as const), timeout]).catch((err: unknown) => {
+      log.warn({ err }, "failed to flush traces");
+      return "failed" as const;
+    });
+    if (flushed === "timeout") log.warn("timed out flushing traces");
+  }
+  process.exit(code);
+}
+// Registered before anything listens: a SIGTERM during startup (the agent API is already taking runs while Slack
+// connects) still drains instead of killing runs mid-flight.
+for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => void shutdown(sig));
+
 if (cfg.o2Gateway.enabled || cfg.jobsApi.enabled) {
   if (!gateway) log.error("o2Gateway or jobsApi is enabled but no LLM is configured; neither is started");
   else {
@@ -118,42 +158,5 @@ if (cfg.o2Gateway.enabled || cfg.jobsApi.enabled) {
   }
 }
 
-await app.start(cfg.slack.port);
-log.info({ port: cfg.slack.port, bot: cfg.bot.name }, "neotags started");
-
-let shuttingDown = false;
-async function shutdown(sig: string) {
-  if (shuttingDown) return;
-  shuttingDown = true;
-  log.info({ sig }, "shutting down");
-  let code = 0;
-  port?.stopAccepting();
-  try {
-    await app.stop(); // stop accepting new events
-  } catch (err) {
-    log.error({ err }, "failed to stop cleanly");
-    code = 1;
-  }
-  // Slack tasks are short; agent runs get agent.drainSec, which the pod's grace period must cover.
-  const [tasksDone, runsDone] = await Promise.all([drain(DRAIN_TIMEOUT_MS), runs?.drain(cfg.agent.drainSec * 1000) ?? true]);
-  if (!tasksDone) {
-    log.warn("timed out waiting for in-flight tasks");
-    code = 1;
-  }
-  if (!runsDone) {
-    log.warn("agent runs still going after agent.drainSec were aborted");
-    code = 1;
-  }
-  await port?.close();
-  await mcp?.close().catch((err: unknown) => log.warn({ err }, "failed to close MCP clients"));
-  if (telemetry) {
-    const timeout = new Promise<"timeout">((r) => setTimeout(r, TRACE_FLUSH_TIMEOUT_MS, "timeout").unref());
-    const flushed = await Promise.race([telemetry.shutdown().then(() => "ok" as const), timeout]).catch((err: unknown) => {
-      log.warn({ err }, "failed to flush traces");
-      return "failed" as const;
-    });
-    if (flushed === "timeout") log.warn("timed out flushing traces");
-  }
-  process.exit(code);
-}
-for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => void shutdown(sig));
+await slackGateway.start((err) => void shutdown("slack-token-refused", 1, err));
+log.info({ port: cfg.slack.port, bot: cfg.bot.name, mode: cfg.slack.mode }, "neotags started");

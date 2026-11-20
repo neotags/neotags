@@ -125,7 +125,7 @@ Document shape (**verified against Onyx `v5.0.0-beta.1` source**, `backend/onyx/
 bot:
   name: moose                 # display name only; matching uses bot user ID from auth.test
 slack:
-  mode: events-http           # or socket
+  mode: events-http           # or socket (env SLACK_APP_TOKEN instead of SLACK_SIGNING_SECRET)
   allowed_channels: ["C0123…"]   # empty = all channels the bot is in
   allowed_users: []           # empty = everyone in workspace
 onyx:
@@ -147,7 +147,7 @@ Mention detection uses the bot's **user ID**, so renaming the bot (Slack app dis
 ## 7. Deployment (EKS)
 
 - One `Deployment`, 1 replica by default: the Slack event dedupe is in-memory per pod. More replicas are safe for kb-collect (deterministic Onyx IDs make duplicate delivery harmless) but not for non-idempotent skills until dedupe moves to a shared store. Graceful shutdown drains in-flight tasks (20s) on SIGTERM.
-- Ingress → Slack Events API endpoint (needs a public HTTPS URL; if that is not acceptable, use Socket Mode, which needs only egress).
+- Ingress → Slack Events API endpoint (`slack.mode: events-http`, needs a public HTTPS URL; if that is not acceptable, `slack.mode: socket` needs only egress and keeps just `/healthz` on the port).
 - Secrets (Slack bot token, signing secret, Onyx key, LLM gateway key) via our existing secret mechanism; IRSA for any AWS access.
 - Stateless in v1: no database. Add Postgres/Redis when we need sessions, schedules or durable queues.
 - Observability: structured JSON logs, Prometheus metrics (`neotags_tasks_total{skill,status}`, latency, LLM tokens, Onyx errors), shipped through the existing L1 stack.
@@ -232,7 +232,7 @@ Not bugs: deliberate v1 scope. Grouped by area; none are scheduled.
 | # | Decision |
 |---|---|
 | Q1 | **TypeScript on pi.** pi is TypeScript, and the SRE Agent is built on it, so we share runtime, tools and skills. Bolt (Slack) and Octokit/Probot (GitHub) are first-class in TS. The work is I/O-bound LLM orchestration, so Go/Rust performance gains are irrelevant, and Rust would add cost without benefit. Choose Go only if the team won't maintain TS; you'd then lose pi and rebuild the agent loop. |
-| Q2 | **Bidirectional from day one.** Inbound: Slack events/interactions (and later GitHub/GitLab webhooks). Outbound: agent-initiated posts (alerts, weekly reports) via a `notify` capability. Transport: **Slack Events API over HTTP**, since webhooks (alerts, GitHub) need an HTTP ingress anyway; Socket Mode is kept as a dev fallback. See §13. |
+| Q2 | **Bidirectional from day one.** Inbound: Slack events/interactions (and later GitHub/GitLab webhooks). Outbound: agent-initiated posts (alerts, weekly reports) via a `notify` capability. Transport: **Slack Events API over HTTP**, since webhooks (alerts, GitHub) need an HTTP ingress anyway; Socket Mode is a second, supported mode (`slack.mode: socket`, SRE-51): deployments that cannot expose a public URL for Slack (moose on the staging NLB, whose SG would otherwise have to be world-open) use it. See §13. |
 | Q3 | **KB visible to everyone for now.** Docs are written with a `slack_user`/`channel` metadata so Slack-user → Onyx-user (OIDC) ACLs can be added later without re-ingesting. Public channels only until then. |
 | Q4 | Onyx **5.0 beta**, namespace `onyx`. Payload and auth verified from source at tag `v5.0.0-beta.1` (§5); only a live smoke test remains (milestone 3). |
 | Q5 | **Auto-save + Undo.** |

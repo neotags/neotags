@@ -3,6 +3,8 @@ import { loadConfig } from "../src/config/index.js";
 import { Dedupe } from "../src/gateway/dedupe.js";
 import { isDmMessage } from "../src/gateway/dm.js";
 import { stripMention } from "../src/gateway/mention.js";
+import { pino } from "pino";
+import { createSlack } from "../src/gateway/slack.js";
 import { authorize } from "../src/guardrails/policy.js";
 
 describe("stripMention", () => {
@@ -50,6 +52,15 @@ describe("loadConfig", () => {
     const on = loadConfig({ ...env, NEOTAGS_CONFIG: "f" }, () => "slack:\n  allowPrivateChannels: true\n");
     expect(on.slack.allowPrivateChannels).toBe(true);
   });
+  it("needs the signing secret in events-http mode and the app token in socket mode", () => {
+    expect(() => loadConfig({ SLACK_BOT_TOKEN: "x" })).toThrow(/SLACK_SIGNING_SECRET/);
+    const socket = { SLACK_BOT_TOKEN: "x", NEOTAGS_CONFIG: "f" };
+    const read = () => "slack:\n  mode: socket\n";
+    expect(() => loadConfig(socket, read)).toThrow(/SLACK_APP_TOKEN/);
+    const c = loadConfig({ ...socket, SLACK_APP_TOKEN: "xapp-1" }, read);
+    expect(c.secrets.slackAppToken).toBe("xapp-1");
+    expect(c.secrets.slackSigningSecret).toBeUndefined();
+  });
   it("reads yaml and requires secrets", () => {
     const c = loadConfig({ ...env, NEOTAGS_CONFIG: "f" }, () => "bot:\n  name: moose\n");
     expect(c.bot.name).toBe("moose");
@@ -84,5 +95,35 @@ describe("Dedupe.forget", () => {
     expect(d.isDuplicate("e1")).toBe(false);
     d.forget("e1");
     expect(d.isDuplicate("e1")).toBe(false);
+  });
+});
+
+describe("createSlack", () => {
+  const cfg = (mode: "events-http" | "socket") =>
+    loadConfig(
+      { SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", SLACK_APP_TOKEN: "xapp-1", NEOTAGS_CONFIG: "f" },
+      () => `slack:\n  mode: ${mode}\n  port: 0\n`,
+    );
+  const build = (mode: "events-http" | "socket") =>
+    createSlack(cfg(mode), pino({ level: "silent" }), () => ({}) as never);
+
+  it("turns the socket client's own reconnect off: superviseSocket owns it", () => {
+    const { app } = build("socket");
+    const client = (app as unknown as { receiver: { client: { autoReconnectEnabled: boolean } } }).receiver.client;
+    expect(client.autoReconnectEnabled).toBe(false);
+  });
+
+  it("builds an app in both modes", () => {
+    expect(build("events-http").app).toBeDefined();
+    expect(build("socket").app).toBeDefined();
+  });
+
+  it("stops safely before it was started (a signal during startup), and then never starts", async () => {
+    for (const mode of ["events-http", "socket"] as const) {
+      const g = build(mode);
+      await g.stop();
+      await g.start(() => {});
+      await g.stop();
+    }
   });
 });
