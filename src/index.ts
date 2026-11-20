@@ -2,11 +2,13 @@ import { pino } from "pino";
 import { createLlm, type LlmClient } from "./agent/llm.js";
 import { createGateway, type Gateway } from "./agent/models.js";
 import { CHAINS, inputBudgetTokens, llmConfigured, loadConfig } from "./config/index.js";
-import { createO2Gateway, type O2Gateway } from "./gateway/o2.js";
+import { createPortServer, type PortServer, type Route } from "./gateway/http.js";
+import { createInternalApi } from "./gateway/internal.js";
+import { createO2Gateway } from "./gateway/o2.js";
 import { createSlack } from "./gateway/slack.js";
 import { startMcp, type McpHub } from "./mcp/index.js";
 import { Router } from "./router/index.js";
-import { createRunManager, entryVersions, loadConfiguredSkillPacks, type RunManager } from "./runs/index.js";
+import { createJobRunner, createRunManager, entryVersions, loadConfiguredSkillPacks, type RunManager } from "./runs/index.js";
 import { createSkillExecutor } from "./sandbox/index.js";
 import { allSkills, selectSkills } from "./skills/registry.js";
 import { startTelemetry } from "./telemetry/index.js";
@@ -88,10 +90,11 @@ const slackGateway = createSlack(cfg, log, ({ notifier, slack }) =>
       },
   }),
 );
-// Agent runs (the O2 entry today): MCP tools, the sandbox and the skill packs behind the run manager.
+// Agent runs (the O2 entry and routines' internal API): MCP tools, the sandbox and the skill packs behind the run
+// manager. Both share the in-cluster port (o2Gateway.port), routed by path.
 let runs: RunManager | undefined;
 let mcp: McpHub | undefined;
-let o2: O2Gateway | undefined;
+let port: PortServer | undefined;
 
 let shuttingDown = false;
 async function shutdown(sig: string, exitCode = 0, cause?: unknown) {
@@ -99,7 +102,7 @@ async function shutdown(sig: string, exitCode = 0, cause?: unknown) {
   shuttingDown = true;
   log.info({ sig, ...(cause !== undefined && { err: cause }) }, "shutting down");
   let code = exitCode;
-  o2?.stopAccepting();
+  port?.stopAccepting();
   try {
     await slackGateway.stop(); // stop accepting new events
   } catch (err) {
@@ -116,7 +119,7 @@ async function shutdown(sig: string, exitCode = 0, cause?: unknown) {
     log.warn("agent runs still going after agent.drainSec were aborted");
     code = 1;
   }
-  await o2?.close();
+  await port?.close();
   await mcp?.close().catch((err: unknown) => log.warn({ err }, "failed to close MCP clients"));
   if (telemetry) {
     const timeout = new Promise<"timeout">((r) => setTimeout(r, TRACE_FLUSH_TIMEOUT_MS, "timeout").unref());
@@ -128,12 +131,12 @@ async function shutdown(sig: string, exitCode = 0, cause?: unknown) {
   }
   process.exit(code);
 }
-// Registered before anything listens: a SIGTERM during startup (the O2 entry is already taking runs while Slack
+// Registered before anything listens: a SIGTERM during startup (the agent API is already taking runs while Slack
 // connects) still drains instead of killing runs mid-flight.
 for (const sig of ["SIGTERM", "SIGINT"] as const) process.on(sig, () => void shutdown(sig));
 
-if (cfg.o2Gateway.enabled) {
-  if (!gateway) log.error("o2Gateway is enabled but no LLM is configured; the O2 entry is not started");
+if (cfg.o2Gateway.enabled || cfg.jobsApi.enabled) {
+  if (!gateway) log.error("o2Gateway or jobsApi is enabled but no LLM is configured; neither is started");
   else {
     const index = await loadConfiguredSkillPacks(cfg, log);
     const versions = entryVersions(cfg, index);
@@ -142,9 +145,16 @@ if (cfg.o2Gateway.enabled) {
     mcp = await startMcp(cfg, log);
     const executor = createSkillExecutor(cfg, index, log);
     runs = createRunManager(cfg, { gateway, index, log, mcp, executor });
-    o2 = createO2Gateway({ cfg: cfg.o2Gateway, key: cfg.secrets.o2AgentKey!, runs, log });
-    await o2.listen(cfg.o2Gateway.port);
-    log.info({ port: cfg.o2Gateway.port, orgs: cfg.o2Gateway.orgs }, "o2 gateway listening");
+    const routes: Record<string, Route> = {};
+    if (cfg.o2Gateway.enabled) routes["/o2_agent/"] = createO2Gateway({ cfg: cfg.o2Gateway, key: cfg.secrets.o2AgentKey!, runs, log }).route;
+    if (cfg.jobsApi.enabled) {
+      const g = gateway;
+      const jobs = createJobRunner({ cfg, runs, log, modelAvailable: () => g.policy.steps("job").some((s) => s.breaker.state !== "open") });
+      routes["/internal/"] = createInternalApi({ keys: cfg.secrets.jobKeys ?? {}, jobs, log }).route;
+    }
+    port = createPortServer({ routes, log, name: "agent api" });
+    await port.listen(cfg.o2Gateway.port);
+    log.info({ port: cfg.o2Gateway.port, o2: cfg.o2Gateway.enabled, jobsApi: cfg.jobsApi.enabled, orgs: cfg.o2Gateway.orgs, routines: Object.keys(cfg.routines) }, "agent api listening");
   }
 }
 

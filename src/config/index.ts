@@ -11,6 +11,14 @@ export const RUN_SOURCES = ["o2", "slack", "job"] as const;
 export type RunSource = (typeof RUN_SOURCES)[number];
 /** An O2 org identifier (the `{org}` of its API paths). */
 export const O2_ORG_ID = /^[A-Za-z0-9_-]{1,64}$/;
+/** Callers of the internal API (`jobsApi.callers`); the caller a key belongs to is the run's source. */
+export const JOB_CALLERS = ["job"] as const satisfies readonly RunSource[];
+export type JobCaller = (typeof JOB_CALLERS)[number];
+/**
+ * A routine name, which is also its CronJob's name: the Job controller appends `-<minutes>` (8+ digits) and a Job
+ * name is at most 63 characters.
+ */
+export const ROUTINE_NAME = /^[a-z][a-z0-9-]{0,51}$/;
 
 const effortSchema = z.enum(EFFORTS);
 
@@ -173,10 +181,11 @@ const fileSchema = z.object({
           if (thinks && !(model.reasoning ?? llm.reasoning)) {
             ctx.addIssue({ code: "custom", path, message: `model "${entry.model}" is not a reasoning model; only effort "none" applies` });
           }
-          // Agent runs stream through pi-ai, which lowers a level the model does not map; "max" must be mapped.
+          // Agent runs (agent chain; job for routines) stream through pi-ai, which lowers a level the model does not
+          // map; "max" must be mapped.
           const max = [entry.effort, entry.finalEffort].includes("max");
-          if (name === "agent" && max && typeof model.thinkingLevelMap?.max !== "string") {
-            ctx.addIssue({ code: "custom", path, message: `model "${entry.model}" needs thinkingLevelMap.max for effort "max" in the agent chain` });
+          if ((name === "agent" || name === "job") && max && typeof model.thinkingLevelMap?.max !== "string") {
+            ctx.addIssue({ code: "custom", path, message: `model "${entry.model}" needs thinkingLevelMap.max for effort "max" in the ${name} chain` });
           }
         });
       }
@@ -194,7 +203,7 @@ const fileSchema = z.object({
         .object({
           slack: z.number().positive().default(360),
           o2: z.number().positive().default(600),
-          job: z.number().positive().default(600),
+          job: z.number().positive().default(900),
         })
         .prefault({}),
       finalReserveSec: z.number().nonnegative().default(90),
@@ -322,6 +331,26 @@ const fileSchema = z.object({
       maxQueued: z.number().int().positive().default(8),
     })
     .prefault({}),
+  // The internal API for routines (`POST /internal/v1/runs`, docs/design/003-internal-run-api.md), on the O2
+  // gateway's port (o2Gateway.port), which it opens even when the O2 gateway is off. In-cluster callers only.
+  jobsApi: z
+    .object({
+      enabled: z.boolean().default(false),
+      // Who may call, by name: the name is the run's source; the Bearer key comes from the env var named here.
+      callers: z.partialRecord(z.enum(JOB_CALLERS), z.object({ keyFromEnv: z.string().min(1) })).default({}),
+      // Runs of routines (and, later, their sandbox steps) at once in this process. Apart from
+      // agent.concurrency.total, so a routine never takes a slot from an interactive question, nor the other way.
+      concurrency: z.number().int().positive().default(1),
+    })
+    .superRefine((j, ctx) => {
+      if (j.enabled && Object.keys(j.callers).length === 0) ctx.addIssue({ code: "custom", path: ["callers"], message: "jobsApi.enabled needs at least one caller" });
+    })
+    .prefault({}),
+  // Routines by name. Only what runs need so far: the skill packs a routine's runs may load (and execute through,
+  // when a pack declares `sandbox`); a request can narrow them, never widen them. Other fields are kept as they are.
+  routines: z
+    .record(z.string().regex(ROUTINE_NAME, "lowercase letters, digits and dashes, starting with a letter, at most 52"), z.object({ packs: z.array(z.string().min(1)).default([]) }).loose())
+    .default({}),
   // LLM traces over OTLP (OpenObserve, Langfuse, an OTel collector). The exporter is configured with the standard
   // OTEL_EXPORTER_OTLP_* env vars; tracing is off unless an endpoint is set.
   telemetry: z
@@ -353,6 +382,11 @@ const fileSchema = z.object({
       }
     });
   }
+  for (const [name, routine] of Object.entries(cfg.routines)) {
+    routine.packs.forEach((p, i) => {
+      if (!cfg.skillPacks.packs.includes(p)) ctx.addIssue({ code: "custom", path: ["routines", name, "packs", i], message: `skill pack "${p}" is not in skillPacks.packs` });
+    });
+  }
 });
 
 export interface Secrets {
@@ -366,6 +400,8 @@ export interface Secrets {
   llmApiKey?: string;
   /** Shared secret O2 sends as x-o2-agent-key; required when o2Gateway is enabled. */
   o2AgentKey?: string;
+  /** Bearer key of each jobsApi caller (from its keyFromEnv); set when jobsApi is enabled. */
+  jobKeys?: Partial<Record<JobCaller, string>>;
 }
 
 export type Config = z.infer<typeof fileSchema> & { secrets: Secrets };
@@ -392,6 +428,19 @@ export function llmConfigured(llm: Config["llm"]): boolean {
 /** Prompt budget in tokens: the explicit setting, else half the context window minus the summary output. */
 export function inputBudgetTokens(llm: Config["llm"]): number {
   return llm.summarizeMaxInputTokens ?? Math.max(1000, Math.floor(llm.contextWindow / 2) - llm.outputTokens.summary);
+}
+
+/** Each caller's key. Keys must differ from each other and from O2's: the caller a key matches is the run's source. */
+function jobKeys(env: NodeJS.ProcessEnv, callers: Config["jobsApi"]["callers"], o2Key: string | undefined): Partial<Record<JobCaller, string>> {
+  const keys: Partial<Record<JobCaller, string>> = {};
+  const seen = new Set(o2Key ? [o2Key] : []);
+  for (const [name, c] of Object.entries(callers) as [JobCaller, { keyFromEnv: string }][]) {
+    const key = required(env, c.keyFromEnv);
+    if (seen.has(key)) throw new Error(`jobsApi.callers.${name}: the key in ${c.keyFromEnv} is also another caller's (or O2_AGENT_API_KEY); give each its own`);
+    seen.add(key);
+    keys[name] = key;
+  }
+  return keys;
 }
 
 export function loadConfig(
@@ -422,6 +471,7 @@ export function loadConfig(
     skills: { ...raw.skills, ...skillsEnv },
     telemetry: { ...raw.telemetry, ...telemetryEnv },
   });
+  const o2AgentKey = file.o2Gateway.enabled ? required(env, "O2_AGENT_API_KEY") : undefined;
   return {
     ...file,
     secrets: {
@@ -430,7 +480,8 @@ export function loadConfig(
       slackAppToken: file.slack.mode === "socket" ? required(env, "SLACK_APP_TOKEN") : undefined,
       onyxApiKey: env.ONYX_API_KEY,
       llmApiKey: env.LLM_API_KEY || undefined,
-      o2AgentKey: file.o2Gateway.enabled ? required(env, "O2_AGENT_API_KEY") : undefined,
+      o2AgentKey,
+      jobKeys: file.jobsApi.enabled ? jobKeys(env, file.jobsApi.callers, o2AgentKey) : undefined,
     },
   };
 }

@@ -20,6 +20,11 @@ export interface RunManagerOptions {
   runner: AgentRunner;
   /** Runs at once; the rest wait in submission order. */
   concurrency: number;
+  /**
+   * Sources whose callers limit their own concurrency (routines: jobsApi.concurrency). Their runs neither wait for
+   * nor take one of `concurrency`, and are not rate limited; one run per session still holds.
+   */
+  selfLimited?: readonly RunSource[];
   perUserPerHour: number;
   /** Emails not counted against perUserPerHour; the concurrency limit still applies. */
   exemptUsers?: readonly string[];
@@ -95,25 +100,45 @@ export class RunManager {
   private limiter: RateLimiter;
   private exempt: Set<string>;
   private draining = false;
+  private selfLimited: ReadonlySet<RunSource>;
 
   constructor(private o: RunManagerOptions) {
     this.limiter = new RateLimiter({ limit: o.perUserPerHour, windowMs: 3600_000, ...(o.now && { now: o.now }) });
     this.exempt = new Set((o.exemptUsers ?? []).map((user) => limitKey({ user, sessionId: "" })));
+    this.selfLimited = new Set(o.selfLimited ?? []);
+  }
+
+  /** Shutting down: new runs are refused. */
+  get isDraining(): boolean {
+    return this.draining;
+  }
+
+  private pooled(run: Run): boolean {
+    return !this.selfLimited.has(run.input.source);
+  }
+
+  /** Running runs that hold one of `concurrency`. */
+  private pooledRunning(): number {
+    let n = 0;
+    for (const r of this.running.values()) if (this.pooled(r)) n++;
+    return n;
   }
 
   private now(): number {
     return this.o.now?.() ?? Date.now();
   }
 
+  /** Runs of the shared pool (`concurrency`): self-limited sources are not counted. */
   stats(): { running: number; queued: number } {
-    return { running: this.running.size, queued: this.queue.length };
+    return { running: this.pooledRunning(), queued: this.queue.filter((r) => this.pooled(r)).length };
   }
 
   submit(input: RunInput, observer: RunObserver = {}): SubmitResult {
     if (this.draining) return { ok: false, code: "shutting_down", message: notice("shutting_down", input.question) };
     const key = limitKey(input);
     const exempt = this.exempt.has(key);
-    const taken = exempt ? { ok: true as const } : this.limiter.take(key);
+    // Self-limited sources are not rate limited either, but are not "exempt users" in the logs.
+    const taken = exempt || this.selfLimited.has(input.source) ? { ok: true as const } : this.limiter.take(key);
     if (!taken.ok) {
       const retryAfterSec = Math.ceil(taken.retryAfterMs / 1000);
       return { ok: false, code: "rate_limited", message: `rate limit: ${this.o.perUserPerHour} runs per hour`, retryAfterSec };
@@ -155,7 +180,7 @@ export class RunManager {
 
   /** Would a run of this session wait now (no free slot, or its session is busy)? */
   wouldQueue(sessionId: string): boolean {
-    return this.running.size >= this.o.concurrency || this.active(sessionId);
+    return this.pooledRunning() >= this.o.concurrency || this.active(sessionId);
   }
 
   /** Is a run of this session queued or running? */
@@ -206,8 +231,10 @@ export class RunManager {
   }
 
   private schedule(): void {
+    let pooled = this.pooledRunning();
     for (const run of [...this.queue]) {
-      if (this.running.size >= this.o.concurrency) break;
+      // A full pool holds back only its own runs: a self-limited run behind them may still start.
+      if (this.pooled(run) && pooled >= this.o.concurrency) continue;
       if (this.busySessions.has(run.input.sessionId)) continue;
       this.dequeue(run);
       const cd = run.input.credentialDeadline;
@@ -219,13 +246,18 @@ export class RunManager {
         );
         continue;
       }
+      if (this.pooled(run)) pooled++;
       this.start(run);
     }
-    this.queue.forEach((run, ahead) => {
-      if (run.ahead === ahead) return;
+    // Positions within a run's own pool: a self-limited run never delays a pooled one, nor the other way round.
+    const before = { pooled: 0, self: 0 };
+    for (const run of this.queue) {
+      const pool = this.pooled(run) ? "pooled" : "self";
+      const ahead = before[pool]++;
+      if (run.ahead === ahead) continue;
       run.ahead = ahead;
       run.observer.queued?.({ runId: run.id, ahead });
-    });
+    }
   }
 
   private start(run: Run): void {
@@ -234,7 +266,9 @@ export class RunManager {
     run.startedAt = this.now();
     this.running.set(run.id, run);
     this.busySessions.add(input.sessionId);
-    const configuredMs = this.o.wallClockSec[input.source] * 1000;
+    // A run's own budget only lowers the configured one.
+    const configuredMs = Math.min(this.o.wallClockSec[input.source], input.budget?.wallClockSec ?? Infinity) * 1000;
+    const maxSteps = Math.min(this.o.maxSteps, input.budget?.maxSteps ?? Infinity);
     const reserveMs = Math.min(this.o.finalReserveSec * 1000, configuredMs / 2);
     // Tool calls end by the credential deadline (the soft deadline); the final answer needs no credential.
     const cd = input.credentialDeadline;
@@ -259,13 +293,14 @@ export class RunManager {
       ...(input.user && { user: input.user }),
       ...(input.traceparent && { traceparent: input.traceparent }),
       ...(input.source === "o2" && { o2Auth: input.mcp?.asUser ? ("user" as const) : ("service" as const) }),
+      ...(input.routine && { routine: input.routine }),
       queuedMs: run.startedAt - run.enqueuedAt,
     });
     run.observer.started?.({ runId: run.id });
     const ctx = {
       runId: run.id,
       signal: run.controller.signal,
-      budget: { maxSteps: this.o.maxSteps, softDeadline: run.startedAt + wallMs - reserveMs, maxInputTokens: this.o.maxInputTokens },
+      budget: { maxSteps, softDeadline: run.startedAt + wallMs - reserveMs, maxInputTokens: this.o.maxInputTokens },
       observer: run.observer,
     };
     // Defer so a runner that throws synchronously still goes through the same path.

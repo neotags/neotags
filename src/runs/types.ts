@@ -85,6 +85,22 @@ export interface RunInput {
   credentialDeadline?: { at: number; minMs: number };
   /** W3C trace context of the caller; the run's trace span is its child when it is sampled. */
   traceparent?: string;
+  /** A routine's input (internal API), serialized; in the prompt inside <job_input>. Untrusted. */
+  jobInput?: string;
+  /**
+   * JSON Schema (an object schema) of the run's result. The run then gets a `submit_output` tool taking exactly this
+   * and ends when a call passes validation; its arguments are `RunResult.output`. Without one the answer is text.
+   */
+  outputSchema?: Record<string, unknown>;
+  /** Limits of this run, below the configured ones (agent.maxSteps, agent.wallClockSec); never above them. */
+  budget?: RunLimits;
+  /** The routine and period a job run belongs to, for its trace span. */
+  routine?: { name: string; period: string };
+}
+
+export interface RunLimits {
+  wallClockSec?: number;
+  maxSteps?: number;
 }
 
 export interface RunUsage {
@@ -98,6 +114,8 @@ export interface RunResult {
   state: Extract<RunState, "done" | "failed" | "cancelled" | "budget_exhausted">;
   /** Markdown for the asker. Also set for failed runs (the degraded answer) and cancelled ones (why). */
   answer: string;
+  /** With `outputSchema`: the arguments of the `submit_output` call that passed validation. */
+  output?: unknown;
   /** The answer is the context package written by code, not by the model. */
   degraded?: boolean;
   /** Why the run did not finish normally (error, budget, cancel reason). */
@@ -161,6 +179,7 @@ export class RunAbort extends Error {
 export interface RunOutcome {
   state: "done" | "budget_exhausted" | "cancelled";
   answer: string;
+  output?: unknown;
   reason?: string;
   steps: number;
   toolCalls: number;

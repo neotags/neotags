@@ -8,8 +8,9 @@ import type { Gateway } from "../agent/models.js";
 import type { Effort } from "../config/index.js";
 import { answerLang } from "../lang.js";
 import { endChatSpan, startChatSpan, ToolSpans } from "../telemetry/spans.js";
-import { skillPackTools, type SkillPackIndex } from "../tools/skillpacks.js";
+import { SkillPackIndex, skillPackTools } from "../tools/skillpacks.js";
 import { compactToBudget } from "./budget.js";
+import { MAX_INVALID_SUBMITS, SUBMIT_TOOL, submitOutputTool } from "./output.js";
 import { finalPrompt, systemPrompt, userPrompt } from "./prompt.js";
 import { resilientStream } from "./stream.js";
 import { RunAbort, RunError, type AgentRunner, type RunContext, type RunInput, type RunOutcome, type RunSource } from "./types.js";
@@ -54,6 +55,9 @@ const cutNote = (question: string) => (answerLang(question) === "zh" ? "\n\n_（
 const textOf = (m: AssistantMessage | undefined): string =>
   (m?.content ?? []).filter((c): c is Extract<typeof c, { type: "text" }> => c.type === "text").map((c) => c.text).join("").trim();
 
+/** A structured run's result: the output, and as the answer (logs, spans) the same as JSON. */
+const submitted = (value: unknown) => ({ answer: JSON.stringify(value), output: value });
+
 const lastAssistant = (messages: AgentMessage[]): AssistantMessage | undefined =>
   [...messages].reverse().find((m): m is AssistantMessage => (m as { role?: string }).role === "assistant");
 
@@ -62,6 +66,11 @@ const lastAssistant = (messages: AgentMessage[]): AssistantMessage | undefined =
  * turns at the chain's `effort` with tools, then, when tools were used and `finalEffort` differs, one more turn
  * without tools at `finalEffort` that writes the answer. A budget running out (steps, time, context) ends the
  * investigation the same way, and the run is reported as budget_exhausted.
+ *
+ * A run with an `outputSchema` answers through `submit_output` instead of text: the run ends at the first call that
+ * validates. If the investigation ends without one, or a budget runs out, the last turn has `submit_output` as its
+ * only tool. One invalid call gets its errors back to fix; a second, or no call at all, fails the run.
+ * Job runs (routines) take their model from the `job` chain, every other run from `agent`.
  */
 export class PiAgentRunner implements AgentRunner {
   constructor(private o: PiRunnerOptions) {}
@@ -69,15 +78,20 @@ export class PiAgentRunner implements AgentRunner {
   async run(input: RunInput, ctx: RunContext): Promise<RunOutcome> {
     const { o } = this;
     const now = () => o.now?.() ?? Date.now();
-    const picked = o.gateway.policy.pick("agent");
+    const chain = input.source === "job" ? "job" : "agent";
+    const picked = o.gateway.policy.pick(chain);
     if (!picked) {
-      const last = o.gateway.policy.steps("agent").map((s) => s.breaker.lastError).find(Boolean);
-      throw new RunError(new ModelUnavailableError("agent", last).message, "model_unavailable");
+      const last = o.gateway.policy.steps(chain).map((s) => s.breaker.lastError).find(Boolean);
+      throw new RunError(new ModelUnavailableError(chain, last).message, "model_unavailable");
     }
     const { step, lease } = picked;
     const stats = { steps: 0, toolCalls: 0, usage: { inputTokens: 0, outputTokens: 0 }, model: step.model.id, ...(step.effort && { effort: step.effort }) };
 
     const packs = input.packs ?? o.entries[input.source] ?? [];
+    // A routine's packs bound what its run may read, not only what it may execute: its read_skill tools and system
+    // prompt see those packs, plus reference-only packs (skillPacks.refs: reference files other packs cite, never
+    // instructions or execution). Other entries keep every loaded pack.
+    const index = input.source === "job" ? new SkillPackIndex(new Map(o.index.list().filter((p) => packs.includes(p.name) || p.body === undefined).map((p) => [p.name, p]))) : o.index;
     // Registered here, run in the finally below. A tools function may connect (a run client listing its tools): if it
     // throws, what it registered is closed and the model lease released here.
     const onEnd: (() => unknown)[] = [];
@@ -96,7 +110,13 @@ export class PiAgentRunner implements AgentRunner {
       lease.release();
       throw err;
     }
-    const shared = [...skillPackTools(o.index), ...extra];
+    // Structured output: the first submit_output call that validates is the result.
+    // Read through a function: it is set inside the agent loop, which control-flow narrowing does not see.
+    let output: { value: unknown } | undefined;
+    const accepted = (): { value: unknown } | undefined => output;
+    let invalidSubmits = 0;
+    const submit = input.outputSchema ? submitOutputTool(input.outputSchema, (value) => (output ??= { value })) : undefined;
+    const shared = [...(submit ? [submit] : []), ...skillPackTools(index), ...extra];
     const taken = new Set(shared.map((t) => t.name));
     // A run's own tool never shadows a shared one: two tools with one name would leave the guard unable to tell them apart.
     const own = (input.tools ?? []).filter((t) => {
@@ -132,9 +152,10 @@ export class PiAgentRunner implements AgentRunner {
       initialState: {
         systemPrompt: systemPrompt({
           botName: o.botName,
-          index: o.index,
+          index,
           entryPacks: packs,
           unavailable: o.unavailable?.(input) ?? [],
+          structured: !!submit,
         }),
         model: step.model,
         tools,
@@ -161,7 +182,9 @@ export class PiAgentRunner implements AgentRunner {
       transformContext: async (messages) =>
         compactToBudget(messages, { maxTokens: budget.maxInputTokens, charsPerToken: o.charsPerToken }).messages,
       finishTurn: (turn) => {
-        if (phase === "final") return { action: "end" };
+        if (output || invalidSubmits >= MAX_INVALID_SUBMITS) return { action: "end" };
+        // In the last turn a rejected submit_output still gets its retry; anything else ends the run.
+        if (phase === "final") return submit && turn.toolResults.some((r) => r.toolName === SUBMIT_TOOL) ? undefined : { action: "end" };
         if (turn.toolResults.length === 0) return undefined;
         stats.steps++;
         if (stats.steps >= budget.maxSteps) wrap = "steps";
@@ -179,6 +202,8 @@ export class PiAgentRunner implements AgentRunner {
           ctx.observer.toolStart?.({ id: ev.toolCallId, name: ev.toolName, args: ev.args });
           break;
         case "tool_execution_end": {
+          // Rejected by pi's argument check or by the schema validator: either way an attempt.
+          if (ev.toolName === SUBMIT_TOOL && ev.isError) invalidSubmits++;
           const output = toolOutput(ev.result);
           const args = executedArgs(ev.result);
           const data = resultData(ev.result);
@@ -196,7 +221,7 @@ export class PiAgentRunner implements AgentRunner {
         case "message_update":
           // Only the final turn streams: an investigation turn's text is either commentary before tool calls or a
           // draft the final turn rewrites, and which one is only known once the turn ends.
-          if (phase === "final" && ev.assistantMessageEvent.type === "text_delta") {
+          if (phase === "final" && !submit && ev.assistantMessageEvent.type === "text_delta") {
             streamed += ev.assistantMessageEvent.delta;
             ctx.observer.delta?.(ev.assistantMessageEvent.delta);
           }
@@ -220,6 +245,12 @@ export class PiAgentRunner implements AgentRunner {
     try {
       if (ctx.signal.aborted) return this.stopped(ctx, stats, undefined);
       await agent.prompt(userPrompt(input, new Date(now())));
+      // An accepted submit_output is the result even when the run was aborted just after it.
+      const early = accepted();
+      if (early) {
+        outcome = "success";
+        return { state: "done", ...submitted(early.value), ...stats };
+      }
       let last = lastAssistant(agent.state.messages);
       const ended = this.check(last, ctx);
       if (ended.kind === "aborted") return this.stopped(ctx, stats, undefined);
@@ -227,10 +258,15 @@ export class PiAgentRunner implements AgentRunner {
         ({ outcome, failure } = ended);
         throw new RunError(ended.message, "model_error", stats);
       }
+      if (invalidSubmits >= MAX_INVALID_SUBMITS) {
+        outcome = "success";
+        throw new RunError(`${SUBMIT_TOOL} was rejected ${invalidSubmits} times`, "model_error", stats);
+      }
 
-      // A wrap-up interrupts a turn that was calling tools: its text is commentary, not a draft answer.
-      const draft = wrap ? "" : textOf(last);
-      const final = wrap ?? (stats.toolCalls > 0 && step.finalEffort && step.finalEffort !== step.effort ? "final" : undefined);
+      // A wrap-up interrupts a turn that was calling tools: its text is commentary, not a draft answer. A structured
+      // run's text is never the answer.
+      const draft = wrap || submit ? "" : textOf(last);
+      const final = wrap ?? (submit ? "submit" : stats.toolCalls > 0 && step.finalEffort && step.finalEffort !== step.effort ? "final" : undefined);
       if (!final) {
         outcome = "success";
         if (!draft) throw new RunError("the model returned no answer", "model_error", stats);
@@ -239,13 +275,28 @@ export class PiAgentRunner implements AgentRunner {
       }
 
       phase = "final";
-      agent.state.tools = [];
+      agent.state.tools = submit ? [submit] : [];
       effortNow = final === "final" ? step.finalEffort : (step.finalEffort ?? step.effort);
       const finalLevel = thinkingLevel(effortNow);
       if (finalLevel) agent.state.thinkingLevel = finalLevel;
-      await agent.prompt(finalPrompt(final));
+      await agent.prompt(finalPrompt(final, !!submit));
       last = lastAssistant(agent.state.messages);
       const ended2 = this.check(last, ctx);
+      if (submit) {
+        const late = accepted();
+        if (late) {
+          outcome = "success";
+          return { state: wrap ? "budget_exhausted" : "done", ...submitted(late.value), ...(wrap && { reason: `budget: ${wrap}` }), ...stats };
+        }
+        if (ended2.kind === "aborted") return this.stopped(ctx, stats, undefined);
+        if (ended2.kind === "error") {
+          ({ outcome, failure } = ended2);
+          throw new RunError(ended2.message, "model_error", stats);
+        }
+        outcome = "success";
+        const why = invalidSubmits >= MAX_INVALID_SUBMITS ? `${SUBMIT_TOOL} was rejected ${invalidSubmits} times` : `the model did not call ${SUBMIT_TOOL}`;
+        throw new RunError(why, "model_error", stats);
+      }
       if (ended2.kind !== "ok" && streamed) {
         // Part of the answer already reached the asker: finish it with a note rather than replace it, so the
         // deltas still add up to the answer.

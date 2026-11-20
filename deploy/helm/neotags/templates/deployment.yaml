@@ -1,13 +1,13 @@
-{{- $o2 := include "neotags.o2Enabled" . -}}
+{{- $port := include "neotags.port3001Enabled" . -}}
 {{- $exec := .Values.executor -}}
 {{- $grace := include "neotags.grace" . -}}
 {{- /* After the drain the process still closes the O2 server and MCP and flushes traces (up to 5 s): keep a margin. */}}
 {{- $need := addf (ceil (float64 (include "neotags.drainSec" .))) 15 -}}
-{{- if and $o2 (lt (float64 $grace) $need) -}}
+{{- if and $port (lt (float64 $grace) $need) -}}
 {{- fail (printf "terminationGracePeriodSeconds (%s) must be at least config.agent.drainSec + 15 (%.0f) so agent runs can finish on shutdown" $grace $need) -}}
 {{- end -}}
-{{- if and $o2 (ne .Values.service.type "ClusterIP") -}}
-{{- fail (printf "service.type %s would expose the O2 gateway port outside the cluster; it is in-cluster only (use the Ingress for Slack)" .Values.service.type) -}}
+{{- if and $port (ne .Values.service.type "ClusterIP") -}}
+{{- fail (printf "service.type %s would expose the agent port (O2 gateway, internal API) outside the cluster; it is in-cluster only (use the Ingress for Slack)" .Values.service.type) -}}
 {{- end -}}
 {{- if and .Values.ingress.enabled (eq (default "events-http" (default dict .Values.config.slack).mode) "socket") -}}
 {{- fail "ingress.enabled with config.slack.mode socket: Slack delivers over an outbound WebSocket, so the public /slack/events route would serve nothing" -}}
@@ -125,7 +125,8 @@ spec:
           ports:
             - name: http
               containerPort: {{ .Values.config.slack.port }}
-            {{- if $o2 }}
+            {{- if $port }}
+            # The O2 gateway and the internal API (one port; the name is kept from when it was only O2's).
             - name: o2
               containerPort: {{ include "neotags.o2Port" . }}
             {{- end }}

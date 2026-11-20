@@ -48,6 +48,10 @@ config:
     port: 3001
     orgs: {}                      # O2 org identifier -> mcp.servers name, one server per org, e.g. { default: o2 }
     # auth: service               # default; user: query as the asker with O2's x-o2-user-token (contract §7)
+  # Routines' internal API (docs/design/003-internal-run-api.md), on o2Gateway.port, which it opens even with the O2
+  # gateway off. Each caller's key comes from the Secret (keyFromEnv). The chart adds the ports and lets the Pods
+  # labelled app.kubernetes.io/component: <bot name>-job in (networkPolicy).
+  # jobsApi: { enabled: true, callers: { job: { keyFromEnv: MOOSE_JOB_KEY } }, concurrency: 1 }
   # agent: { entries: { o2: [o2-query-assistant] }, drainSec: 640, ... }   # agent runs; see config example
   #   concurrency.exemptUsers: [eval@example.com]   # emails not counted against perUserPerHour (an eval account)
   # mcp: { servers: [...] }       # MCP tools of agent runs; header values come from Secret env vars (headersFromEnv)
@@ -59,8 +63,13 @@ config:
     captureContent: false   # true: prompts/replies on trace spans (see config example)
   logLevel: info
 
+# Routines by name (config.routines): rendered into the config file next to config. Only `packs` is read so far: the
+# skill packs a routine's runs may load (each in config.skillPacks.packs).
+routines: {}
+
 # Secret holding SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET (SLACK_APP_TOKEN with slack.mode socket), ONYX_API_KEY, LLM_API_KEY (optional), O2_AGENT_API_KEY (with
-# config.o2Gateway.enabled) and the MCP header values named in config.mcp.servers[].headersFromEnv.
+# config.o2Gateway.enabled), the jobsApi callers' keys (config.jobsApi.callers[].keyFromEnv) and the MCP header values
+# named in config.mcp.servers[].headersFromEnv.
 # Create it out of band (External Secrets, sealed secrets, ...) and reference it here. Only the neotags container gets it.
 existingSecret: neotags-secrets
 
@@ -129,6 +138,9 @@ networkPolicy:
   o2Gateway:         # peers of the O2 gateway port: OpenObserve
     - namespaceSelector:
         matchLabels: { kubernetes.io/metadata.name: openobserve }
+  # More peers of the internal API (config.jobsApi), next to the routines' Pods of this namespace that the chart
+  # always lets in (app.kubernetes.io/component: <bot name>-job).
+  jobsApi: []
   # Egress of the Pod, one list for all its containers (a NetworkPolicy cannot tell containers apart): the executor's
   # sandboxes reach only their declared hosts through its proxy, and that proxy's own reach is what this allows.
   # Empty: egress is not restricted by this chart. Set it to the LLM gateway, MCP servers, Onyx, the OTLP collector

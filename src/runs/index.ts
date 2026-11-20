@@ -2,7 +2,7 @@ import type { AgentTool } from "@earendil-works/pi-agent-core";
 import type { Logger } from "pino";
 import type { ToolGuard } from "../agent/index.js";
 import type { Gateway } from "../agent/models.js";
-import type { Config } from "../config/index.js";
+import { JOB_CALLERS, type Config } from "../config/index.js";
 import type { McpHub } from "../mcp/index.js";
 import { EXEC_TOOL, skillExecTool, type SkillExecutor } from "../sandbox/index.js";
 import { SkillPackIndex, loadSkillPacks, packsVersion, type SkillPack } from "../tools/skillpacks.js";
@@ -12,6 +12,7 @@ import type { RunInput } from "./types.js";
 
 export { RunManager, type RunHandle, type SubmitResult } from "./manager.js";
 export { PiAgentRunner } from "./pi-runner.js";
+export { createJobRunner, JobRequestError, MAX_JOB_INPUT_CHARS, type JobRunner, type JobRunRequest, type JobRunResult } from "./job.js";
 export * from "./types.js";
 
 /** Load the configured skill packs, logging what was skipped. No `skillPacks.dir` means no packs. */
@@ -94,6 +95,8 @@ export function createRunManager(
   return new RunManager({
     runner,
     concurrency: a.concurrency.total,
+    // Runs of routines wait for jobsApi.concurrency instead (runJob).
+    selfLimited: JOB_CALLERS,
     perUserPerHour: a.concurrency.perUserPerHour,
     exemptUsers: a.concurrency.exemptUsers,
     maxSteps: a.maxSteps,
