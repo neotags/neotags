@@ -40,6 +40,7 @@ function base(): Record<string, any> {
       slack: { allowedChannels: ["C0TEST", "C0TEAM"], testChannel: "C0TEST" },
       confluence: { baseUrl: "https://wiki.example.com/wiki", allowedSpaces: ["OPS"], testParent: "999" },
     },
+    artifacts: { s3: { bucket: "test-bucket" } },
     routines: { "weekly-review": agent(), "daily-triage": pipeline() },
   };
 }

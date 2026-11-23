@@ -1,4 +1,6 @@
+import { hostname } from "node:os";
 import { pino } from "pino";
+import { S3ArtifactStore } from "./artifacts/index.js";
 import { createLlm, type LlmClient } from "./agent/llm.js";
 import { createGateway, type Gateway } from "./agent/models.js";
 import { CHAINS, inputBudgetTokens, llmConfigured, loadConfig } from "./config/index.js";
@@ -6,6 +8,8 @@ import { routinePackIssues } from "./config/routines.js";
 import { createPortServer, type PortServer, type Route } from "./gateway/http.js";
 import { createInternalApi } from "./gateway/internal.js";
 import { createO2Gateway } from "./gateway/o2.js";
+import { createRoutines, type Routines } from "./routines/period.js";
+import { routineTypes, stepPackIssues } from "./routines/types.js";
 import { createSlack } from "./gateway/slack.js";
 import { startMcp, type McpHub } from "./mcp/index.js";
 import { Router } from "./router/index.js";
@@ -96,6 +100,7 @@ const slackGateway = createSlack(cfg, log, ({ notifier, slack }) =>
 let runs: RunManager | undefined;
 let mcp: McpHub | undefined;
 let port: PortServer | undefined;
+let routines: Routines | undefined;
 
 let shuttingDown = false;
 async function shutdown(sig: string, exitCode = 0, cause?: unknown) {
@@ -111,9 +116,19 @@ async function shutdown(sig: string, exitCode = 0, cause?: unknown) {
     code = 1;
   }
   // Slack tasks are short; agent runs get agent.drainSec, which the pod's grace period must cover.
-  const [tasksDone, runsDone] = await Promise.all([slackGateway.drain(DRAIN_TIMEOUT_MS), runs?.drain(cfg.agent.drainSec * 1000) ?? true]);
+  // Routine periods are interrupted at once, not failed: their lease is released and the fire command submits the
+  // period again, to a Pod that is not going away.
+  const [tasksDone, runsDone, periodsDone] = await Promise.all([
+    slackGateway.drain(DRAIN_TIMEOUT_MS),
+    runs?.drain(cfg.agent.drainSec * 1000) ?? true,
+    routines?.drain(DRAIN_TIMEOUT_MS) ?? true,
+  ]);
   if (!tasksDone) {
     log.warn("timed out waiting for in-flight tasks");
+    code = 1;
+  }
+  if (!periodsDone) {
+    log.warn("routine periods still going after the drain timeout");
     code = 1;
   }
   if (!runsDone) {
@@ -140,7 +155,7 @@ if (cfg.o2Gateway.enabled || cfg.jobsApi.enabled) {
   if (!gateway) log.error("o2Gateway or jobsApi is enabled but no LLM is configured; neither is started");
   else {
     const index = await loadConfiguredSkillPacks(cfg, log);
-    const packIssues = routinePackIssues(cfg.routines, (p) => index.get(p)?.sandbox !== undefined);
+    const packIssues = [...routinePackIssues(cfg.routines, (p) => index.get(p)?.sandbox !== undefined), ...stepPackIssues(cfg, index)];
     if (packIssues.length) throw new Error(`invalid routines: ${packIssues.join("; ")}`);
     const versions = entryVersions(cfg, index);
     setAgentVersions(versions);
@@ -152,8 +167,24 @@ if (cfg.o2Gateway.enabled || cfg.jobsApi.enabled) {
     if (cfg.o2Gateway.enabled) routes["/o2_agent/"] = createO2Gateway({ cfg: cfg.o2Gateway, key: cfg.secrets.o2AgentKey!, runs, log }).route;
     if (cfg.jobsApi.enabled) {
       const g = gateway;
+      const r = runs;
       const jobs = createJobRunner({ cfg, runs, log, modelAvailable: () => g.policy.steps("job").some((s) => s.breaker.state !== "open") });
-      routes["/internal/"] = createInternalApi({ keys: cfg.secrets.jobKeys ?? {}, jobs, log }).route;
+      // The period records' store; config validation has made sure there is one when there are routines.
+      const bucket = cfg.artifacts.s3?.bucket;
+      if (bucket && Object.keys(cfg.routines).length > 0) {
+        routines = createRoutines({
+          cfg,
+          store: new S3ArtifactStore({ bucket }),
+          // The engine's steps take the same jobsApi.concurrency slots as runJob, one step or run at a time.
+          jobs,
+          executor,
+          types: routineTypes(index),
+          holder: process.env.POD_NAME || hostname(),
+          log,
+          isDraining: () => r.isDraining,
+        });
+      }
+      routes["/internal/"] = createInternalApi({ keys: cfg.secrets.jobKeys ?? {}, jobs, log, ...(routines && { routines }) }).route;
     }
     port = createPortServer({ routes, log, name: "agent api" });
     await port.listen(cfg.o2Gateway.port);

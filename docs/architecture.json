@@ -59,8 +59,22 @@
       "id": "ptrig",
       "type": "messagebus",
       "label": "Planned triggers",
-      "sublabel": "alerts · cron · GitHub/GitLab",
+      "sublabel": "alerts · GitHub/GitLab",
       "tag": "planned",
+      "pos": [
+        20,
+        150
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "cron",
+      "type": "external",
+      "label": "Routine CronJobs",
+      "sublabel": "fire <name> · submit, poll",
       "pos": [
         20,
         60
@@ -257,13 +271,13 @@
       "id": "internal",
       "type": "backend",
       "label": "Internal API",
-      "sublabel": ":3001 · Bearer keys",
+      "sublabel": ":3001 · fire · leases · engine",
       "pos": [
         430,
         100
       ],
       "size": [
-        160,
+        180,
         64
       ]
     },
@@ -288,6 +302,20 @@
       "sublabel": "bubblewrap · unix socket",
       "pos": [
         760,
+        60
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "s3",
+      "type": "external",
+      "label": "S3 bucket",
+      "sublabel": "jobs/ · lease · run.json · bundle",
+      "pos": [
+        1340,
         60
       ],
       "size": [
@@ -426,10 +454,9 @@
     },
     {
       "id": "r1",
-      "from": "ptrig",
+      "from": "cron",
       "to": "internal",
-      "label": "routine runs",
-      "variant": "dashed",
+      "label": "fire · status",
       "fromSide": "right",
       "toSide": "left"
     },
@@ -466,6 +493,21 @@
       "variant": "security",
       "fromSide": "top",
       "toSide": "bottom"
+    },
+    {
+      "id": "r3",
+      "from": "internal",
+      "to": "s3",
+      "label": "lease · period records",
+      "fromSide": "top",
+      "toSide": "top"
+    },
+    {
+      "id": "r4",
+      "from": "internal",
+      "to": "executor",
+      "label": "pipeline steps",
+      "variant": "security"
     }
   ],
   "cards": [
@@ -503,7 +545,8 @@
         "OpenObserve assistant: O2 gateway (:3001, SSE), agent runs with O2 MCP tools, evidence links and navigation",
         "MCP client + Tool Guard; executor sidecar (bubblewrap) behind the sandbox guard",
         "Internal run API for routines (:3001 /internal/v1/runs): Bearer key per caller, the routine's packs only, structured output through submit_output, own concurrency slots, job model chain",
-        "Routines configuration, checked in full at startup; one CronJob per routine running fire (submit a period, poll to its outcome); a routine's runs get only its MCP servers"
+        "Routines configuration, checked in full at startup; one CronJob per routine running fire (submit a period, poll to its outcome); a routine's runs get only its MCP servers",
+        "Routine periods: fire answers 202 and runs the period in the background under an S3 lease (renewed, taken over once expired); run.json per step; pipeline engine runs a routine type's steps in the sandbox around one classify run"
       ]
     },
     {
@@ -512,7 +555,7 @@
       "items": [
         "Live verification: Slack, Onyx and the O2 assistant end to end",
         "Slack answers and alert triage on the Agent runtime",
-        "Routines: the fire endpoint, period records and leases, pipeline engine, Outbox; alert webhook, GitHub/GitLab bot"
+        "Routines: the Outbox (Slack, Confluence delivery); alert webhook, GitHub/GitLab bot"
       ]
     }
   ]

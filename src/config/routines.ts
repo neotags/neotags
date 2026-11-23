@@ -118,6 +118,15 @@ export const outboxSchema = z
   .strict()
   .prefault({});
 
+/** The period records' store; routines need it. */
+export const artifactsSchema = z
+  .object({
+    // The bucket; keys are always under jobs/ (the IAM policy allows nothing else).
+    s3: z.object({ bucket: z.string().min(1) }).strict().optional(),
+  })
+  .strict()
+  .prefault({});
+
 type Issue = { path: (string | number)[]; message: string };
 
 /** What the routines refer to that the rest of the configuration does not allow. */
@@ -128,6 +137,7 @@ export function routineIssues(cfg: {
   mcp: { servers: { name: string }[] };
   agent: { maxSteps: number; wallClockSec: { job: number } };
   jobsApi: { enabled: boolean };
+  artifacts: z.infer<typeof artifactsSchema>;
 }): Issue[] {
   const issues: Issue[] = [];
   const routines = Object.entries(cfg.routines);
@@ -137,6 +147,8 @@ export function routineIssues(cfg: {
   const servers = new Set(cfg.mcp.servers.map((s) => s.name));
   // The CronJobs call the internal API; without it every firing fails.
   if (!cfg.jobsApi.enabled) issues.push({ path: ["jobsApi", "enabled"], message: "routines are configured but jobsApi is not enabled: their CronJobs call it" });
+  // Leases and period records live there: without it no period can start.
+  if (!cfg.artifacts.s3) issues.push({ path: ["artifacts", "s3"], message: "routines are configured but artifacts.s3.bucket is not: their period records and leases live there" });
   if (slack.testChannel === undefined) issues.push({ path: ["outbox", "slack", "testChannel"], message: "routines need a test channel: dry runs post there" });
   else if (!channels.has(slack.testChannel)) issues.push({ path: ["outbox", "slack", "testChannel"], message: `channel ${slack.testChannel} is not in outbox.slack.allowedChannels` });
   for (const [name, r] of routines) {

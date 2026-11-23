@@ -124,3 +124,17 @@ export function periodError(trigger: { schedule: string; timeZone: string }, per
   if (!isScheduled(trigger.schedule, trigger.timeZone, period)) return `not a time "${trigger.schedule}" fires at in ${trigger.timeZone}`;
   return undefined;
 }
+
+/**
+ * The firing before `period` (UTC, to the minute): the start of the period's window, which ends at the period. Read
+ * on the wall clock in `tz`, like isScheduled; undefined when the schedule has none (cannot happen for 5 fields).
+ */
+export function previousFiring(trigger: { schedule: string; timeZone: string }, period: string): string | undefined {
+  const ms = Date.parse(period);
+  try {
+    const prev = CronExpressionParser.parse(trigger.schedule, { tz: trigger.timeZone, currentDate: new Date(ms) }).prev();
+    return formatPeriod(prev.getTime());
+  } catch {
+    return undefined;
+  }
+}

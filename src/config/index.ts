@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { parse } from "yaml";
 import { z } from "zod";
-import { outboxSchema, routineIssues, routinesSchema } from "./routines.js";
+import { artifactsSchema, outboxSchema, routineIssues, routinesSchema } from "./routines.js";
 
 export { ROUTINE_NAME, type Routine } from "./routines.js";
 
@@ -349,6 +349,9 @@ const fileSchema = z.object({
   routines: routinesSchema,
   // Where routines may deliver (Slack channels, Confluence spaces), and where dry runs go instead.
   outbox: outboxSchema,
+  // Where routines keep their period records (lease, run.json, data, bundle, delivery results), under jobs/.
+  // Credentials come from the AWS SDK's default chain (IRSA in the cluster), never from this file.
+  artifacts: artifactsSchema,
   // LLM traces over OTLP (OpenObserve, Langfuse, an OTel collector). The exporter is configured with the standard
   // OTEL_EXPORTER_OTLP_* env vars; tracing is off unless an endpoint is set.
   telemetry: z

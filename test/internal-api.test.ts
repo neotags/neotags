@@ -17,6 +17,7 @@ const yaml = (o2: boolean) => `o2Gateway: { enabled: ${o2} }
 skillPacks: { packs: [triage, other] }
 jobsApi: { enabled: true, callers: { job: { keyFromEnv: MOOSE_JOB_KEY } } }
 outbox: { slack: { allowedChannels: [C0TEST], testChannel: C0TEST } }
+artifacts: { s3: { bucket: test-bucket } }
 routines:
   daily-triage:
     kind: agent
