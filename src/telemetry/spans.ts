@@ -557,3 +557,43 @@ export function endRoutineStepSpan(span: Span, o: RoutineStepOutcome): void {
     }
   }, undefined);
 }
+
+/** One delivery target of a period, `deliver <sink>` (slack, confluence), a child of the period's root span. */
+export function startDeliverySpan(parent: Span, r: { name: string; period: string; sink: string; target: string; dryRun: boolean }): Span {
+  return guarded(
+    () =>
+      tracer.startSpan(
+        `deliver ${r.sink}`,
+        {
+          attributes: {
+            ...agentAttrs("job"),
+            "neotags.routine.name": r.name,
+            "neotags.routine.period": r.period,
+            "neotags.delivery.sink": r.sink,
+            "neotags.delivery.target": r.target,
+            "neotags.routine.dry_run": r.dryRun,
+          },
+        },
+        trace.setSpan(ROOT_CONTEXT, parent),
+      ),
+    NOOP_SPAN,
+  );
+}
+
+/** `steps`: the steps this attempt did (message, file:<name>, folder, page, attachment:<name>); `step`: where it failed. */
+export function endDeliverySpan(span: Span, o: { ok: boolean; steps: string[]; durationMs: number; step?: string; link?: string; reason?: string }): void {
+  guarded(() => {
+    try {
+      span.setAttributes({
+        "neotags.delivery.outcome": o.ok ? "ok" : "failed",
+        "neotags.delivery.steps": o.steps,
+        "neotags.delivery.duration_ms": o.durationMs,
+        ...(o.step && { "neotags.delivery.failed_step": o.step }),
+        ...(o.link && { "neotags.delivery.link": o.link }),
+      });
+      if (!o.ok) fail(span, o.reason ?? "delivery failed", "delivery_failed");
+    } finally {
+      span.end();
+    }
+  }, undefined);
+}

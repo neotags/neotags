@@ -9,8 +9,9 @@ import { PreconditionError, type ArtifactStore } from "../artifacts/index.js";
 //   output.json         the classify run's result, or an agent routine's output: the next period's memory
 //   state.json          the render step's state: the next period's previous.state
 //   bundle/             the delivery bundle, split into files; manifest.json last, so its presence means complete
-//   delivered.json      per delivery target, its outcome; a target recorded as delivered is never delivered again
-//   delivery-pending.json  until the Outbox exists: what would have been delivered
+//   delivered.json      per delivery target, its outcome and each step's (message, files, page); a target recorded as
+//                       delivered is never delivered again, one partly delivered goes on from its steps
+//   delivery-pending.json  without an Outbox: what would have been delivered
 
 /** Every key routines use starts with this; the IAM policy allows nothing else. */
 export const PREFIX = "jobs/";
@@ -67,7 +68,9 @@ export interface DeliveredTarget {
   at: string;
   link?: string;
   error?: string;
-  /** What the Outbox reports per step of the target (message, attachments, page). */
+  /** Not delivered: the step it failed at (message, file, parent, folder, page, attachment, ...). */
+  step?: string;
+  /** What the Outbox reports per step of the target (message, attachments, page); kept while it is not delivered yet. */
   detail?: unknown;
 }
 

@@ -7,8 +7,19 @@ import type { SkillExecutor } from "../sandbox/exec.js";
 import { endRoutineSpan, spanTraceId, startRoutineSpan, traceparentOf } from "../telemetry/spans.js";
 import { PeriodFailed, runPipeline, Stop, type PeriodHandle } from "./engine.js";
 import { acquireLease, LEASE_TIMING, type Lease, type LeaseTiming } from "./lease.js";
-import { deliveryTargets, type Outbox } from "./outbox.js";
-import { OwnedRecord, parseJson, periodDir, PREFIX, Superseded, type DeliveredRecord, type LeaseRecord, type RunRecord, type StepRecord } from "./records.js";
+import { DeliveryError, deliveryTargets, type OwnerNotice, type Outbox } from "./outbox.js";
+import {
+  OwnedRecord,
+  parseJson,
+  periodDir,
+  PREFIX,
+  Superseded,
+  type DeliveredRecord,
+  type DeliveredTarget,
+  type LeaseRecord,
+  type RunRecord,
+  type StepRecord,
+} from "./records.js";
 import { PERIOD, periodError, previousFiring } from "./schedule.js";
 import type { RoutineType } from "./types.js";
 
@@ -78,7 +89,7 @@ export interface RoutinesOptions {
   /** Runs the pipeline steps; absent: pipeline periods fail. */
   executor?: Pick<SkillExecutor, "exec">;
   types: ReadonlyMap<string, RoutineType>;
-  /** Absent until the Outbox (S03): a period ends with delivery-pending.json and counts as delivered. */
+  /** Delivers the targets and sends failure notices; absent: a period ends with delivery-pending.json and counts as delivered. */
   outbox?: Outbox;
   /** This Pod, in lease.json and run.json. */
   holder: string;
@@ -356,6 +367,11 @@ export function createRoutines(o: RoutinesOptions) {
       await p.update(() => ({ state: "delivered", step: undefined, stepBudgetSec: undefined, reason: undefined, degraded: p.degraded }));
       state = "delivered";
       log.info({ ...fields, degraded: p.degraded }, "period delivered");
+      // Delivered, but rendered without the classify run's problems: the owner should know the run failed.
+      if (p.degraded) {
+        const classify = p.i.run.value?.steps.find((s) => s.name === "classify");
+        await notifyOwner(p, { kind: "degraded", step: "classify", reason: classify?.reason ?? "the classify run failed" });
+      }
     } catch (err) {
       const stop = controller.signal.aborted && controller.signal.reason instanceof Stop ? controller.signal.reason : err instanceof Stop ? err : undefined;
       if (stop?.kind === "superseded" || (!stop && err instanceof Superseded)) {
@@ -377,12 +393,21 @@ export function createRoutines(o: RoutinesOptions) {
           .catch((e: unknown) => log.error({ ...fields, err: errText(e) }, "could not record the period's failure"));
         if (!(err instanceof PeriodFailed) && !stop) log.error({ ...fields, err }, "period failed");
         else log.warn({ ...fields, reason }, "period failed");
+        const step = p.i.run.value?.step;
+        await notifyOwner(p, { kind: "failed", ...(step && { step }), reason });
       }
     } finally {
       clearTimeout(timer);
       if (state !== "superseded") await lease.release().catch((err: unknown) => log.warn({ ...fields, err: errText(err) }, "could not release the lease"));
       endRoutineSpan(span, { state, degraded: p.degraded, ...(reason && { reason }) });
     }
+  }
+
+  /** A notice to the routine's owner, when there is an Outbox; it never throws. */
+  async function notifyOwner(p: PeriodRun, n: Pick<OwnerNotice, "kind" | "step" | "reason">): Promise<void> {
+    await o.outbox
+      ?.notifyOwner({ routine: p.i.name, period: p.i.period, dryRun: p.i.dryRun, runIds: p.i.run.value?.runIds ?? [], ...n })
+      .catch((err: unknown) => log.warn({ routine: p.i.name, period: p.i.period, err: errText(err) }, "could not notify the routine's owner"));
   }
 
   /** An agent routine: one run with the routine's instructions, the previous period's summary and state as memory. */
@@ -453,26 +478,62 @@ export function createRoutines(o: RoutinesOptions) {
     const record = new OwnedRecord<DeliveredRecord>(store, `${p.i.dir}delivered.json`, p.i.lease.token, () => p.i.lease.ensure());
     const prior = await record.load();
     let doc: DeliveredRecord = { token: p.i.lease.token, targets: { ...prior?.targets } };
+    const put = (key: string, entry: DeliveredTarget) => {
+      doc = { ...doc, targets: { ...doc.targets, [key]: entry } };
+      return record.write(doc);
+    };
     const failed: string[] = [];
-    for (const t of targets) {
-      if (doc.targets[t.key]?.ok) continue;
+    const confirm = async () => {
       p.checkpoint();
       await p.i.lease.ensure();
-      let entry: DeliveredRecord["targets"][string];
+    };
+    for (const t of targets) {
+      const previous = doc.targets[t.key];
+      if (previous?.ok) continue;
+      await confirm();
+      // The target's steps so far: a failure keeps them, so the next attempt only does what is left.
+      let detail = previous?.detail;
+      let entry: DeliveredTarget;
       try {
-        const r = await o.outbox.deliver(t, { routine: p.i.name, period: p.i.period, kind: routine.kind, dryRun: p.i.dryRun, dir: p.i.dir, store, signal: p.signal });
+        const r = await o.outbox.deliver(t, {
+          routine: p.i.name,
+          period: p.i.period,
+          kind: routine.kind,
+          dryRun: p.i.dryRun,
+          dir: p.i.dir,
+          store,
+          signal: p.signal,
+          span: p.i.span,
+          runIds: p.i.run.value?.runIds ?? [],
+          ...(previous && { previous }),
+          confirm,
+          // After a side effect: recorded even when the period is stopping (shutdown, deadline), or the next holder
+          // would post it again. Only a lost lease keeps it out (the record's own ensure).
+          progress: async (d) => {
+            detail = d;
+            await put(t.key, { ok: false, at: iso(), detail: d });
+          },
+        });
         entry = { ok: true, at: iso(), ...(r.link && { link: r.link }), ...(r.detail !== undefined && { detail: r.detail }) };
       } catch (err) {
-        p.checkpoint();
-        entry = { ok: false, at: iso(), error: errText(err).slice(0, 500) };
-        failed.push(t.key);
+        if (err instanceof DeliveryError && err.detail !== undefined) detail = err.detail;
+        const reason = p.signal.aborted ? p.signal.reason : undefined;
+        // delivered.json is someone else's now: write nothing more.
+        if (err instanceof Superseded || (reason instanceof Stop && reason.kind === "superseded")) throw reason ?? err;
+        if (p.signal.aborted) {
+          // Stopping: keep what this target got done for whoever goes on, then stop.
+          if (detail !== undefined) await put(t.key, { ok: false, at: iso(), detail }).catch(() => {});
+          throw reason;
+        }
+        const step = err instanceof DeliveryError ? err.step : undefined;
+        entry = { ok: false, at: iso(), error: errText(err).slice(0, 500), ...(step && { step }), ...(detail !== undefined && { detail }) };
+        failed.push(`${t.key} (${step ? `${step}: ` : ""}${entry.error!.slice(0, 200)})`);
       }
-      doc = { ...doc, targets: { ...doc.targets, [t.key]: entry } };
-      await record.write(doc);
+      await put(t.key, entry);
     }
     if (failed.length) {
-      await p.stepEnded("deliver", { state: "failed", reason: `not delivered: ${failed.join(", ")}` });
-      throw new PeriodFailed(`delivery failed: ${failed.join(", ")}`);
+      await p.stepEnded("deliver", { state: "failed", reason: `not delivered: ${failed.join("; ")}` });
+      throw new PeriodFailed(`delivery failed: ${failed.join("; ")}`);
     }
     await p.stepEnded("deliver", { state: "done" });
     log.info({ ...fields, durationMs: now() - started, outcome: "ok", targets: targets.length }, "routine step finished");

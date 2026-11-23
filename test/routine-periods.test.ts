@@ -376,7 +376,7 @@ describe("idempotency", () => {
     store.objects.set(`${DIR}bundle/manifest.json`, { body: JSON.stringify({ notify: true, sections: {} }), etag: '"m"' });
     store.objects.set(`${DIR}delivered.json`, { body: JSON.stringify({ token: "old", targets: { "slack:C0TEAM:all:zh": { ok: true, at: "x", link: "https://slack.example.com/1" } } }), etag: '"dl"' });
     const delivered: string[] = [];
-    const h = harness({ store, outbox: { deliver: async (t) => (delivered.push(t.key), { link: `https://slack.example.com/${t.key}` }) } });
+    const h = harness({ store, outbox: { deliver: async (t) => (delivered.push(t.key), { link: `https://slack.example.com/${t.key}` }), notifyOwner: async () => {} } });
     await fire(h);
     await h.routines.idle();
     expect(delivered).toEqual(["slack:C0TEST:all:en"]);
@@ -394,6 +394,7 @@ describe("idempotency", () => {
           if (n++ === 1) throw new Error("channel_not_found");
           return { link: t.key };
         },
+        notifyOwner: async () => {},
       },
     });
     await fire(h);

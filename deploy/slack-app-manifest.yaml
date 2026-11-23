@@ -19,6 +19,7 @@ oauth_config:
       - groups:history     # only needed when slack.allowPrivateChannels is on
       - groups:read        # only needed when slack.allowPrivateChannels is on
       - files:read         # download attachments (PDF, Word, Excel, ...) to index them
+      - files:write        # routines: upload a report's attachments to its message's thread
       - chat:write
       - reactions:write
       - users:read         # resolve display names in the transcript
