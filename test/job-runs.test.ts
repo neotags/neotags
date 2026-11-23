@@ -42,6 +42,7 @@ mcp:
     - { name: o2, url: "http://o2.test/mcp", allowTools: [SearchSQL] }
     - { name: o2prod, url: "http://o2prod.test/mcp", allowTools: [SearchSQL] }
 outbox: { slack: { allowedChannels: [C0TEST], testChannel: C0TEST } }
+artifacts: { s3: { bucket: test-bucket } }
 routines:
   daily-triage:
     kind: pipeline

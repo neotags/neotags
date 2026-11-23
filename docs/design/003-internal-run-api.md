@@ -2,7 +2,7 @@
 
 Status: **v1** · Date: 2026-11-19
 
-Routines are tasks neotags runs on its own, on a schedule (later on events), from configuration: `routines.<name>` names the skill packs a routine's runs may use, and later its trigger, steps and delivery targets. A Kubernetes CronJob only triggers a routine; the work, the model calls and the delivery happen in neotags. This document covers the first piece: one agent run for a routine, with a structured result, through `runJob` in process and `POST /internal/v1/runs` over HTTP. §6 adds the routines' configuration, their CronJobs and the `fire` command; the `fire` endpoint, period records, leases, the pipeline engine and delivery (the Outbox) come later and build on them.
+Routines are tasks neotags runs on its own, on a schedule (later on events), from configuration: `routines.<name>` names the skill packs a routine's runs may use, and later its trigger, steps and delivery targets. A Kubernetes CronJob only triggers a routine; the work, the model calls and the delivery happen in neotags. This document covers the first piece: one agent run for a routine, with a structured result, through `runJob` in process and `POST /internal/v1/runs` over HTTP. §6 adds the routines' configuration, their CronJobs and the `fire` command; §7 the `fire` endpoint, period records, leases and the pipeline engine. Delivery (the Outbox) comes later and builds on them.
 
 ## 1. Transport and authentication
 
@@ -104,3 +104,56 @@ One CronJob per routine, named after it, on the bot's image: `node dist/index.js
 3. Every request times out after 10 s. Unreachable (as in 1) for 5 minutes in a row exits 1; so does no outcome 5 minutes past the period's `deadlineAt` (an hour from the start until the bot reports it).
 
 Exit codes: 0 delivered, 1 failed or gave up (the Job retries once), 2 usage or configuration (the Job fails).
+
+## 7. Periods: `fire`, records, leases and the pipeline engine
+
+`src/routines/period.ts` (fire, status, the period in the background), `lease.ts`, `records.ts`, `engine.ts` (pipeline steps), `types.ts` (routine types); the store is `src/artifacts/` (S3, `artifacts.s3.bucket`, credentials from the AWS SDK's default chain: IRSA in the cluster, never static keys).
+
+### Records
+
+Everything of a period is under `jobs/<routine>/<period>/` in the bucket (a dry run's under `jobs/<routine>/dryrun/<period>/`), written by the bot only:
+
+| File | What |
+|---|---|
+| `lease.json` | `{holder, token, expiresAt}`: who runs the period now. |
+| `run.json` | `state` (`running`, `delivered`, `failed`), the writer's lease `token`, `deadlineAt`, the current `step` and its budget, every step's state and attempts, run ids, each holder with its trace id, `degraded`, `reason`, `updatedAt`. Written at every step's start and end, and every minute during a run. |
+| `input.json` | The steps' `in.json` without `data`. |
+| `data.json` | `{after, data, classifyInput}`: the last checkpointed step (up to the classify run). |
+| `output.json` | The classify run's result, or an agent routine's output: the next period's memory. |
+| `state.json` | The last step's `state`: the next period's `previous.state`. |
+| `bundle/` | The delivery bundle split into files; `manifest.json`, written last, lists them. |
+| `delivered.json` | Per delivery target, its outcome; a target recorded as delivered is not delivered again. |
+| `delivery-pending.json` | Until the Outbox exists: the targets the period would have delivered to. |
+
+The previous period is the latest formal (not `dryrun/`) period before this one whose `run.json` is `delivered`, zero targets included; listed with `ListObjectsV2` under `jobs/<routine>/` (never the bucket root, never `HeadBucket`: the policy allows neither).
+
+### `POST /internal/v1/routines/{name}/fire` `{period, dryRun?, force?}`
+
+1. Unknown routine 404; draining 503 `shutting_down`; a period the schedule does not fire at, or older than 8 days, 400 with `periodError`'s reason.
+2. Already over (`delivered`, or `failed` past `deadlineAt`) and no `force`: 200 `{state}`.
+3. Take the lease (below); held by someone else: 409.
+4. Under the lease, write `run.json`: `running`, the new token, `deadlineAt` kept from an earlier try (an hour from now on the first, or with `force`). Then 202 `{period}`; the period runs in the background, apart from the request, as its own trace (`routine <name>`).
+5. Where to go on: `bundle/manifest.json` present, deliver; `data.json` present, skip the steps up to it; anything else runs again. A `failed` period before its deadline runs again.
+6. Deliver, mark `run.json` `delivered`, release the lease. Past `deadlineAt` the period stops and is `failed` (`reason: deadline`); a takeover or retry never resets it, only `force` does.
+
+### Leases
+
+Taken with `PutObject` `If-None-Match: *` (5 minutes), renewed every 2 minutes with `If-Match` on the holder's last etag, taken over once expired with `If-Match` on the etag read, released with `DeleteObject` `If-Match`. Before every write of `run.json` or `delivered.json`, and before each delivery target, the holder confirms its lease (renewing first with under a minute left). S3's answers: a create's 412 reads the lease (live: 409 to the caller; expired: take over) and its 409 tries once more; a takeover's 412 or 404 judges once more, never in a loop; a renewal's or record write's 412 or 404 stops the period, and 409 reads again and retries once if the record is still the holder's; a release's 412, 404 or 409 is ignored. A lost lease stops the period at once: its `runJob` and sandbox step are cancelled and it writes and delivers nothing more.
+
+A shutdown interrupts a period (also mid-step) without failing it: `run.json` stays `running` with `reason: interrupted`, the lease is released, and the fire command, seeing `orphaned`, submits again to a live Pod, which goes on from the records. `fire` during the drain is 503.
+
+### `GET /internal/v1/routines/{name}/periods/{period}?dryRun=`
+
+`{state, step, updatedAt, leaseExpiresAt, deadlineAt, runIds, delivered[], reason?}`; 404 without `run.json`. `state`: `delivered`; `failed` when the lease is gone (or the failed record is the live holder's); `running` while a live lease exists, with step, time and reason only from the live holder's own record (a superseded holder's is not taken); `stalled` when that record's `updatedAt` is older than its step's budget (a sandbox step's `timeoutSec`, a run's wall clock) plus 5 minutes, logged as a warning; `orphaned` when the lease is gone or expired before the period ended.
+
+### Routine types and the pipeline engine
+
+A step pack declares `pipeline:` next to `sandbox:` in its front matter: `type`, `params` (a JSON Schema file of the pack), `steps` (`name`, `argv`), `classify` (`after`, `outputSchema` as `<pack>/references/<file>`, `budget`), `degrade`. A pack whose declaration does not load is skipped whole. At startup: one step pack per type; no step pack in `agent.entries` or any routine's `packs`; a pipeline routine's `packs` declare no `sandbox`; its `type` has a step pack, its `params` pass the type's schema, the classify schema exists and its budget is within the defaults. `run_skill_command` never offers or runs a step pack, and the engine runs nothing else.
+
+The engine runs the steps in order through `SkillExecutor.exec` with `/work/in.json` (`{task, period, window: {start, end}, params, delivery, dryRun, previous: {state} | null, data?, problems?}`; the window is the previous firing to the period); each prints one JSON object. Not JSON, truncated, a timeout or a non-zero exit is retried once; exit 2 is not. Each step takes a `jobsApi.concurrency` slot only for its call (the job runner's own `Slots`, not a second set), so with `concurrency: 1` the classify run, which takes the slot in `runJob`, never waits for the engine; a slot not free within 15 minutes or a busy executor fails the attempt. After `classify.after` comes the classify run: `runJob` with `{summary: classifyInput, previous: {problems, state} | null, team}` (over 200k characters: `previous` goes first, then the summary is cut), the routine's packs, the step pack's schema and budget, and the root span's `traceparent`. A failed or degraded classify run goes on at `degrade` with `problems: null`, and `run.json` says `degraded`. The last step's `bundle` is split into `bundle/` and its `state` written to `state.json`.
+
+An agent routine is one `runJob` with its `instructions`, `budget`, and `{routine, period, window, context, previous_period: {summary, state} | null}` as input; its output schema is fixed: `{notify, summary (≤ 4k), report, state? (≤ 8k)}`. With `notify: when_findings` and `notify: false` there are no targets, and the period is delivered.
+
+### Observability
+
+One log line at each step's start and end (`routine`, `period`, `step`, `durationMs`, outcome, `exitCode`, `stdoutBytes`); a failed step attempt's stderr, redacted, in `steps/<step>-<attempt>.stderr.txt`. The root span `routine <name>` (`gen_ai.agent.name = job`, `neotags.routine.name`, `.period`, `.state`, `.degraded`) has a child `routine.step <step>` per sandbox step (attempts, duration, exit code, stdout bytes, `truncated`) and the classify run's `invoke_agent job` (a link instead when the root span is not sampled).

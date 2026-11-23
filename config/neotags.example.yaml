@@ -102,6 +102,8 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 #     baseUrl: https://wiki.example.com/wiki
 #     allowedSpaces: [OPS]        # spaces delivery.confluence may name
 #     testParent: "123456"        # parent of every page on a dry run; unset: a dry run skips Confluence
+# artifacts:                      # routines' period records (lease, run.json, data, bundle); required with routines
+#   s3: { bucket: example-bucket }   # keys under jobs/ only; credentials from the AWS SDK's default chain (IRSA)
 # routines:                       # by name (lowercase, digits, dashes; at most 52): the CronJob's name. Each one is
 #                                 # checked in full at startup, enabled or not; unknown keys are refused
 #   example-daily:

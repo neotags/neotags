@@ -3,8 +3,9 @@ import type { Logger } from "pino";
 import { z } from "zod";
 import { ROUTINE_NAME, type JobCaller } from "../config/index.js";
 import { PERIOD } from "../routines/schedule.js";
+import { FireError, type Routines } from "../routines/period.js";
 import { JobRequestError, type JobRunner } from "../runs/job.js";
-import { header, HttpError, keyMatches, readBody, sendJson, TRACEPARENT, type Route } from "./http.js";
+import { decoded, header, HttpError, keyMatches, readBody, sendJson, TRACEPARENT, type Route } from "./http.js";
 
 // The internal API (docs/design/003-internal-run-api.md): in-cluster callers with their own Bearer keys
 // (jobsApi.callers), under /internal/v1/ on the port the O2 gateway uses. Nothing of the O2 gateway's applies here:
@@ -23,10 +24,17 @@ const RunRequest = z.object({
   budget: z.object({ wallClockSec: z.number().positive().optional(), maxSteps: z.number().int().positive().optional() }).optional(),
 });
 
+/** POST .../fire: the period is checked against the routine's schedule by the routines, with the reason in the 400. */
+const FireRequest = z.object({ period: z.string().min(1), dryRun: z.boolean().optional(), force: z.boolean().optional() });
+
+const ROUTINE_PATH = /^\/internal\/v1\/routines\/([^/]+)\/(fire|periods\/([^/]+))$/;
+
 export interface InternalApiOptions {
   /** Bearer key per caller (secrets.jobKeys). */
   keys: Partial<Record<JobCaller, string>>;
   jobs: Pick<JobRunner, "runJob">;
+  /** The routines' periods (fire, status); absent: those routes are 404. */
+  routines?: Pick<Routines, "fire" | "status">;
   log: Pick<Logger, "info" | "warn" | "error">;
 }
 
@@ -78,6 +86,23 @@ export function createInternalApi(o: InternalApiOptions): { route: Route } {
     }
   }
 
+  /** POST .../fire answers once the period is taken (202) or already over (200); the period runs in the background. */
+  async function firePeriod(req: IncomingMessage, res: ServerResponse, name: string, source: JobCaller): Promise<void> {
+    const parsed = FireRequest.safeParse(await readBody(req, 64 * 1024, 413));
+    if (!parsed.success) throw new HttpError(400, "bad_request", z.prettifyError(parsed.error));
+    const answer = await o.routines!.fire(name, parsed.data, source);
+    log.info({ routine: name, period: parsed.data.period, dryRun: parsed.data.dryRun ?? false, source, status: answer.status, ...("state" in answer.body && { state: answer.body.state }) }, "period submitted");
+    sendJson(res, answer.body, answer.status);
+  }
+
+  async function periodStatus(req: IncomingMessage, res: ServerResponse, name: string, period: string): Promise<void> {
+    const q = new URL(req.url ?? "/", "http://internal").searchParams.get("dryRun");
+    if (q !== null && q !== "true" && q !== "false") throw new HttpError(400, "bad_request", "dryRun is true or false");
+    const s = await o.routines!.status(name, period, q === "true");
+    if (!s) throw new HttpError(404, "not_found", `no record of period ${period}`);
+    sendJson(res, s);
+  }
+
   async function handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const path = (req.url ?? "/").split("?")[0]!;
     const source = caller(req);
@@ -85,6 +110,21 @@ export function createInternalApi(o: InternalApiOptions): { route: Route } {
     if (path === "/internal/v1/runs") {
       if (req.method !== "POST") throw new HttpError(405, "method_not_allowed", "use POST");
       return runs(req, res, source);
+    }
+    const m = ROUTINE_PATH.exec(path);
+    if (m && o.routines) {
+      const name = decoded(m[1]!);
+      try {
+        if (m[2] === "fire") {
+          if (req.method !== "POST") throw new HttpError(405, "method_not_allowed", "use POST");
+          return await firePeriod(req, res, name, source);
+        }
+        if (req.method !== "GET") throw new HttpError(405, "method_not_allowed", "use GET");
+        return await periodStatus(req, res, name, decoded(m[3]!));
+      } catch (err) {
+        if (err instanceof FireError) throw new HttpError(err.status, err.code, err.message);
+        throw err;
+      }
     }
     throw new HttpError(404, "not_found", "not found");
   }

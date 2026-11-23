@@ -35,10 +35,14 @@ const bytes = (s: string) => Buffer.byteLength(s, "utf8");
  * never the caller's, so a prompt-injected call cannot widen the network, credentials or limits, nor borrow them
  * from a pack the run was not given.
  */
-export function checkExec(index: SkillPackIndex, call: ExecCall, packs?: readonly string[]): ExecDecision {
+export function checkExec(index: SkillPackIndex, call: ExecCall, packs?: readonly string[], opts: { pipelineStep?: boolean } = {}): ExecDecision {
   if (packs && !packs.includes(call.pack)) return deny("pack_not_in_run", `skill pack "${call.pack}" is not one of this run's (${packs.join(", ") || "none"})`);
   const pack = index.get(call.pack);
   if (!pack) return deny("unknown_pack", `unknown skill pack "${call.pack}"`);
+  // A step pack's commands run only as the pipeline engine's steps, never as a model's choice, even when a
+  // configuration mistake puts the pack in a run's packs (S-D23). And the engine runs nothing but step packs.
+  if (pack.pipeline && !opts.pipelineStep) return deny("step_pack", `skill pack ${pack.name} holds a routine type's steps; only the pipeline engine runs them`);
+  if (!pack.pipeline && opts.pipelineStep) return deny("not_step_pack", `skill pack ${pack.name} declares no pipeline`);
   const spec = pack.sandbox;
   if (!spec) return deny("no_sandbox", `skill pack ${pack.name} declares no sandbox, so it cannot execute anything`);
   if (spec.tools.length === 0) return deny("no_tools", `skill pack ${pack.name} declares no tools in its sandbox`);

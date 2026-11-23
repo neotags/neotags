@@ -19,6 +19,8 @@ export interface JobRunRequest {
   routine: string;
   /** The period this run is for (RFC 3339, UTC). With the routine, its session: a retry queues behind the last try. */
   period: string;
+  /** A dry run of the period: its own session, so it never queues behind (or ahead of) the formal run. */
+  dryRun?: boolean;
   /** A subset of the routine's packs; default: all of them. */
   packs?: string[];
   /** The data to work on: a string as it is, anything else as JSON. Untrusted. */
@@ -126,7 +128,7 @@ export function createJobRunner(o: JobRunnerOptions) {
     try {
       const submitted = o.runs.submit({
         source: opts.caller,
-        sessionId: `job:${req.routine}:${req.period}`,
+        sessionId: `job:${req.routine}:${req.period}${req.dryRun ? ":dryrun" : ""}`,
         question: req.instructions ?? DEFAULT_QUESTION,
         jobInput: input,
         packs,

@@ -473,3 +473,87 @@ export class ToolSpans {
     }
   }
 }
+
+/**
+ * The root span of one period of a routine, `routine <name>`: its own trace (never the `fire` request's), the parent
+ * of its sandbox steps (`routine.step <step>`) and of its runs' `invoke_agent job`. A takeover starts a new one.
+ */
+export function startRoutineSpan(r: { name: string; period: string; kind: string; dryRun: boolean; holder: string }): Span {
+  return guarded(
+    () =>
+      tracer.startSpan(
+        `routine ${r.name}`,
+        {
+          attributes: {
+            ...agentAttrs("job"),
+            "neotags.routine.name": r.name,
+            "neotags.routine.period": r.period,
+            "neotags.routine.kind": r.kind,
+            "neotags.routine.dry_run": r.dryRun,
+            "neotags.routine.holder": r.holder,
+          },
+        },
+        ROOT_CONTEXT,
+      ),
+    NOOP_SPAN,
+  );
+}
+
+/** W3C traceparent of a span, for runJob: its run hangs under it when sampled, links to it when not. */
+export function traceparentOf(span: Span): string | undefined {
+  const sc = span.spanContext();
+  if (!isSpanContextValid(sc)) return undefined;
+  return `00-${sc.traceId}-${sc.spanId}-${(sc.traceFlags & TraceFlags.SAMPLED) === TraceFlags.SAMPLED ? "01" : "00"}`;
+}
+
+/** `state`: delivered, failed, interrupted (shutdown; another Pod goes on), superseded (the lease was lost). */
+export function endRoutineSpan(span: Span, o: { state: string; degraded: boolean; reason?: string }): void {
+  guarded(() => {
+    try {
+      span.setAttributes({ "neotags.routine.state": o.state, "neotags.routine.degraded": o.degraded, ...(o.reason && { "neotags.routine.reason": recorded(o.reason) }) });
+      if (o.state === "failed") fail(span, o.reason ?? "period failed", "error");
+    } finally {
+      span.end();
+    }
+  }, undefined);
+}
+
+export interface RoutineStepOutcome {
+  ok: boolean;
+  attempts: number;
+  durationMs: number;
+  exitCode?: number;
+  stdoutBytes?: number;
+  truncated?: boolean;
+  reason?: string;
+}
+
+/** One sandbox step of a period, `routine.step <step>`, a child of the period's root span. */
+export function startRoutineStepSpan(parent: Span, r: { name: string; period: string; step: string; pack: string }): Span {
+  return guarded(
+    () =>
+      tracer.startSpan(
+        `routine.step ${r.step}`,
+        { attributes: { ...agentAttrs("job"), "neotags.routine.name": r.name, "neotags.routine.period": r.period, "neotags.routine.step": r.step, "neotags.routine.step.pack": r.pack } },
+        trace.setSpan(ROOT_CONTEXT, parent),
+      ),
+    NOOP_SPAN,
+  );
+}
+
+export function endRoutineStepSpan(span: Span, o: RoutineStepOutcome): void {
+  guarded(() => {
+    try {
+      span.setAttributes({
+        "neotags.routine.step.attempts": o.attempts,
+        "neotags.routine.step.duration_ms": o.durationMs,
+        ...(o.exitCode !== undefined && { "neotags.sandbox.exit_code": o.exitCode }),
+        ...(o.stdoutBytes !== undefined && { "neotags.sandbox.stdout_bytes": o.stdoutBytes }),
+        ...(o.truncated !== undefined && { "neotags.sandbox.truncated": o.truncated }),
+      });
+      if (!o.ok) fail(span, o.reason ?? "step failed", "step_failed");
+    } finally {
+      span.end();
+    }
+  }, undefined);
+}

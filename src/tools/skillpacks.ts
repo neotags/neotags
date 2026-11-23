@@ -79,6 +79,57 @@ const sandboxSchema = z.object({
 });
 export type SandboxSpec = z.infer<typeof sandboxSchema>;
 
+const budgetSchema = z.object({ wallClockSec: z.number().positive().optional(), maxSteps: z.number().int().positive().optional() }).strict();
+
+// A routine type (S-D22, S-D23): the deterministic steps the pipeline engine runs in the sandbox under the pack's own
+// `sandbox` declaration, and where the one model step (the classify run) goes between them. Never offered to a model.
+const pipelineSchema = z
+  .object({
+    type: z.string().regex(/^[a-z][a-z0-9-]{0,63}$/, "lowercase letters, digits and dashes"),
+    // JSON Schema of routines.<name>.params, a file of this pack (e.g. references/params.schema.json).
+    params: z.string().min(1).optional(),
+    steps: z
+      .array(
+        z
+          .object({
+            name: z.string().regex(/^[a-z][a-z0-9-]{0,31}$/, "lowercase letters, digits and dashes"),
+            argv: z.array(z.string().min(1)).min(1),
+          })
+          .strict(),
+      )
+      .min(1),
+    classify: z
+      .object({
+        // The step whose output (`classifyInput`) the classify run reads.
+        after: z.string().min(1),
+        // `<pack>/<file>`: a file under another loaded pack's references/, read by name.
+        outputSchema: z.string().regex(/^[^/]+\/references\/[^/].*$/, "<pack>/references/<file>"),
+        budget: budgetSchema.optional(),
+      })
+      .strict()
+      .optional(),
+    // The step the engine goes on with, with problems: null, when the classify run fails or is degraded.
+    degrade: z.string().min(1).optional(),
+  })
+  .strict()
+  .superRefine((p, ctx) => {
+    const names = p.steps.map((s) => s.name);
+    names.forEach((n, i) => {
+      if (names.indexOf(n) !== i) ctx.addIssue({ code: "custom", path: ["steps", i, "name"], message: `duplicate step ${n}` });
+    });
+    const after = p.classify ? names.indexOf(p.classify.after) : -1;
+    if (p.classify && after < 0) ctx.addIssue({ code: "custom", path: ["classify", "after"], message: `${p.classify.after} is not a step` });
+    if (p.classify && after === names.length - 1) ctx.addIssue({ code: "custom", path: ["classify", "after"], message: "a step must follow the classify run, to render its result" });
+    if (p.degrade !== undefined) {
+      if (!p.classify) ctx.addIssue({ code: "custom", path: ["degrade"], message: "degrade needs classify" });
+      else if (names.indexOf(p.degrade) <= after) ctx.addIssue({ code: "custom", path: ["degrade"], message: `${p.degrade} is not a step after ${p.classify.after}` });
+    }
+  });
+export type PipelineSpec = z.infer<typeof pipelineSchema> & {
+  /** The `params` file, parsed. */
+  paramsSchema?: Record<string, unknown>;
+};
+
 export interface SkillPack {
   name: string;
   description: string;
@@ -90,6 +141,11 @@ export interface SkillPack {
   sandbox?: SandboxSpec;
   /** Front matter `metadata.version`. */
   version?: string;
+  /**
+   * Front matter `pipeline`: a step pack, whose commands only the pipeline engine runs (never `run_skill_command`),
+   * under its `sandbox` declaration.
+   */
+  pipeline?: PipelineSpec;
 }
 
 /** Loaded packs. Reads come from this in-memory index only, so a model-chosen path never reaches the filesystem. */
@@ -211,6 +267,7 @@ export async function loadSkillPacks(o: SkillPackOptions): Promise<{ index: Skil
     let body: string | undefined;
     let sandbox: SandboxSpec | undefined;
     let version: string | undefined;
+    let pipeline: PipelineSpec | undefined;
     if (whole) {
       const md = await read(`${name}/SKILL.md`);
       if (md === undefined) {
@@ -240,6 +297,15 @@ export async function loadSkillPacks(o: SkillPackOptions): Promise<{ index: Skil
           warnings.push(`skill pack ${name}: invalid sandbox declaration, ignored (the pack cannot execute anything): ${issues}`);
         }
       }
+      if (meta.pipeline !== undefined) {
+        // A step pack that cannot be read as declared is left out whole: half of one could end up offered to a model.
+        const p = await loadPipeline(name, meta.pipeline, sandbox, read);
+        if (typeof p === "string") {
+          warnings.push(`skill pack ${name}: ${p}, skipped`);
+          continue;
+        }
+        pipeline = p;
+      }
     }
     const files = new Set(whole ? await listRefs(name) : []);
     for (const f of o.refs[name] ?? []) {
@@ -255,9 +321,40 @@ export async function loadSkillPacks(o: SkillPackOptions): Promise<{ index: Skil
       warnings.push(`skill pack ${name}: none of its listed references could be read, skipped`);
       continue;
     }
-    packs.set(name, { name, description, ...(body !== undefined && { body }), refs, ...(sandbox && { sandbox }), ...(version && { version }) });
+    packs.set(name, { name, description, ...(body !== undefined && { body }), refs, ...(sandbox && { sandbox }), ...(version && { version }), ...(pipeline && { pipeline }) });
   }
   return { index: new SkillPackIndex(packs), warnings };
+}
+
+/** A step pack's `pipeline` declaration, checked against its `sandbox` and with its params schema read; or why not. */
+async function loadPipeline(
+  pack: string,
+  raw: unknown,
+  sandbox: SandboxSpec | undefined,
+  read: (rel: string) => Promise<string | undefined>,
+): Promise<PipelineSpec | string> {
+  const parsed = pipelineSchema.safeParse(raw);
+  if (!parsed.success) return `invalid pipeline declaration: ${parsed.error.issues.map((i) => `${["pipeline", ...i.path].join(".")}: ${i.message}`).join("; ")}`;
+  const p: PipelineSpec = parsed.data;
+  if (!sandbox) return "a pipeline needs a valid sandbox declaration: its steps run under it";
+  for (const s of p.steps) {
+    if (!sandbox.tools.includes(s.argv[0]!)) return `pipeline step ${s.name}: ${JSON.stringify(s.argv[0])} is not one of sandbox.tools`;
+  }
+  if (p.params !== undefined) {
+    const rel = cleanRelative(p.params);
+    if (!rel) return `pipeline.params ${JSON.stringify(p.params)} is not a plain relative path`;
+    const text = await read(`${pack}/${rel}`);
+    if (text === undefined) return `pipeline.params ${rel} could not be read`;
+    let schema: unknown;
+    try {
+      schema = JSON.parse(text);
+    } catch (err) {
+      return `pipeline.params ${rel} is not JSON (${(err as Error).message})`;
+    }
+    if (!schema || typeof schema !== "object" || Array.isArray(schema)) return `pipeline.params ${rel} is not a JSON Schema object`;
+    p.paramsSchema = schema as Record<string, unknown>;
+  }
+  return p;
 }
 
 /**

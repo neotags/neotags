@@ -22,14 +22,24 @@ const compiled = new WeakMap<object, ValidateFunction>();
  * runJob's). strict: false so schemas written for other validators (unknown keywords, `$comment`) still work.
  */
 export function outputValidator(schema: Record<string, unknown>): ValidateFunction {
-  const hit = compiled.get(schema);
-  if (hit) return hit;
   // Tool parameters are an object on every model API.
   if (schema.type !== "object") throw new Error('the output schema must have type "object"');
+  return schemaValidator(schema);
+}
+
+/** A validator for any JSON Schema, read as draft 2020-12 like output schemas (a routine type's params); throws when unusable. */
+export function schemaValidator(schema: Record<string, unknown>): ValidateFunction {
+  const hit = compiled.get(schema);
+  if (hit) return hit;
   const { $schema: _draft, ...body } = schema;
   const v = addFormats(new Ajv2020({ strict: false, allErrors: true })).compile(body);
   compiled.set(schema, v);
   return v;
+}
+
+/** ajv's errors, one per line (at most 20), for configuration errors and the model alike. */
+export function schemaErrors(v: ValidateFunction): string {
+  return describe(v);
 }
 
 const MAX_ERRORS = 20;

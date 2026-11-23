@@ -51,7 +51,8 @@ export class SkillExecutor {
   runnable(packs?: readonly string[]): SkillPack[] {
     if (!this.enabled) return [];
     const all = packs ? packs.flatMap((n) => this.o.index.get(n) ?? []) : this.o.index.list();
-    return all.filter((p) => p.sandbox && p.sandbox.tools.length > 0);
+    // Step packs run only as the pipeline engine's steps.
+    return all.filter((p) => p.sandbox && p.sandbox.tools.length > 0 && !p.pipeline);
   }
 
   /** The guard's decision for a `run_skill_command` call of a run with skill packs `packs`, for `beforeToolCall`. */
@@ -60,12 +61,15 @@ export class SkillExecutor {
     return execDecision(checkExec(this.o.index, { pack: typeof a.pack === "string" ? a.pack : "", argv: a.argv, stdin: a.stdin }, packs));
   }
 
-  /** `packs`: limit the execution to these skill packs (a run passes its own). */
-  async exec(entry: ExecEntry, opts: { signal?: AbortSignal; packs?: readonly string[] } = {}): Promise<ExecResult> {
+  /**
+   * `packs`: limit the execution to these skill packs (a run passes its own). `pipelineStep`: a pipeline engine
+   * step, which only a step pack may run (and a step pack only as one).
+   */
+  async exec(entry: ExecEntry, opts: { signal?: AbortSignal; packs?: readonly string[]; pipelineStep?: boolean } = {}): Promise<ExecResult> {
     const { signal, packs } = opts;
     const id = (entry.id ?? `neotags-${randomUUID()}`).replace(ID_CHARS, "_").slice(0, 128);
     const audit = { audit: "sandbox_exec", id, backend: this.o.sandbox.backend };
-    const d = checkExec(this.o.index, entry, packs);
+    const d = checkExec(this.o.index, entry, packs, { pipelineStep: opts.pipelineStep === true });
     if (!d.ok) {
       // The rule, not the reason: a reason can quote the caller's file paths, env names or arguments. Likewise the
       // pack is logged only when it is a loaded pack's name, and the tool not at all: it was not checked.
