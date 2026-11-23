@@ -564,6 +564,88 @@ describe("deadlines and shutdown", () => {
   });
 });
 
+describe("review fixes", () => {
+  it("gives a dry run's runs a session of their own", async () => {
+    const h = harness();
+    await fire(h, { dryRun: true });
+    await h.routines.idle();
+    expect(h.model.inputs[0]!.sessionId).toBe(`job:daily:${P}:dryrun`);
+  });
+
+  it("waits, on drain, for a fire that was taking the lease when the drain began, and interrupts its period", async () => {
+    const h = harness({ run: { hold: true } });
+    const get = h.store.get.bind(h.store);
+    let release!: () => void;
+    const gate = new Promise<void>((r) => (release = r));
+    let gated = false;
+    // Hold the read under the lease, so the drain starts before the period is registered.
+    h.store.get = async (key) => {
+      if (key === `${DIR}run.json` && h.store.objects.has(`${DIR}lease.json`) && !gated) {
+        gated = true;
+        await gate;
+      }
+      return get(key);
+    };
+    const fired = fire(h);
+    await until(() => gated);
+    const drained = h.routines.drain(2000);
+    release();
+    await expect(fired).resolves.toMatchObject({ status: 202 });
+    expect(await drained).toBe(true);
+    expect(h.json(`${DIR}run.json`)).toMatchObject({ state: "running", reason: "interrupted" });
+    expect(h.store.objects.has(`${DIR}lease.json`)).toBe(false);
+  });
+
+  it("stops a run when the minute refresh finds run.json written by another holder", async () => {
+    const h = harness({ run: { hold: true }, timing: { refreshMs: 10 } });
+    await fire(h, {}, "weekly");
+    await until(() => h.model.inputs.length === 1);
+    h.store.objects.set(`${AGENT_DIR}run.json`, { body: JSON.stringify({ state: "running", token: "other" }), etag: '"other"' });
+    await h.routines.idle();
+    expect(h.model.ctxs[0]!.signal.aborted).toBe(true);
+    expect(h.store.objects.has(`${AGENT_DIR}output.json`)).toBe(false);
+  });
+
+  it("refreshes run.json while a step waits for a slot, so a queued step is not stalled", async () => {
+    const h = harness({ timing: { refreshMs: 10 } });
+    await h.slots.acquire(10);
+    await fire(h);
+    await until(() => h.json<RunRecord>(`${DIR}run.json`)!.step === "pull");
+    const first = h.json<RunRecord>(`${DIR}run.json`)!.updatedAt;
+    h.clock.t += 60_000;
+    await until(() => h.json<RunRecord>(`${DIR}run.json`)!.updatedAt !== first);
+    h.slots.release();
+    await h.routines.idle();
+    expect(h.json(`${DIR}run.json`).state).toBe("delivered");
+  });
+
+  it("writes state.json even when render gives no state, so an earlier attempt's never carries over", async () => {
+    const store = new MemoryArtifactStore();
+    store.objects.set(`${DIR}state.json`, { body: JSON.stringify({ stale: true }), etag: '"s"' });
+    const h = harness({ store, steps: { ...defaultSteps(), render: ok({ bundle: bundle() }) } });
+    await fire(h);
+    await h.routines.idle();
+    expect(h.json(`${DIR}state.json`)).toBeNull();
+  });
+
+  it("reads the lease before run.json, so a holder finishing in between is not reported orphaned", async () => {
+    const store = new MemoryArtifactStore();
+    leftBy(store, DIR, { token: "t", leaseExpiresAt: new Date(T0 + 200_000).toISOString(), run: {} });
+    const h = harness({ store });
+    const get = store.get.bind(store);
+    // The holder writes failed and releases right after the status read the lease.
+    store.get = async (key) => {
+      const r = await get(key);
+      if (key === `${DIR}lease.json`) {
+        leftBy(store, DIR, { token: "t", run: { state: "failed", reason: "step pull: exit code 1" } });
+        store.objects.delete(`${DIR}lease.json`);
+      }
+      return r;
+    };
+    expect((await h.routines.status("daily", P, false))!.state).toBe("failed");
+  });
+});
+
 describe("period status", () => {
   const status = (store: MemoryArtifactStore, clock = { t: T0 }) => harness({ store, clock }).routines.status("daily", P, false);
 

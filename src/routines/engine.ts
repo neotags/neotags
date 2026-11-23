@@ -1,6 +1,7 @@
 import type { Span } from "@opentelemetry/api";
 import type { Logger } from "pino";
 import type { Config, Routine } from "../config/index.js";
+import { isObj } from "../guardrails/tools.js";
 import { JobRequestError, MAX_JOB_INPUT_CHARS, type JobRunner } from "../runs/job.js";
 import type { SkillExecutor } from "../sandbox/exec.js";
 import type { Slots } from "../sandbox/slots.js";
@@ -80,7 +81,6 @@ const SUMMARY_CUT = "\n[cut: the summary was over the input limit]";
 /** stderr kept per step attempt in the period's records, for debugging. */
 const MAX_STDERR_CHARS = 64_000;
 
-const isObj = (v: unknown): v is Record<string, unknown> => typeof v === "object" && v !== null && !Array.isArray(v);
 const SAFE_NAME = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
 /**
@@ -165,16 +165,16 @@ function judge(r: ExecResult): StepResult {
 /**
  * Run the pipeline from where the records say it got to: a bundle already written means only delivery is left;
  * a data.json checkpoint skips the steps up to it; anything else runs again. Writes data.json, output.json,
- * state.json and bundle/ (manifest last). Returns the bundle's notify and whether the classify run degraded.
+ * state.json and bundle/ (manifest last). Returns the bundle's notify; a degraded classify run is in run.json.
  */
-export async function runPipeline(h: PeriodHandle, d: EngineDeps): Promise<{ notify: boolean; degraded: boolean }> {
+export async function runPipeline(h: PeriodHandle, d: EngineDeps): Promise<{ notify: boolean }> {
   const t = d.types.get(h.routine.type);
   if (!t) throw new PeriodFailed(`no step pack declares routine type ${h.routine.type}`);
   const { spec, pack } = t;
   const manifest = parseJson<{ notify?: unknown }>(await h.read("bundle/manifest.json"));
   if (manifest) {
     for (const s of spec.steps) await h.stepEnded(s.name, { state: "skipped", reason: "bundle already written" });
-    return { notify: manifest.notify !== false, degraded: false };
+    return { notify: manifest.notify !== false };
   }
   const names = spec.steps.map((s) => s.name);
   const after = spec.classify ? names.indexOf(spec.classify.after) : -1;
@@ -195,7 +195,6 @@ export async function runPipeline(h: PeriodHandle, d: EngineDeps): Promise<{ not
 
   let classified = false;
   let problems: unknown = null;
-  let degraded = false;
   let final: Record<string, unknown> | undefined;
   for (let i = start; i < spec.steps.length; i++) {
     if (spec.classify && i === after + 1 && !classified) {
@@ -203,7 +202,6 @@ export async function runPipeline(h: PeriodHandle, d: EngineDeps): Promise<{ not
       const c = await classify(h, d, t, summary);
       if (c.ok) problems = c.problems;
       else {
-        degraded = true;
         await h.noteRun(undefined, true);
         if (!spec.degrade) throw new PeriodFailed(`classify run: ${c.reason}; routine type ${h.routine.type} has no degrade step`);
         d.log.warn({ routine: h.name, period: h.period, reason: c.reason, degrade: spec.degrade }, "classify run failed; rendering without problems");
@@ -225,10 +223,12 @@ export async function runPipeline(h: PeriodHandle, d: EngineDeps): Promise<{ not
   }
   const split = bundleFiles(final?.bundle);
   if (typeof split === "string") throw new PeriodFailed(`step ${names.at(-1)}: ${split}`);
-  if (final!.state !== undefined) await h.write("state.json", JSON.stringify(final!.state));
+  // Always written: an earlier attempt's state must not become the next period's previous.state. (Stale bundle files
+  // are harmless: only what manifest.json lists is delivered.)
+  await h.write("state.json", JSON.stringify(final!.state ?? null));
   for (const [f, body] of Object.entries(split.files)) await h.write(`bundle/${f}`, body);
   await h.write("bundle/manifest.json", JSON.stringify(split.manifest));
-  return { notify: split.manifest.notify !== false, degraded };
+  return { notify: split.manifest.notify !== false };
 }
 
 async function runStep(
@@ -283,7 +283,8 @@ async function runStep(
 /** One try: a slot (never held past the call), then the sandbox. A queue timeout or a busy executor is a failure. */
 async function attempt(h: PeriodHandle, d: EngineDeps, pack: string, step: { name: string; argv: string[] }, inJson: string, n: number): Promise<StepResult> {
   try {
-    await d.slots.acquire(d.stepSlotTimeoutMs, h.signal);
+    // Refreshing run.json while queued: a step waiting for the classify run's slot is not stalled.
+    await h.refreshing(d.slots.acquire(d.stepSlotTimeoutMs, h.signal));
   } catch (why) {
     h.checkpoint();
     return { ok: false, retry: true, reason: `no jobsApi.concurrency slot within ${Math.round(d.stepSlotTimeoutMs / 1000)} s (${String(why)})` };
@@ -321,7 +322,7 @@ async function classify(h: PeriodHandle, d: EngineDeps, t: RoutineType, summary:
     try {
       result = await h.refreshing(
         d.runJob(
-          { routine: h.name, period: h.period, packs: h.routine.packs, input: classifyInput(summary, prev, team), outputSchema: t.outputSchema, ...(c.budget && { budget: c.budget }) },
+          { routine: h.name, period: h.period, dryRun: h.dryRun, packs: h.routine.packs, input: classifyInput(summary, prev, team), outputSchema: t.outputSchema, ...(c.budget && { budget: c.budget }) },
           { caller: "job", signal: h.signal, ...(h.traceparent && { traceparent: h.traceparent }) },
         ),
       );

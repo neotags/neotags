@@ -31,6 +31,7 @@ const MAX_SUMMARY_CHARS = 4000;
 const MAX_STATE_CHARS = 8000;
 /** Periods looked at, newest first, for the previous completed one. */
 const MAX_PREVIOUS_SCAN = 60;
+const PREVIOUS_BATCH = 6;
 
 /** The output of an agent routine's run (S-D17): fixed, not configurable. */
 export const AGENT_OUTPUT_SCHEMA: Record<string, unknown> = {
@@ -123,16 +124,33 @@ export function createRoutines(o: RoutinesOptions) {
     const { prefixes } = await store.list(base, { delimiter: "/" });
     // dryrun/ is not a period name, so dry runs are never anyone's previous period.
     const periods = prefixes.map((p) => p.slice(base.length, -1)).filter((p) => PERIOD.test(p) && p < period).sort().reverse();
-    for (const p of periods.slice(0, MAX_PREVIOUS_SCAN)) {
-      const run = await readJson<RunRecord>(`${base}${p}/run.json`);
-      if (run?.value.state === "delivered") return `${base}${p}/`;
+    const scan = periods.slice(0, MAX_PREVIOUS_SCAN);
+    // In small batches, newest first: usually the first one is it, and a run of failed periods is not read one by one.
+    for (let i = 0; i < scan.length; i += PREVIOUS_BATCH) {
+      const batch = scan.slice(i, i + PREVIOUS_BATCH);
+      const runs = await Promise.all(batch.map((p) => readJson<RunRecord>(`${base}${p}/run.json`)));
+      const hit = runs.findIndex((r) => r?.value.state === "delivered");
+      if (hit >= 0) return `${base}${batch[hit]}/`;
     }
     return undefined;
   }
 
+  /** fire() calls past the draining check that have not registered their period yet: drain waits for them too. */
+  const starting = new Set<Promise<unknown>>();
+
   async function fire(name: string, req: { period: string; dryRun?: boolean; force?: boolean }, caller: JobCaller): Promise<FireAnswer> {
     const routine = routineOf(name);
     if (draining || o.isDraining?.()) throw new FireError(503, "shutting_down", "shutting down; submit again");
+    const p = start(name, routine, req, caller);
+    starting.add(p);
+    try {
+      return await p;
+    } finally {
+      starting.delete(p);
+    }
+  }
+
+  async function start(name: string, routine: Routine, req: { period: string; dryRun?: boolean; force?: boolean }, caller: JobCaller): Promise<FireAnswer> {
     const why = periodError(routine.trigger, req.period, now());
     if (why) throw new FireError(400, "bad_request", `period ${req.period}: ${why}`);
     const dryRun = req.dryRun === true;
@@ -187,8 +205,12 @@ export function createRoutines(o: RoutinesOptions) {
     }
     lease.start();
     const p = new PeriodRun({ name, routine, period: req.period, dryRun, dir, lease, run, span, controller, caller });
-    const done = background(p).finally(() => active.delete(dir));
-    active.set(dir, { controller, done });
+    const entry = { controller, done: Promise.resolve() };
+    // Only its own entry: a superseded run still unwinding must not drop a newer run of the same period on this Pod.
+    entry.done = background(p).finally(() => {
+      if (active.get(dir) === entry) active.delete(dir);
+    });
+    active.set(dir, entry);
     // A shutdown that began while this request was taking the lease.
     if (draining) controller.abort(new Stop("interrupted", "shutting down"));
     log.info({ routine: name, period: req.period, dryRun, holder: o.holder, deadlineAt: run.value?.deadlineAt, ...(force && { force }) }, "period started");
@@ -277,7 +299,12 @@ export function createRoutines(o: RoutinesOptions) {
 
     async refreshing<T>(work: Promise<T>): Promise<T> {
       const timer = setInterval(() => {
-        if (!this.signal.aborted) void this.update(() => ({})).catch((err: unknown) => log.warn({ routine: this.i.name, period: this.i.period, err: errText(err) }, "could not refresh run.json"));
+        if (this.signal.aborted) return;
+        void this.update(() => ({})).catch((err: unknown) => {
+          // Someone else holds the period now: stop the run at once instead of paying for it to the end.
+          if (err instanceof Superseded) this.i.controller.abort(new Stop("superseded", err.message));
+          else log.warn({ routine: this.i.name, period: this.i.period, err: errText(err) }, "could not refresh run.json");
+        });
       }, refreshMs);
       timer.unref();
       try {
@@ -384,7 +411,7 @@ export function createRoutines(o: RoutinesOptions) {
     try {
       r = await p.refreshing(
         o.jobs.runJob(
-          { routine: p.i.name, period: p.i.period, input, outputSchema: AGENT_OUTPUT_SCHEMA, instructions: routine.instructions, ...(routine.budget && { budget: routine.budget }) },
+          { routine: p.i.name, period: p.i.period, dryRun: p.i.dryRun, input, outputSchema: AGENT_OUTPUT_SCHEMA, instructions: routine.instructions, ...(routine.budget && { budget: routine.budget }) },
           { caller: p.i.caller, signal: p.signal, ...(p.traceparent && { traceparent: p.traceparent }) },
         ),
       );
@@ -456,7 +483,10 @@ export function createRoutines(o: RoutinesOptions) {
     routineOf(name);
     if (!PERIOD.test(period)) throw new FireError(400, "bad_request", "not a period: RFC 3339 in UTC to the minute");
     const dir = periodDir(name, period, dryRun);
-    const [runObj, leaseObj, deliveredObj] = await Promise.all([readJson<RunRecord>(`${dir}run.json`), readJson<LeaseRecord>(`${dir}lease.json`), readJson<DeliveredRecord>(`${dir}delivered.json`)]);
+    // The lease before run.json: a holder writes its final state, then releases. Read the other way round, a poll
+    // between the two would pair the old `running` with no lease and call the period orphaned.
+    const leaseObj = await readJson<LeaseRecord>(`${dir}lease.json`);
+    const [runObj, deliveredObj] = await Promise.all([readJson<RunRecord>(`${dir}run.json`), readJson<DeliveredRecord>(`${dir}delivered.json`)]);
     if (!runObj) return undefined;
     const run = runObj.value;
     const lease = leaseObj?.value;
@@ -496,11 +526,17 @@ export function createRoutines(o: RoutinesOptions) {
   /** Shutdown: stop taking periods, interrupt those running (not failed: another Pod goes on), and wait for them. */
   async function drain(timeoutMs: number): Promise<boolean> {
     draining = true;
-    const all = [...active.values()];
-    for (const a of all) a.controller.abort(new Stop("interrupted", "shutting down"));
+    // A fire() in progress registers its period after this point, and aborts it itself (draining): wait for it too.
+    const settle = async () => {
+      while (active.size || starting.size) {
+        for (const a of active.values()) a.controller.abort(new Stop("interrupted", "shutting down"));
+        await Promise.allSettled([...starting, ...[...active.values()].map((a) => a.done)]);
+      }
+      return true as const;
+    };
     let timer: NodeJS.Timeout | undefined;
     const timedOut = new Promise<false>((r) => (timer = setTimeout(() => r(false), timeoutMs)));
-    const ok = await Promise.race([Promise.all(all.map((a) => a.done)).then(() => true as const), timedOut]);
+    const ok = await Promise.race([settle(), timedOut]);
     clearTimeout(timer);
     return ok;
   }
