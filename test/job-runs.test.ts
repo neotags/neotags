@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { createGateway } from "../src/agent/models.js";
 import { loadConfig } from "../src/config/index.js";
+import { jobOnlyPacks } from "../src/runs/index.js";
 import { createJobRunner, JobRequestError, type JobRunRequest } from "../src/runs/job.js";
 import { RunManager } from "../src/runs/manager.js";
 import { outputValidator, SUBMIT_TOOL, submitOutputTool } from "../src/runs/output.js";
@@ -60,6 +61,17 @@ const index = new SkillPackIndex(
     ["triage", { name: "triage", description: "Group alerts into problems", body: "Group by cause.", refs: new Map() }],
     ["other", { name: "other", description: "Something else", body: "Other.", refs: new Map([["secret.md", "other's reference"]]) }],
     ["method", { name: "method", description: "", refs: new Map([["problems.md", "how to group"]]) }],
+    [
+      "triage-steps",
+      {
+        name: "triage-steps",
+        description: "Steps of the alert-triage type",
+        body: "Run collect, then render.",
+        refs: new Map([["steps.md", "step notes"]]),
+        sandbox: { net: [], tools: ["example-cli"], credentials: [] },
+        pipeline: { type: "alert-triage", steps: [{ name: "collect", argv: ["example-cli"] }] },
+      },
+    ],
   ]),
 );
 
@@ -89,7 +101,7 @@ function ctxFor(o: { maxSteps?: number; signal?: AbortSignal } = {}): RunContext
   };
 }
 
-function piRunner(replies: Reply[], cfg = cfgFor()) {
+function piRunner(replies: Reply[], cfg = cfgFor(), jobOnly: string[] = []) {
   const stream = scripted(replies);
   const gateway = createGateway(cfg);
   const runner = new PiAgentRunner({
@@ -97,6 +109,7 @@ function piRunner(replies: Reply[], cfg = cfgFor()) {
     index,
     botName: "moose",
     entries: {},
+    jobOnly,
     firstTokenTimeoutMs: 1000,
     maxRetries: 0,
     charsPerToken: 4,
@@ -213,6 +226,7 @@ describe("submit_output", () => {
     expect(sent).toContain("how to group");
     expect(sent).toContain("- triage: Group alerts into problems");
     expect(sent).not.toContain("- other:");
+    expect(sent).not.toContain("triage-steps");
   });
 
   it("leaves runs without an outputSchema unchanged", async () => {
@@ -221,6 +235,52 @@ describe("submit_output", () => {
     expect(out).toMatchObject({ state: "done", answer: "plain answer", model: "flash-model" });
     expect(out.output).toBeUndefined();
     expect(toolNames(stream.calls[0]!.context)).not.toContain(SUBMIT_TOOL);
+  });
+});
+
+describe("skill pack visibility outside routines", () => {
+  for (const source of ["o2", "slack"] as const) {
+    it(`hides step packs and routine-only packs from ${source} runs, in the prompt and in read_skill`, async () => {
+      const { runner, stream } = piRunner(
+        [
+          callTool("read_skill", { name: "triage-steps" }),
+          callTool("read_skill_ref", { name: "triage-steps", file: "steps.md" }),
+          callTool("read_skill", { name: "triage" }),
+          callTool("read_skill", { name: "other" }),
+          say("answer"),
+        ],
+        cfgFor(),
+        jobOnlyPacks(cfgFor()),
+      );
+      await expect(runner.run({ source, sessionId: "s", question: "q?" }, ctxFor())).resolves.toMatchObject({ answer: "answer" });
+      const first = transcriptText(stream.calls[0]!.context);
+      expect(first).toContain("- other: Something else (references: secret.md)");
+      expect(first).toContain('- method: reference files only, no read_skill; read them with read_skill_ref("method", file) (references: problems.md)');
+      expect(first).not.toContain("triage");
+      const sent = transcriptText(stream.calls[4]!.context);
+      expect(sent).toContain('unknown skill pack "triage-steps"; available: other; reference files only (read_skill_ref): method');
+      expect(sent).not.toContain("step notes");
+      expect(sent).not.toContain("Run collect, then render.");
+      expect(sent).toContain('unknown skill pack "triage"');
+      expect(sent).not.toContain("Group by cause.");
+      expect(sent).toContain("Other.");
+    });
+  }
+
+  it("never shows a step pack to a job run, even one whose packs name it", async () => {
+    const { runner, stream } = piRunner([callTool("read_skill", { name: "triage-steps" }), callTool(SUBMIT_TOOL, good)]);
+    await expect(runner.run(job({ packs: ["triage", "triage-steps"] }), ctxFor())).resolves.toMatchObject({ output: good });
+    const sent = transcriptText(stream.calls[1]!.context);
+    expect(sent).toContain('unknown skill pack "triage-steps"');
+    expect(sent).not.toContain("Run collect, then render.");
+    expect(sent).not.toContain("- triage-steps");
+  });
+
+  it("counts a pack as routine-only unless an entry other than job lists it", () => {
+    expect(jobOnlyPacks(cfgFor())).toEqual(["triage"]);
+    const entries = (e: string) => jobOnlyPacks({ ...cfgFor(), agent: { ...cfgFor().agent, entries: JSON.parse(e) } });
+    expect(entries('{"job": ["triage"]}')).toEqual(["triage"]);
+    expect(entries('{"slack": ["triage"]}')).toEqual([]);
   });
 });
 

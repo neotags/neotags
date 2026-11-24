@@ -40,6 +40,7 @@ function setup(replies: Reply[], o: { cfg?: ReturnType<typeof cfgFor>; opts?: Pa
   const gateway = createGateway(cfg);
   const stream = scripted(replies);
   const runner = new PiAgentRunner({
+    jobOnly: [],
     gateway,
     index,
     botName: "moose",

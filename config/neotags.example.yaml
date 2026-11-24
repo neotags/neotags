@@ -77,8 +77,10 @@ llm:                     # any OpenAI-compatible gateway (OpenAI, LiteLLM, vLLM,
 # skillPacks:                     # Agent Skills (<pack>/SKILL.md + references/), mounted read-only
 #   dir: /etc/neotags/skills
 #   packs: [o2-query-assistant]   # whole packs: SKILL.md + every text file under references/
+#   #                             # o2/slack runs may read every pack here except step packs (front matter
+#   #                             # `pipeline:`) and packs only routines list (add one to agent.entries to share it)
 #   refs:                         # single reference files of other packs, relative to references/
-#     some-pack: [method.md, data/table.json]
+#     some-pack: [method.md, data/table.json]   # read with read_skill_ref only (no SKILL.md, no read_skill)
 # o2Gateway:                      # the OpenObserve AI assistant entry (docs/design/002-o2-gateway-contract.md)
 #   enabled: false                # needs env O2_AGENT_API_KEY (the x-o2-agent-key O2 sends) and an LLM
 #   port: 3001                    # its own port; in-cluster callers only (Service + NetworkPolicy)

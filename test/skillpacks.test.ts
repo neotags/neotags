@@ -4,6 +4,7 @@ import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { loadConfig } from "../src/config/index.js";
 import { entryVersions } from "../src/runs/index.js";
+import { systemPrompt } from "../src/runs/prompt.js";
 import { loadSkillPacks, packsVersion, parseSkillMd, skillPackTools } from "../src/tools/skillpacks.js";
 
 let dir: string;
@@ -191,11 +192,22 @@ describe("skill pack tools", () => {
     const [readSkill, readRef] = skillPackTools(index);
     const text = (r: { content: { type: string; text?: string }[] }) => r.content[0]!.text;
     expect(text(await readSkill!.execute("1", { name: "o2-query-assistant" }))).toContain("Check StreamSchema first.");
-    await expect(readSkill!.execute("2", { name: "governance" })).rejects.toThrow(/available: o2-query-assistant/);
+    await expect(readSkill!.execute("2", { name: "nope" })).rejects.toThrow('unknown skill pack "nope"; available: o2-query-assistant; reference files only (read_skill_ref): governance');
     expect(text(await readRef!.execute("3", { name: "o2-query-assistant", file: "references/o2-sql.md" }))).toBe("SELECT count(*) ...");
     expect(text(await readRef!.execute("4", { name: "governance", file: "research-method.md" }))).toBe("method");
     await expect(readRef!.execute("5", { name: "governance", file: "credentials.md" })).rejects.toThrow(/available: research-method.md/);
     await expect(readRef!.execute("6", { name: "o2-query-assistant", file: "../../governance/references/credentials.md" })).rejects.toThrow(/no reference/);
+  });
+
+  it("points read_skill on a reference-only pack to read_skill_ref, and the system prompt says so", async () => {
+    const { index } = await load();
+    const [readSkill] = skillPackTools(index);
+    await expect(readSkill!.execute("1", { name: "governance" })).rejects.toThrow(
+      'skill pack "governance" has reference files only; use read_skill_ref("governance", "<file>") with one of: research-method.md',
+    );
+    const prompt = systemPrompt({ botName: "moose", index, entryPacks: [] });
+    expect(prompt).toContain('- governance: reference files only, no read_skill; read them with read_skill_ref("governance", file) (references: research-method.md)');
+    expect(prompt).toContain("- o2-query-assistant: ");
   });
 });
 

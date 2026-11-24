@@ -28,11 +28,12 @@ export function systemPrompt(o: { botName: string; index: SkillPackIndex; entryP
   if (packs.length > 0) {
     const lines = packs.map((p) => {
       const refs = [...p.refs.keys()];
-      const desc = p.description ? `: ${p.description}` : p.body === undefined ? ": reference files only" : "";
+      // A pack mounted only for some reference files has no SKILL.md: read_skill fails on it.
+      const desc = p.body === undefined ? `: reference files only, no read_skill; read them with read_skill_ref("${p.name}", file)` : p.description ? `: ${p.description}` : "";
       return `- ${p.name}${desc}${refs.length ? ` (references: ${refs.join(", ")})` : ""}`;
     });
     parts.push(
-      `Skill packs (read one with read_skill(name), a reference with read_skill_ref(name, file) when it applies):\n${lines.join("\n")}`,
+      `Skill packs (read one's instructions with read_skill(name), a reference file with read_skill_ref(name, file) when it applies):\n${lines.join("\n")}`,
     );
   }
   for (const name of o.entryPacks) {

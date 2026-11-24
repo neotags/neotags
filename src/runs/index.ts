@@ -32,6 +32,15 @@ export function entryVersions(cfg: Config, index: SkillPackIndex): Partial<Recor
   );
 }
 
+/**
+ * Packs only routines use: in some routine's `packs`, in no other entry's `agent.entries`. Runs of the other entries
+ * neither list nor read them; a pack a routine shares with an entry goes in that entry's `agent.entries`.
+ */
+export function jobOnlyPacks(cfg: Pick<Config, "agent" | "routines">): string[] {
+  const shared = new Set(Object.entries(cfg.agent.entries).flatMap(([entry, names]) => (entry === "job" ? [] : (names ?? []))));
+  return [...new Set(Object.values(cfg.routines).flatMap((r) => r.packs))].filter((p) => !shared.has(p));
+}
+
 /** The run manager with the pi-agent-core runner, from config. Entries (O2 gateway, Slack) submit to it. */
 export function createRunManager(
   cfg: Config,
@@ -80,6 +89,7 @@ export function createRunManager(
     index: deps.index,
     botName: cfg.bot.name,
     entries: a.entries,
+    jobOnly: jobOnlyPacks(cfg),
     ...(tools && { tools }),
     ...(guard && { guard }),
     ...(mcp && { unavailable: (input: RunInput) => mcp.unavailable(input.mcp) }),
