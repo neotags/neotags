@@ -373,7 +373,6 @@ const text = (t: string) => ({ content: [{ type: "text" as const, text: t }], de
 
 /** read_skill / read_skill_ref over the loaded index. Unknown names fail with the list of what exists. */
 export function skillPackTools(index: SkillPackIndex): AgentTool<any>[] {
-  const withBody = () => index.list().filter((p) => p.body !== undefined).map((p) => p.name);
   const readSkillParams = obj({ name: str({ description: "Skill pack name" }) });
   const readSkill: AgentTool<typeof readSkillParams> = {
     name: "read_skill",
@@ -383,13 +382,15 @@ export function skillPackTools(index: SkillPackIndex): AgentTool<any>[] {
     executionMode: "parallel",
     execute: async (_id, { name }) => {
       const pack = index.get(name);
-      if (pack && pack.body === undefined) {
-        throw new Error(`skill pack "${name}" has reference files only; use read_skill_ref("${name}", "<file>") with one of: ${[...pack.refs.keys()].join(", ")}`);
-      }
-      if (pack?.body === undefined) {
-        const refsOnly = index.list().filter((p) => p.body === undefined).map((p) => p.name);
+      if (!pack) {
+        const all = index.list();
+        const withBody = all.filter((p) => p.body !== undefined).map((p) => p.name);
+        const refsOnly = all.filter((p) => p.body === undefined).map((p) => p.name);
         const also = refsOnly.length ? `; reference files only (read_skill_ref): ${refsOnly.join(", ")}` : "";
-        throw new Error(`unknown skill pack "${name}"; available: ${withBody().join(", ") || "none"}${also}`);
+        throw new Error(`unknown skill pack "${name}"; available: ${withBody.join(", ") || "none"}${also}`);
+      }
+      if (pack.body === undefined) {
+        throw new Error(`skill pack "${name}" has reference files only; use read_skill_ref("${name}", "<file>") with one of: ${[...pack.refs.keys()].join(", ")}`);
       }
       return text(pack.body);
     },

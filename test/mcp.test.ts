@@ -133,6 +133,7 @@ async function runToolCall(hub: McpHub, name: string, args: Record<string, unkno
   const cfg = loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", LLM_MODEL: "m" });
   const stream = scripted([callTool(name, args as never), say("done")]);
   const runner = new PiAgentRunner({
+    jobOnly: [],
     gateway: createGateway(cfg),
     index: new SkillPackIndex(),
     botName: "moose",

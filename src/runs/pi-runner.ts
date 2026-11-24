@@ -21,8 +21,11 @@ export interface PiRunnerOptions {
   botName: string;
   /** Skill packs in the system prompt per entry (agent.entries). */
   entries: Partial<Record<RunSource, string[]>>;
-  /** Packs only routines use (in a routine's `packs`, in no `agent.entries`): hidden from every other entry's runs. */
-  jobOnly?: readonly string[];
+  /**
+   * Packs only routines use (`jobOnlyPacks`): hidden from every other entry's runs. Required, so that a runner built
+   * without it cannot hand routine-only instructions to a question's run.
+   */
+  jobOnly: readonly string[];
   /**
    * More tools (MCP) next to read_skill / read_skill_ref; a function is read at the start of every run, with its
    * input and skill packs. What it registers with `onEnd` runs when the run ends, however it ends (run-scoped clients).
@@ -60,7 +63,14 @@ const textOf = (m: AssistantMessage | undefined): string =>
 /** A structured run's result: the output, and as the answer (logs, spans) the same as JSON. */
 const submitted = (value: unknown) => ({ answer: JSON.stringify(value), output: value });
 
-const lastAssistant = (messages: AgentMessage[]): AssistantMessage | undefined =>
+/**
+ * The packs of `index` a run may list and read. Step packs never: only the pipeline engine uses them, whatever a
+ * run's `packs` say (startup checks that no routine names one; this does not rely on it).
+ */
+const packView = (index: SkillPackIndex, keep: (p: SkillPack) => boolean) =>
+  new SkillPackIndex(new Map(index.list().filter((p) => !p.pipeline && keep(p)).map((p) => [p.name, p])));
+
+const lastAssistant =(messages: AgentMessage[]): AssistantMessage | undefined =>
   [...messages].reverse().find((m): m is AssistantMessage => (m as { role?: string }).role === "assistant");
 
 /**
@@ -75,7 +85,13 @@ const lastAssistant = (messages: AgentMessage[]): AssistantMessage | undefined =
  * Job runs (routines) take their model from the `job` chain, every other run from `agent`.
  */
 export class PiAgentRunner implements AgentRunner {
-  constructor(private o: PiRunnerOptions) {}
+  /** What every non-job run sees; it depends only on startup config, so it is built once. */
+  private readonly interactive: SkillPackIndex;
+
+  constructor(private o: PiRunnerOptions) {
+    const jobOnly = new Set(o.jobOnly);
+    this.interactive = packView(o.index, (p) => !jobOnly.has(p.name));
+  }
 
   async run(input: RunInput, ctx: RunContext): Promise<RunOutcome> {
     const { o } = this;
@@ -94,12 +110,7 @@ export class PiAgentRunner implements AgentRunner {
     // prompt see those packs, plus reference-only packs (skillPacks.refs: reference files other packs cite, never
     // instructions or execution). Other entries see every loaded pack but step packs (the pipeline engine's, never a
     // model's) and the packs only routines use (a classify run's instructions would mislead a question's run).
-    const jobOnly = new Set(o.jobOnly ?? []);
-    const visible =
-      input.source === "job"
-        ? (p: SkillPack) => packs.includes(p.name) || p.body === undefined
-        : (p: SkillPack) => !p.pipeline && !jobOnly.has(p.name);
-    const index = new SkillPackIndex(new Map(o.index.list().filter(visible).map((p) => [p.name, p])));
+    const index = input.source === "job" ? packView(o.index, (p) => packs.includes(p.name) || p.body === undefined) : this.interactive;
     // Registered here, run in the finally below. A tools function may connect (a run client listing its tools): if it
     // throws, what it registered is closed and the model lease released here.
     const onEnd: (() => unknown)[] = [];

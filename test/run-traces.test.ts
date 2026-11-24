@@ -55,6 +55,7 @@ const search: AgentTool<any> = {
 function setup(replies: Reply[], o: { captureContent?: boolean; runner?: Partial<PiRunnerOptions> } = {}) {
   const stream = scripted(replies);
   const runner = new PiAgentRunner({
+    jobOnly: [],
     gateway: createGateway(cfg),
     index,
     botName: "moose",

@@ -569,6 +569,7 @@ describe("run_skill_command in an agent run", () => {
     const cfg = loadConfig({ SLACK_BOT_TOKEN: "x", SLACK_SIGNING_SECRET: "y", LLM_MODEL: "m" });
     const stream = scripted([callTool(EXEC_TOOL, args as never), say("done")]);
     const runner = new PiAgentRunner({
+      jobOnly: [],
       gateway: createGateway(cfg),
       index,
       botName: "moose",

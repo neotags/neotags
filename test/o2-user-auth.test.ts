@@ -434,6 +434,7 @@ describe("run-scoped cleanup", () => {
     const cfg = loadConfig({ ...base, LLM_MODEL: "m" });
     const ended: string[] = [];
     const runner = new PiAgentRunner({
+      jobOnly: [],
       gateway: createGateway(cfg),
       index: new SkillPackIndex(),
       botName: "moose",

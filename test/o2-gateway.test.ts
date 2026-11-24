@@ -195,6 +195,7 @@ async function serve(runner: AgentRunner, o: Partial<RunManagerOptions> & { ping
 function piRunner(replies: Reply[], tools: AgentTool<any>[]) {
   const stream = scripted(replies);
   const runner = new PiAgentRunner({
+    jobOnly: [],
     gateway: createGateway(cfg),
     index,
     botName: "moose",

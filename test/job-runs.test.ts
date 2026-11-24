@@ -267,6 +267,15 @@ describe("skill pack visibility outside routines", () => {
     });
   }
 
+  it("never shows a step pack to a job run, even one whose packs name it", async () => {
+    const { runner, stream } = piRunner([callTool("read_skill", { name: "triage-steps" }), callTool(SUBMIT_TOOL, good)]);
+    await expect(runner.run(job({ packs: ["triage", "triage-steps"] }), ctxFor())).resolves.toMatchObject({ output: good });
+    const sent = transcriptText(stream.calls[1]!.context);
+    expect(sent).toContain('unknown skill pack "triage-steps"');
+    expect(sent).not.toContain("Run collect, then render.");
+    expect(sent).not.toContain("- triage-steps");
+  });
+
   it("counts a pack as routine-only unless an entry other than job lists it", () => {
     expect(jobOnlyPacks(cfgFor())).toEqual(["triage"]);
     const entries = (e: string) => jobOnlyPacks({ ...cfgFor(), agent: { ...cfgFor().agent, entries: JSON.parse(e) } });
