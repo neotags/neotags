@@ -8,7 +8,7 @@ import type { Gateway } from "../agent/models.js";
 import type { Effort } from "../config/index.js";
 import { answerLang } from "../lang.js";
 import { endChatSpan, startChatSpan, ToolSpans } from "../telemetry/spans.js";
-import { SkillPackIndex, skillPackTools } from "../tools/skillpacks.js";
+import { SkillPackIndex, skillPackTools, type SkillPack } from "../tools/skillpacks.js";
 import { compactToBudget } from "./budget.js";
 import { MAX_INVALID_SUBMITS, SUBMIT_TOOL, submitOutputTool } from "./output.js";
 import { finalPrompt, systemPrompt, userPrompt } from "./prompt.js";
@@ -21,6 +21,8 @@ export interface PiRunnerOptions {
   botName: string;
   /** Skill packs in the system prompt per entry (agent.entries). */
   entries: Partial<Record<RunSource, string[]>>;
+  /** Packs only routines use (in a routine's `packs`, in no `agent.entries`): hidden from every other entry's runs. */
+  jobOnly?: readonly string[];
   /**
    * More tools (MCP) next to read_skill / read_skill_ref; a function is read at the start of every run, with its
    * input and skill packs. What it registers with `onEnd` runs when the run ends, however it ends (run-scoped clients).
@@ -90,8 +92,14 @@ export class PiAgentRunner implements AgentRunner {
     const packs = input.packs ?? o.entries[input.source] ?? [];
     // A routine's packs bound what its run may read, not only what it may execute: its read_skill tools and system
     // prompt see those packs, plus reference-only packs (skillPacks.refs: reference files other packs cite, never
-    // instructions or execution). Other entries keep every loaded pack.
-    const index = input.source === "job" ? new SkillPackIndex(new Map(o.index.list().filter((p) => packs.includes(p.name) || p.body === undefined).map((p) => [p.name, p]))) : o.index;
+    // instructions or execution). Other entries see every loaded pack but step packs (the pipeline engine's, never a
+    // model's) and the packs only routines use (a classify run's instructions would mislead a question's run).
+    const jobOnly = new Set(o.jobOnly ?? []);
+    const visible =
+      input.source === "job"
+        ? (p: SkillPack) => packs.includes(p.name) || p.body === undefined
+        : (p: SkillPack) => !p.pipeline && !jobOnly.has(p.name);
+    const index = new SkillPackIndex(new Map(o.index.list().filter(visible).map((p) => [p.name, p])));
     // Registered here, run in the finally below. A tools function may connect (a run client listing its tools): if it
     // throws, what it registered is closed and the model lease released here.
     const onEnd: (() => unknown)[] = [];

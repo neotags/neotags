@@ -378,13 +378,20 @@ export function skillPackTools(index: SkillPackIndex): AgentTool<any>[] {
   const readSkill: AgentTool<typeof readSkillParams> = {
     name: "read_skill",
     label: "Read skill pack",
-    description: "Read the instructions (SKILL.md) of a skill pack listed in the system prompt.",
+    description: "Read the instructions (SKILL.md) of a skill pack listed in the system prompt. A pack with reference files only has none: read its files with read_skill_ref.",
     parameters: readSkillParams,
     executionMode: "parallel",
     execute: async (_id, { name }) => {
-      const body = index.skill(name);
-      if (body === undefined) throw new Error(`unknown skill pack "${name}"; available: ${withBody().join(", ") || "none"}`);
-      return text(body);
+      const pack = index.get(name);
+      if (pack && pack.body === undefined) {
+        throw new Error(`skill pack "${name}" has reference files only; use read_skill_ref("${name}", "<file>") with one of: ${[...pack.refs.keys()].join(", ")}`);
+      }
+      if (pack?.body === undefined) {
+        const refsOnly = index.list().filter((p) => p.body === undefined).map((p) => p.name);
+        const also = refsOnly.length ? `; reference files only (read_skill_ref): ${refsOnly.join(", ")}` : "";
+        throw new Error(`unknown skill pack "${name}"; available: ${withBody().join(", ") || "none"}${also}`);
+      }
+      return text(pack.body);
     },
   };
   const readRefParams = obj({
