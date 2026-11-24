@@ -399,6 +399,8 @@ export interface Secrets {
   o2AgentKey?: string;
   /** Bearer key of each jobsApi caller (from its keyFromEnv); set when jobsApi is enabled. */
   jobKeys?: Partial<Record<JobCaller, string>>;
+  /** The Outbox's Confluence account (CONFLUENCE_EMAIL, CONFLUENCE_WRITE_TOKEN, both set); routines' Confluence targets need it. */
+  confluence?: { email: string; token: string };
 }
 
 export type Config = z.infer<typeof fileSchema> & { secrets: Secrets };
@@ -469,6 +471,8 @@ export function loadConfig(
     telemetry: { ...raw.telemetry, ...telemetryEnv },
   });
   const o2AgentKey = file.o2Gateway.enabled ? required(env, "O2_AGENT_API_KEY") : undefined;
+  // Not required: without them the bot still starts (Slack, O2), and Confluence targets fail with an owner notice.
+  const confluence = env.CONFLUENCE_EMAIL && env.CONFLUENCE_WRITE_TOKEN ? { email: env.CONFLUENCE_EMAIL, token: env.CONFLUENCE_WRITE_TOKEN } : undefined;
   return {
     ...file,
     secrets: {
@@ -479,6 +483,7 @@ export function loadConfig(
       llmApiKey: env.LLM_API_KEY || undefined,
       o2AgentKey,
       jobKeys: file.jobsApi.enabled ? jobKeys(env, file.jobsApi.callers, o2AgentKey) : undefined,
+      ...(confluence && { confluence }),
     },
   };
 }

@@ -1,4 +1,5 @@
 import { hostname } from "node:os";
+import { webApi } from "@slack/bolt";
 import { pino } from "pino";
 import { S3ArtifactStore } from "./artifacts/index.js";
 import { createLlm, type LlmClient } from "./agent/llm.js";
@@ -8,9 +9,11 @@ import { routinePackIssues } from "./config/routines.js";
 import { createPortServer, type PortServer, type Route } from "./gateway/http.js";
 import { createInternalApi } from "./gateway/internal.js";
 import { createO2Gateway } from "./gateway/o2.js";
+import { ConfluenceApi, createOutbox, type SlackApi } from "./outbox/index.js";
 import { createRoutines, type Routines } from "./routines/period.js";
 import { routineTypes, stepPackIssues } from "./routines/types.js";
 import { createSlack } from "./gateway/slack.js";
+import { boltLogger } from "./gateway/socket.js";
 import { startMcp, type McpHub } from "./mcp/index.js";
 import { Router } from "./router/index.js";
 import { createJobRunner, createRunManager, entryVersions, loadConfiguredSkillPacks, type RunManager } from "./runs/index.js";
@@ -172,7 +175,17 @@ if (cfg.o2Gateway.enabled || cfg.jobsApi.enabled) {
       // The period records' store; config validation has made sure there is one when there are routines.
       const bucket = cfg.artifacts.s3?.bucket;
       if (bucket && Object.keys(cfg.routines).length > 0) {
+        const toConfluence = Object.entries(cfg.routines).filter(([, r]) => r.delivery.confluence).map(([n]) => n);
+        if (toConfluence.length && !cfg.secrets.confluence) log.warn({ routines: toConfluence }, "CONFLUENCE_EMAIL or CONFLUENCE_WRITE_TOKEN is not set: these routines' Confluence targets will fail");
+        const outbox = createOutbox({
+          cfg,
+          // Its own client: a bounded retry, since a post retried after Slack got it shows up twice.
+          slack: new webApi.WebClient(cfg.secrets.slackBotToken, { retryConfig: { retries: 2 }, timeout: 30_000, logger: boltLogger(log) }) as unknown as SlackApi,
+          ...(cfg.outbox.confluence && cfg.secrets.confluence && { confluence: new ConfluenceApi({ baseUrl: cfg.outbox.confluence.baseUrl, ...cfg.secrets.confluence }) }),
+          log,
+        });
         routines = createRoutines({
+          outbox,
           cfg,
           store: new S3ArtifactStore({ bucket }),
           // The engine's steps take the same jobsApi.concurrency slots as runJob, one step or run at a time.

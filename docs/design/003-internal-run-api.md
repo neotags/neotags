@@ -2,7 +2,7 @@
 
 Status: **v1** · Date: 2026-11-19
 
-Routines are tasks neotags runs on its own, on a schedule (later on events), from configuration: `routines.<name>` names the skill packs a routine's runs may use, and later its trigger, steps and delivery targets. A Kubernetes CronJob only triggers a routine; the work, the model calls and the delivery happen in neotags. This document covers the first piece: one agent run for a routine, with a structured result, through `runJob` in process and `POST /internal/v1/runs` over HTTP. §6 adds the routines' configuration, their CronJobs and the `fire` command; §7 the `fire` endpoint, period records, leases and the pipeline engine. Delivery (the Outbox) comes later and builds on them.
+Routines are tasks neotags runs on its own, on a schedule (later on events), from configuration: `routines.<name>` names the skill packs a routine's runs may use, and later its trigger, steps and delivery targets. A Kubernetes CronJob only triggers a routine; the work, the model calls and the delivery happen in neotags. This document covers the first piece: one agent run for a routine, with a structured result, through `runJob` in process and `POST /internal/v1/runs` over HTTP. §6 adds the routines' configuration, their CronJobs and the `fire` command; §7 the `fire` endpoint, period records, leases and the pipeline engine; §8 delivery (the Outbox) and the owner's failure notices.
 
 ## 1. Transport and authentication
 
@@ -122,8 +122,8 @@ Everything of a period is under `jobs/<routine>/<period>/` in the bucket (a dry 
 | `output.json` | The classify run's result, or an agent routine's output: the next period's memory. |
 | `state.json` | The last step's `state`: the next period's `previous.state`. |
 | `bundle/` | The delivery bundle split into files; `manifest.json`, written last, lists them. |
-| `delivered.json` | Per delivery target, its outcome; a target recorded as delivered is not delivered again. |
-| `delivery-pending.json` | Until the Outbox exists: the targets the period would have delivered to. |
+| `delivered.json` | Per delivery target (`slack:<channel>:<section>:<lang>`, `confluence:<space>:<parent>`): `ok`, `link`, `error` and the failed `step`, and the `detail` of each step done (§8), with the writer's lease token. A target recorded as delivered is not delivered again; one partly delivered goes on from its `detail`. |
+| `delivery-pending.json` | Only without an Outbox (tests, a bot without one): the targets the period would have delivered to. |
 
 The previous period is the latest formal (not `dryrun/`) period before this one whose `run.json` is `delivered`, zero targets included; listed with `ListObjectsV2` under `jobs/<routine>/` (never the bucket root, never `HeadBucket`: the policy allows neither).
 
@@ -157,3 +157,19 @@ An agent routine is one `runJob` with its `instructions`, `budget`, and `{routin
 ### Observability
 
 One log line at each step's start and end (`routine`, `period`, `step`, `durationMs`, outcome, `exitCode`, `stdoutBytes`); a failed step attempt's stderr, redacted, in `steps/<step>-<attempt>.stderr.txt`. The root span `routine <name>` (`gen_ai.agent.name = job`, `neotags.routine.name`, `.period`, `.state`, `.degraded`) has a child `routine.step <step>` per sandbox step (attempts, duration, exit code, stdout bytes, `truncated`) and the classify run's `invoke_agent job` (a link instead when the root span is not sampled).
+
+## 8. Delivery: the Outbox
+
+`src/outbox/` (`index.ts`: `createOutbox`, the span and log line per target, owner notices; `bundle.ts`; `slack.ts`; `confluence.ts`), behind the `Outbox` interface of `src/routines/outbox.ts`. The period decides which targets are due (`delivery`, and `notify: when_findings` with `notify: false` gives none), skips those `delivered.json` has as delivered, confirms the lease before each target, and records each outcome; the Outbox delivers one target, confirming the lease again before each step's side effect (`ctx.confirm`) and recording each step as soon as it is done (`ctx.progress`, a `delivered.json` write that is not `ok` yet). A target that fails keeps its steps' `detail`; the next attempt (a retry, or another holder) gets it as `ctx.previous` and only does what is left. After the loop the period is `delivered` when every due target is (zero included), else `failed`, and the next fire delivers only what is missing.
+
+**Bundle.** A pipeline's `bundle/manifest.json` (`{notify, sections: {<section>: {<lang>: {slack, attachments}}}, confluence?: {title, body, attachments}}`, paths under `bundle/`). An agent routine's `output.json` becomes one section, `all`, in any language: `summary` is the Slack text and `report` the attachment `report.md` (and the Confluence page). A section and language the configuration names but the bundle lacks fails that target.
+
+**Slack.** The bot token's `WebClient` (two retries: a post retried after Slack took it shows up twice). Step one, `chat.postMessage` (`unfurl_links`, `unfurl_media` off): the `mention` (not on a dry run), the section's text, and a footer with the period and run ids; its `ts` is recorded at once, then the `chat.getPermalink` link (a missing link does not fail the target). Step two, each attachment with `files.uploadV2` into the message's thread, each recorded. A retry with a recorded `ts` never posts again; it uploads the files not recorded. Needs `files:write`.
+
+**Confluence** (REST v2; v1 for attachments). Basic auth with `CONFLUENCE_EMAIL` and `CONFLUENCE_WRITE_TOKEN` (without them the bot starts, logs a warning, and Confluence targets fail). Steps: the parent (a folder or a page) must be in the configured `space` (its `spaceId` against the space key's id), else the target fails; with `monthlyFolder`, find or create the folder `YYYY-MM` (the period's month in the routine's time zone) under the parent; create the page (storage format) in it, full width: its title is recorded first, and a retry takes a page of that recorded title under the same parent as its own (an attempt that created it but could not record it); a title already taken in the space gets the time, then the period, appended; then each attachment (a new version when one of that name exists). A recorded page is never created again; a retry only uploads the missing attachments.
+
+**Allowlists and dry runs.** Before it sends, the Outbox checks again what startup checked: the channel is in `outbox.slack.allowedChannels`, the space in `outbox.confluence.allowedSpaces`. On a dry run every Slack target (and the owner's notice) is `outbox.slack.testChannel`, and the Confluence parent is `outbox.confluence.testParent` (in any allowed space), or Confluence is skipped (recorded as delivered with `detail.skipped`). `delivered.json` keys are always the configured targets.
+
+**Failure notices.** Each time a period's attempt fails (a step, the run, a delivery target, the deadline; the Job's retry and a `--force` are attempts of their own), and when it is delivered degraded (the classify run failed), one message in the routine's `owner.slack`: the routine, period, step, reason and run ids. A superseded or interrupted period sends none; a notice that cannot be sent is logged. When the bot itself is unreachable, only the CronJob's alerts tell.
+
+**Observability.** A span `deliver <sink>` per target under the period's root span (`neotags.delivery.target`, `.sink`, `.outcome`, `.steps` done in this attempt, `.failed_step`, `.link`), and one log line per target, `delivery target finished` (`routine`, `period`, `target`, `sink`, `outcome`, `steps`, `step`, `durationMs`, `link`, `reason`).

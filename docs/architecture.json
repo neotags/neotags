@@ -322,6 +322,34 @@
         200,
         64
       ]
+    },
+    {
+      "id": "outbox",
+      "type": "backend",
+      "label": "Outbox",
+      "sublabel": "Slack · Confluence · delivered.json",
+      "pos": [
+        1055,
+        130
+      ],
+      "size": [
+        200,
+        64
+      ]
+    },
+    {
+      "id": "confluence",
+      "type": "external",
+      "label": "Confluence",
+      "sublabel": "REST · page per period",
+      "pos": [
+        1340,
+        150
+      ],
+      "size": [
+        200,
+        64
+      ]
     }
   ],
   "boundaries": [
@@ -339,7 +367,8 @@
         "executor",
         "llmclient",
         "notifier",
-        "toolguard"
+        "toolguard",
+        "outbox"
       ]
     }
   ],
@@ -508,6 +537,30 @@
       "to": "executor",
       "label": "pipeline steps",
       "variant": "security"
+    },
+    {
+      "id": "d1",
+      "from": "internal",
+      "to": "outbox",
+      "label": "deliver · owner notices",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "d2",
+      "from": "outbox",
+      "to": "confluence",
+      "label": "page · attachments",
+      "fromSide": "right",
+      "toSide": "left"
+    },
+    {
+      "id": "d3",
+      "from": "outbox",
+      "to": "slack",
+      "label": "message · thread files",
+      "fromSide": "bottom",
+      "toSide": "top"
     }
   ],
   "cards": [
@@ -546,7 +599,8 @@
         "MCP client + Tool Guard; executor sidecar (bubblewrap) behind the sandbox guard",
         "Internal run API for routines (:3001 /internal/v1/runs): Bearer key per caller, the routine's packs only, structured output through submit_output, own concurrency slots, job model chain",
         "Routines configuration, checked in full at startup; one CronJob per routine running fire (submit a period, poll to its outcome); a routine's runs get only its MCP servers",
-        "Routine periods: fire answers 202 and runs the period in the background under an S3 lease (renewed, taken over once expired); run.json per step; pipeline engine runs a routine type's steps in the sandbox around one classify run"
+        "Routine periods: fire answers 202 and runs the period in the background under an S3 lease (renewed, taken over once expired); run.json per step; pipeline engine runs a routine type's steps in the sandbox around one classify run",
+        "Outbox: each Slack target as a message then its files in the thread, Confluence page in a month folder with attachments; every step recorded in delivered.json so a retry only does what is left; owner failure notices"
       ]
     },
     {
@@ -555,7 +609,7 @@
       "items": [
         "Live verification: Slack, Onyx and the O2 assistant end to end",
         "Slack answers and alert triage on the Agent runtime",
-        "Routines: the Outbox (Slack, Confluence delivery); alert webhook, GitHub/GitLab bot"
+        "Routines on alert webhooks; GitHub/GitLab bot"
       ]
     }
   ]
